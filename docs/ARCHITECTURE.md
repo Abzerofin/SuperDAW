@@ -1,0 +1,119 @@
+# SuperDAW Architecture
+
+SuperDAW is a collaboration-first professional DAW. This document describes
+the systems that exist today and the architectural rules that keep future
+milestones (audio engine, file bay, real-time collaboration) cleanly
+attachable.
+
+## Layering
+
+```
+src/core      Pure domain logic. No React, no DOM, no Electron imports.
+src/renderer  React UI. Depends on core. Must run in a plain browser
+              (Electron APIs are optional, accessed via window.superdaw?).
+src/preload   Minimal contextBridge between renderer and main.
+src/main      Electron shell. Window management only.
+```
+
+Planned peer layers (not yet present): `src/audio` (engine) and `src/net`
+(collaboration transport). Both will depend on `core` and nothing else in
+the app; the UI talks to them through narrow interfaces. Networking stays
+independent from UI; audio stays independent from collaboration.
+
+## The operation pipeline (the load-bearing decision)
+
+**Every mutation of project state is a serializable `Operation`** dispatched
+through a single `ProjectStore` (`src/core/state/store.ts`). Nothing in the
+app edits project state any other way.
+
+```
+UI action ──▶ Operation ──▶ ProjectStore.dispatch
+                               │
+                               ├─ apply(state, op)      pure reducer → new state
+                               ├─ invert(state, op)     inverse op → undo stack
+                               ├─ describe(state, op)   text → activity feed
+                               └─ onOperation listeners → (future) network broadcast
+```
+
+Why this architecture:
+
+- **Collaboration by construction.** Real-time sync is "send the op envelope
+  to peers; peers dispatch it with source `'remote'` through the exact same
+  reducer." Sync is event-based and minimal-bandwidth by design — entire
+  project files are never transmitted.
+- **Undo/redo for free.** `invert` derives the inverse op from pre-state;
+  undo is just dispatching that op. Remote ops are deliberately not undoable
+  locally (per-user undo semantics).
+- **Activity feed as a byproduct.** The feed observes the op stream; there is
+  no separate logging logic to keep in sync.
+- **Convergence over strictness.** The reducer drops ops whose targets no
+  longer exist (a peer may edit a clip another peer just deleted) instead of
+  throwing, so all peers converge.
+
+### Rules for operations
+
+1. Operations are plain JSON-serializable data.
+2. `apply` is pure and never mutates; unchanged state is returned by
+   reference identity (used to detect no-ops).
+3. Every op must have a correct `invert` — enforced by round-trip tests in
+   `src/core/ops/__tests__/ops.test.ts`. Add a round-trip test with every
+   new op type.
+4. Ids (`newId`) are UUID-based so any peer can create entities without
+   coordination.
+5. One user gesture = one operation. A clip drag renders ephemeral previews
+   locally and dispatches a single `clip/move` on release. Intermediate
+   motion is presence data (future live-cursor channel), never document ops.
+
+## Document state vs. ephemeral state
+
+| | Lives in | Synchronized? |
+|---|---|---|
+| Tracks, clips, tempo, names | `ProjectStore` (core) | Yes — as ops |
+| Selection, drag previews, scroll, zoom | renderer stores/components | No (presence channel later) |
+| Playhead/transport | `src/renderer/src/state/transport.ts` | No (presence channel later) |
+
+Keeping ephemeral state out of the document is what keeps the op stream lean
+and the network invisible.
+
+## Time
+
+Musical time is integer ticks at `PPQ = 960` (`src/core/model/timebase.ts`).
+Integer ticks make concurrent edits deterministic across peers and avoid
+floating-point drift. Audio-time mapping (tempo maps, seconds) comes with the
+audio engine milestone.
+
+## UI conventions
+
+- Dark, dense, professional. All colors come from CSS variables in
+  `styles.css`.
+- Timeline is a CSS grid with sticky ruler/headers and absolutely positioned
+  clip + playhead overlay layers; geometry constants in
+  `components/timeline/geometry.ts`.
+- No modal dialogs, no notifications, no loading screens unless a major
+  event genuinely requires one.
+
+## Development
+
+```
+npm run dev        # Electron app with HMR
+npm run dev:web    # renderer only, in a browser (UI development/testing)
+npm run typecheck  # strict TS across both tsconfigs
+npm run test       # core op-system tests
+npm run build      # production build to out/
+```
+
+Node is a portable install at
+`%LOCALAPPDATA%\nodejs-portable\node-v24.19.0-win-x64` (not on PATH by
+default).
+
+## Milestone history / roadmap
+
+1. ✅ **Foundation** — op pipeline, undo/redo, activity feed, timeline
+   editing (tracks, clips, drag/resize), transport & playhead.
+2. Audio engine (Web Audio + AudioWorklet), clip audition, metering.
+3. File Bay (folders, audio, MIDI; drag-and-drop to tracks) + project file
+   persistence.
+4. Collaboration: host-as-server session, join codes, op sync, presence
+   (live cursors, pings), reconnection.
+5. Chat + comments.
+6. Mixer, automation.

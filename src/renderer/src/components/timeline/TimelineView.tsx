@@ -1,0 +1,320 @@
+import { useEffect, useLayoutEffect, useReducer, useRef, useState } from 'react'
+import type { ClipId, TrackKind } from '@core/model/types'
+import { PPQ, barsToTicks, snapTicks, ticksPerBar, ticksPerBeat } from '@core/model/timebase'
+import { newId } from '@core/model/ids'
+import { projectStore } from '@/state/projectStore'
+import { useProjectState } from '@/state/hooks'
+import { selection, useSelectedClipId } from '@/state/selection'
+import { transport } from '@/state/transport'
+import { nextTrackColor } from '@/lib/colors'
+import { HEADER_W, RULER_H, LANE_H, MIN_PX_PER_BEAT, MAX_PX_PER_BEAT } from './geometry'
+import { TrackHeader } from './TrackHeader'
+import { ClipView } from './ClipView'
+
+interface DragState {
+  mode: 'move' | 'resize-l' | 'resize-r'
+  clipId: ClipId
+  originX: number
+  originY: number
+  origStart: number
+  origDuration: number
+  origTrackIndex: number
+  start: number
+  duration: number
+  trackIndex: number
+  moved: boolean
+}
+
+export function TimelineView(): React.JSX.Element {
+  const state = useProjectState()
+  const selectedClipId = useSelectedClipId()
+  const [pxPerBeat, setPxPerBeat] = useState(32)
+  const [drag, setDrag] = useState<DragState | null>(null)
+  const scrollRef = useRef<HTMLDivElement>(null)
+  const pendingScrollX = useRef<number | null>(null)
+
+  const sig = state.timeSignature
+  const pxPerTick = pxPerBeat / PPQ
+  const barTicks = ticksPerBar(sig)
+  const beatTicks = ticksPerBeat(sig)
+  const gridTicks = pxPerBeat >= 16 ? beatTicks : barTicks
+  const pxPerBar = barTicks * pxPerTick
+
+  const tracks = state.trackOrder
+    .map((id) => state.tracks[id])
+    .filter((t) => t !== undefined)
+  const trackCount = tracks.length
+
+  // Content extends past the last clip so there is always room to work.
+  const lastClipEnd = Object.values(state.clips).reduce(
+    (max, c) => Math.max(max, c.start + c.duration),
+    0
+  )
+  const contentTicks = Math.max(lastClipEnd + barsToTicks(16, sig), barsToTicks(64, sig))
+  const contentW = Math.ceil(contentTicks * pxPerTick)
+
+  // Ctrl+wheel zoom, anchored at the cursor. Native listener because React's
+  // wheel events are passive and can't preventDefault the browser page zoom.
+  useEffect(() => {
+    const el = scrollRef.current
+    if (!el) return
+    const onWheel = (e: WheelEvent): void => {
+      if (!e.ctrlKey) return
+      e.preventDefault()
+      setPxPerBeat((prev) => {
+        const next = Math.min(
+          MAX_PX_PER_BEAT,
+          Math.max(MIN_PX_PER_BEAT, prev * (e.deltaY < 0 ? 1.2 : 1 / 1.2))
+        )
+        if (next !== prev) {
+          const cursorX = e.clientX - el.getBoundingClientRect().left - HEADER_W
+          const beatsAtCursor = (el.scrollLeft + cursorX) / prev
+          pendingScrollX.current = beatsAtCursor * next - cursorX
+        }
+        return next
+      })
+    }
+    el.addEventListener('wheel', onWheel, { passive: false })
+    return () => el.removeEventListener('wheel', onWheel)
+  }, [])
+
+  useLayoutEffect(() => {
+    if (pendingScrollX.current !== null && scrollRef.current) {
+      scrollRef.current.scrollLeft = Math.max(0, pendingScrollX.current)
+      pendingScrollX.current = null
+    }
+  }, [pxPerBeat])
+
+  const beginDrag = (
+    e: React.PointerEvent,
+    clipId: ClipId,
+    mode: DragState['mode']
+  ): void => {
+    if (e.button !== 0) return
+    e.stopPropagation()
+    const clip = projectStore.state.clips[clipId]
+    if (!clip) return
+    const trackIndex = state.trackOrder.indexOf(clip.trackId)
+    selection.select(clipId)
+    ;(e.currentTarget as HTMLElement).setPointerCapture(e.pointerId)
+    setDrag({
+      mode,
+      clipId,
+      originX: e.clientX,
+      originY: e.clientY,
+      origStart: clip.start,
+      origDuration: clip.duration,
+      origTrackIndex: trackIndex,
+      start: clip.start,
+      duration: clip.duration,
+      trackIndex,
+      moved: false
+    })
+  }
+
+  const onPointerMove = (e: React.PointerEvent): void => {
+    if (!drag) return
+    const dxTicks = (e.clientX - drag.originX) / pxPerTick
+    setDrag((prev) => {
+      if (!prev) return prev
+      let { start, duration, trackIndex } = prev
+      if (prev.mode === 'move') {
+        start = Math.max(0, snapTicks(prev.origStart + dxTicks, gridTicks))
+        const laneDelta = Math.round((e.clientY - prev.originY) / LANE_H)
+        trackIndex = Math.min(trackCount - 1, Math.max(0, prev.origTrackIndex + laneDelta))
+      } else if (prev.mode === 'resize-l') {
+        const maxStart = prev.origStart + prev.origDuration - gridTicks
+        start = Math.min(maxStart, Math.max(0, snapTicks(prev.origStart + dxTicks, gridTicks)))
+        duration = prev.origStart + prev.origDuration - start
+      } else {
+        duration = Math.max(gridTicks, snapTicks(prev.origDuration + dxTicks, gridTicks))
+      }
+      const moved =
+        start !== prev.origStart ||
+        duration !== prev.origDuration ||
+        trackIndex !== prev.origTrackIndex
+      return { ...prev, start, duration, trackIndex, moved }
+    })
+  }
+
+  const onPointerUp = (): void => {
+    if (!drag) return
+    // A drag is many ephemeral previews but exactly ONE operation, dispatched
+    // on release. Keeps undo atomic and (later) the network op stream lean —
+    // intermediate motion becomes presence data, not document ops.
+    if (drag.moved) {
+      if (drag.mode === 'move') {
+        const targetTrack = tracks[drag.trackIndex]
+        if (targetTrack) {
+          projectStore.dispatch({
+            type: 'clip/move',
+            clipId: drag.clipId,
+            trackId: targetTrack.id,
+            start: drag.start
+          })
+        }
+      } else {
+        projectStore.dispatch({
+          type: 'clip/resize',
+          clipId: drag.clipId,
+          start: drag.start,
+          duration: drag.duration
+        })
+      }
+    }
+    setDrag(null)
+  }
+
+  const onLaneDoubleClick = (e: React.MouseEvent, trackIndex: number): void => {
+    const track = tracks[trackIndex]
+    if (!track) return
+    const laneRect = (e.currentTarget as HTMLElement).getBoundingClientRect()
+    const ticks = (e.clientX - laneRect.left) / pxPerTick
+    const start = Math.floor(ticks / gridTicks) * gridTicks
+    const clip = {
+      id: newId('clp'),
+      trackId: track.id,
+      name: track.kind === 'audio' ? 'Audio Clip' : 'MIDI Clip',
+      start,
+      duration: barTicks,
+      color: null
+    }
+    projectStore.dispatch({ type: 'clip/create', clip })
+    selection.select(clip.id)
+  }
+
+  const onRulerPointerDown = (e: React.PointerEvent): void => {
+    const rect = (e.currentTarget as HTMLElement).getBoundingClientRect()
+    transport.setPosition((e.clientX - rect.left) / pxPerTick)
+  }
+
+  const addTrack = (kind: TrackKind): void => {
+    const count = projectStore.state.trackOrder.length
+    projectStore.dispatch({
+      type: 'track/create',
+      track: {
+        id: newId('trk'),
+        kind,
+        name: `${kind === 'audio' ? 'Audio' : 'MIDI'} ${count + 1}`,
+        color: nextTrackColor(count),
+        muted: false,
+        soloed: false
+      },
+      index: count,
+      clips: []
+    })
+  }
+
+  // Bar-number labels, thinned so they stay >= ~64px apart.
+  const labelStepBars = Math.max(1, Math.pow(2, Math.ceil(Math.log2(64 / Math.max(1, pxPerBar)))))
+  const barLabels: number[] = []
+  for (let bar = 0; bar * barTicks < contentTicks; bar += labelStepBars) barLabels.push(bar)
+
+  const laneBackground = {
+    backgroundImage:
+      pxPerBeat >= 10
+        ? `repeating-linear-gradient(to right, var(--grid-bar) 0 1px, transparent 1px ${pxPerBar}px),` +
+          `repeating-linear-gradient(to right, var(--grid-beat) 0 1px, transparent 1px ${pxPerBeat}px)`
+        : `repeating-linear-gradient(to right, var(--grid-bar) 0 1px, transparent 1px ${pxPerBar}px)`
+  }
+
+  const anySoloed = tracks.some((t) => t.soloed)
+
+  return (
+    <div className="timeline" ref={scrollRef}>
+      <div
+        className="timeline-grid"
+        style={{
+          gridTemplateColumns: `${HEADER_W}px ${contentW}px`,
+          gridTemplateRows: `${RULER_H}px repeat(${Math.max(1, trackCount)}, ${LANE_H}px)`
+        }}
+        onPointerMove={onPointerMove}
+        onPointerUp={onPointerUp}
+      >
+        <div className="timeline-corner" style={{ gridRow: 1, gridColumn: 1 }}>
+          <button className="corner-btn" onClick={() => addTrack('audio')}>
+            + Audio
+          </button>
+          <button className="corner-btn" onClick={() => addTrack('midi')}>
+            + MIDI
+          </button>
+        </div>
+
+        <div
+          className="timeline-ruler"
+          style={{ gridRow: 1, gridColumn: 2 }}
+          onPointerDown={onRulerPointerDown}
+        >
+          {barLabels.map((bar) => (
+            <span key={bar} className="ruler-label mono" style={{ left: bar * pxPerBar + 4 }}>
+              {bar + 1}
+            </span>
+          ))}
+        </div>
+
+        {tracks.map((track, i) => (
+          <div key={track.id} style={{ gridRow: i + 2, gridColumn: 1 }} className="header-cell">
+            <TrackHeader track={track} />
+          </div>
+        ))}
+
+        {tracks.map((track, i) => (
+          <div
+            key={track.id}
+            className={`lane ${track.muted || (anySoloed && !track.soloed) ? 'lane-muted' : ''}`}
+            style={{ gridRow: i + 2, gridColumn: 2, ...laneBackground }}
+            onPointerDown={() => selection.select(null)}
+            onDoubleClick={(e) => onLaneDoubleClick(e, i)}
+          />
+        ))}
+
+        {trackCount > 0 && (
+          <div
+            className="clip-layer"
+            style={{ gridRow: `2 / ${trackCount + 2}`, gridColumn: 2 }}
+          >
+            {Object.values(state.clips).map((clip) => {
+              const trackIndex = state.trackOrder.indexOf(clip.trackId)
+              const track = state.tracks[clip.trackId]
+              if (trackIndex === -1 || !track) return null
+              return (
+                <ClipView
+                  key={clip.id}
+                  clip={clip}
+                  trackColor={track.color}
+                  trackIndex={trackIndex}
+                  preview={
+                    drag && drag.clipId === clip.id
+                      ? { start: drag.start, duration: drag.duration, trackIndex: drag.trackIndex }
+                      : null
+                  }
+                  selected={clip.id === selectedClipId}
+                  dimmed={track.muted || (anySoloed && !track.soloed)}
+                  pxPerTick={pxPerTick}
+                  onPointerDown={(e, mode) => beginDrag(e, clip.id, mode)}
+                />
+              )
+            })}
+          </div>
+        )}
+
+        {trackCount > 0 && (
+          <div className="playhead-layer" style={{ gridRow: `2 / ${trackCount + 2}`, gridColumn: 2 }}>
+            <Playhead pxPerTick={pxPerTick} />
+          </div>
+        )}
+      </div>
+    </div>
+  )
+}
+
+function Playhead({ pxPerTick }: { pxPerTick: number }): React.JSX.Element {
+  const [, force] = useReducer((c: number) => c + 1, 0)
+  useEffect(() => transport.subscribe(force), [])
+  return (
+    <div
+      className="playhead"
+      style={{ transform: `translateX(${transport.positionTicks() * pxPerTick}px)` }}
+    />
+  )
+}
