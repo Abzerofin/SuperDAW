@@ -13,7 +13,9 @@ function createWindow(): void {
     webPreferences: {
       preload: join(__dirname, '../preload/index.js'),
       contextIsolation: true,
-      sandbox: true
+      sandbox: true,
+      // A DAW's AudioContext must never be gated on a user gesture.
+      autoplayPolicy: 'no-user-gesture-required'
     }
   })
 

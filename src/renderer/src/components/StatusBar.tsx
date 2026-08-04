@@ -12,7 +12,7 @@ export function StatusBar(): React.JSX.Element {
         <span className="statusbar-dim">Local project</span>
       </div>
       <div className="statusbar-hint statusbar-dim">
-        Double-click a lane to add a clip · Drag clips to move · Ctrl+Wheel to zoom
+        Drop audio files on a track · Double-click a lane to add a clip · Ctrl+Wheel to zoom
       </div>
       <div className="statusbar-right statusbar-dim mono">
         {trackCount} tracks · {clipCount} clips

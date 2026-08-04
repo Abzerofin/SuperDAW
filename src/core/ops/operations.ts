@@ -19,7 +19,7 @@ export type Operation =
   | { type: 'clip/create'; clip: Clip }
   | { type: 'clip/delete'; clipId: ClipId }
   | { type: 'clip/move'; clipId: ClipId; trackId: TrackId; start: number }
-  | { type: 'clip/resize'; clipId: ClipId; start: number; duration: number }
+  | { type: 'clip/resize'; clipId: ClipId; start: number; duration: number; offset: number }
   | { type: 'clip/rename'; clipId: ClipId; name: string }
 
 /** Wire/log format: an operation plus provenance metadata. */

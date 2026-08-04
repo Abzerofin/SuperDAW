@@ -7,6 +7,7 @@ import { useProjectState } from '@/state/hooks'
 import { selection, useSelectedClipId } from '@/state/selection'
 import { transport } from '@/state/transport'
 import { nextTrackColor } from '@/lib/colors'
+import { importAudioFiles } from '@/lib/importAudio'
 import { HEADER_W, RULER_H, LANE_H, MIN_PX_PER_BEAT, MAX_PX_PER_BEAT } from './geometry'
 import { TrackHeader } from './TrackHeader'
 import { ClipView } from './ClipView'
@@ -14,13 +15,16 @@ import { ClipView } from './ClipView'
 interface DragState {
   mode: 'move' | 'resize-l' | 'resize-r'
   clipId: ClipId
+  hasAsset: boolean
   originX: number
   originY: number
   origStart: number
   origDuration: number
+  origOffset: number
   origTrackIndex: number
   start: number
   duration: number
+  offset: number
   trackIndex: number
   moved: boolean
 }
@@ -100,13 +104,16 @@ export function TimelineView(): React.JSX.Element {
     setDrag({
       mode,
       clipId,
+      hasAsset: clip.assetId !== null,
       originX: e.clientX,
       originY: e.clientY,
       origStart: clip.start,
       origDuration: clip.duration,
+      origOffset: clip.offset,
       origTrackIndex: trackIndex,
       start: clip.start,
       duration: clip.duration,
+      offset: clip.offset,
       trackIndex,
       moved: false
     })
@@ -117,15 +124,21 @@ export function TimelineView(): React.JSX.Element {
     const dxTicks = (e.clientX - drag.originX) / pxPerTick
     setDrag((prev) => {
       if (!prev) return prev
-      let { start, duration, trackIndex } = prev
+      let { start, duration, offset, trackIndex } = prev
       if (prev.mode === 'move') {
         start = Math.max(0, snapTicks(prev.origStart + dxTicks, gridTicks))
         const laneDelta = Math.round((e.clientY - prev.originY) / LANE_H)
         trackIndex = Math.min(trackCount - 1, Math.max(0, prev.origTrackIndex + laneDelta))
       } else if (prev.mode === 'resize-l') {
         const maxStart = prev.origStart + prev.origDuration - gridTicks
-        start = Math.min(maxStart, Math.max(0, snapTicks(prev.origStart + dxTicks, gridTicks)))
+        // Audio clips can't extend left past the start of their source material.
+        const minStart = prev.hasAsset ? prev.origStart - prev.origOffset : 0
+        start = Math.min(
+          maxStart,
+          Math.max(minStart, Math.max(0, snapTicks(prev.origStart + dxTicks, gridTicks)))
+        )
         duration = prev.origStart + prev.origDuration - start
+        offset = prev.hasAsset ? prev.origOffset + (start - prev.origStart) : 0
       } else {
         duration = Math.max(gridTicks, snapTicks(prev.origDuration + dxTicks, gridTicks))
       }
@@ -133,7 +146,7 @@ export function TimelineView(): React.JSX.Element {
         start !== prev.origStart ||
         duration !== prev.origDuration ||
         trackIndex !== prev.origTrackIndex
-      return { ...prev, start, duration, trackIndex, moved }
+      return { ...prev, start, duration, offset, trackIndex, moved }
     })
   }
 
@@ -158,7 +171,8 @@ export function TimelineView(): React.JSX.Element {
           type: 'clip/resize',
           clipId: drag.clipId,
           start: drag.start,
-          duration: drag.duration
+          duration: drag.duration,
+          offset: drag.offset
         })
       }
     }
@@ -177,10 +191,30 @@ export function TimelineView(): React.JSX.Element {
       name: track.kind === 'audio' ? 'Audio Clip' : 'MIDI Clip',
       start,
       duration: barTicks,
+      assetId: null,
+      offset: 0,
       color: null
     }
     projectStore.dispatch({ type: 'clip/create', clip })
     selection.select(clip.id)
+  }
+
+  const onLaneDragOver = (e: React.DragEvent, trackIndex: number): void => {
+    const track = tracks[trackIndex]
+    if (track?.kind === 'audio' && e.dataTransfer.types.includes('Files')) {
+      e.preventDefault()
+      e.dataTransfer.dropEffect = 'copy'
+    }
+  }
+
+  const onLaneDrop = (e: React.DragEvent, trackIndex: number): void => {
+    const track = tracks[trackIndex]
+    if (track?.kind !== 'audio') return
+    e.preventDefault()
+    const laneRect = (e.currentTarget as HTMLElement).getBoundingClientRect()
+    const ticks = (e.clientX - laneRect.left) / pxPerTick
+    const start = Math.max(0, Math.floor(ticks / gridTicks) * gridTicks)
+    void importAudioFiles(Array.from(e.dataTransfer.files), track, start)
   }
 
   const onRulerPointerDown = (e: React.PointerEvent): void => {
@@ -265,6 +299,8 @@ export function TimelineView(): React.JSX.Element {
             style={{ gridRow: i + 2, gridColumn: 2, ...laneBackground }}
             onPointerDown={() => selection.select(null)}
             onDoubleClick={(e) => onLaneDoubleClick(e, i)}
+            onDragOver={(e) => onLaneDragOver(e, i)}
+            onDrop={(e) => onLaneDrop(e, i)}
           />
         ))}
 
@@ -285,12 +321,18 @@ export function TimelineView(): React.JSX.Element {
                   trackIndex={trackIndex}
                   preview={
                     drag && drag.clipId === clip.id
-                      ? { start: drag.start, duration: drag.duration, trackIndex: drag.trackIndex }
+                      ? {
+                          start: drag.start,
+                          duration: drag.duration,
+                          offset: drag.offset,
+                          trackIndex: drag.trackIndex
+                        }
                       : null
                   }
                   selected={clip.id === selectedClipId}
                   dimmed={track.muted || (anySoloed && !track.soloed)}
                   pxPerTick={pxPerTick}
+                  tempo={state.tempo}
                   onPointerDown={(e, mode) => beginDrag(e, clip.id, mode)}
                 />
               )

@@ -80,7 +80,8 @@ export function invert(state: ProjectState, op: Operation): Operation | null {
         type: 'clip/resize',
         clipId: op.clipId,
         start: clip.start,
-        duration: clip.duration
+        duration: clip.duration,
+        offset: clip.offset
       }
     }
 

@@ -75,6 +75,35 @@ Why this architecture:
 Keeping ephemeral state out of the document is what keeps the op stream lean
 and the network invisible.
 
+## Audio engine (`src/audio`)
+
+Routing: clip sources → per-track `GainNode` → master `GainNode` → analyser
+→ output. The engine (`engine.ts`) is independent of React and of the
+future collaboration layer; it consumes the project store, transport, and
+asset store through narrow structural interfaces.
+
+- **Clock authority.** Once an `AudioContext` exists, the engine installs it
+  as the transport's `TimeSource`, so the playhead and scheduled audio share
+  one clock and cannot drift.
+- **Scheduling** (`scheduling.ts`) is pure math — (state, anchor) → list of
+  `(when, offset, duration)` — and fully unit-tested. All upcoming clip
+  sources are (re)scheduled in one pass on play/seek/audible-edit; the
+  reference-equality checks on `state.clips`/`state.tempo` guarantee that
+  unrelated ops (e.g. renames) never interrupt playback. The metronome uses
+  a small lookahead loop because it is unbounded.
+- **Mute/solo are gain-level**, not schedule-level, so toggling mid-playback
+  is seamless (smoothed with `setTargetAtTime` to avoid clicks).
+- **Assets** (`assets.ts`) live outside project state; the document
+  references them by id only. This split is what later allows instant state
+  sync while binaries transfer in the background. Waveform peaks are
+  computed once per asset at 120 buckets/second.
+- AudioWorklet is deliberately deferred: buffer sources + gain graphs are
+  the right primitives for clip playback. Worklets arrive with custom DSP
+  (mixing/metering) needs.
+
+Known limitation (accepted until tempo maps/warping): clip `offset` is in
+ticks, so a tempo change rescales where trimmed audio starts in its source.
+
 ## Time
 
 Musical time is integer ticks at `PPQ = 960` (`src/core/model/timebase.ts`).
@@ -110,7 +139,9 @@ default).
 
 1. ✅ **Foundation** — op pipeline, undo/redo, activity feed, timeline
    editing (tracks, clips, drag/resize), transport & playhead.
-2. Audio engine (Web Audio + AudioWorklet), clip audition, metering.
+2. ✅ **Audio engine** — Web Audio playback on the audio clock, per-track
+   routing with seamless mute/solo, drag-drop audio import, waveforms,
+   metronome, master meter.
 3. File Bay (folders, audio, MIDI; drag-and-drop to tracks) + project file
    persistence.
 4. Collaboration: host-as-server session, join codes, op sync, presence

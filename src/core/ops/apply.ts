@@ -96,7 +96,8 @@ export function apply(state: ProjectState, op: Operation): ProjectState {
       return updateClip(state, op.clipId, (c) => ({
         ...c,
         start: Math.max(0, op.start),
-        duration: Math.max(1, op.duration)
+        duration: Math.max(1, op.duration),
+        offset: Math.max(0, op.offset)
       }))
 
     case 'clip/rename':

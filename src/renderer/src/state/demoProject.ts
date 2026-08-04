@@ -34,6 +34,8 @@ export function createDemoProject(): ProjectState {
       name,
       start: bars(startBars),
       duration: bars(lengthBars),
+      assetId: null,
+      offset: 0,
       color: null
     })
   }

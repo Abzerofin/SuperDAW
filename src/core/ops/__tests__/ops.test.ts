@@ -11,7 +11,7 @@ function track(id: string, name = id): Track {
 }
 
 function clip(id: string, trackId: string, start = 0, duration = 960): Clip {
-  return { id, trackId, name: id, start, duration, color: null }
+  return { id, trackId, name: id, start, duration, assetId: null, offset: 0, color: null }
 }
 
 function baseState(): ProjectState {
@@ -47,7 +47,7 @@ suite('apply', () => {
   test('never mutates the input state', () => {
     const s = baseState()
     const frozen = JSON.stringify(s)
-    apply(s, { type: 'clip/resize', clipId: 'c1', start: 480, duration: 480 })
+    apply(s, { type: 'clip/resize', clipId: 'c1', start: 480, duration: 480, offset: 240 })
     apply(s, { type: 'track/delete', trackId: 't1' })
     expect(JSON.stringify(s)).toBe(frozen)
   })
@@ -66,7 +66,7 @@ suite('invert', () => {
     { type: 'clip/create', clip: clip('c9', 't2', 480) },
     { type: 'clip/delete', clipId: 'c1' },
     { type: 'clip/move', clipId: 'c1', trackId: 't2', start: 4800 },
-    { type: 'clip/resize', clipId: 'c2', start: 960, duration: 1920 },
+    { type: 'clip/resize', clipId: 'c2', start: 960, duration: 1920, offset: 480 },
     { type: 'clip/rename', clipId: 'c2', name: 'Renamed Clip' }
   ]
 

@@ -16,8 +16,9 @@
     "useDefineForClassFields": true,
     "paths": {
       "@core/*": ["./src/core/*"],
+      "@audio/*": ["./src/audio/*"],
       "@/*": ["./src/renderer/src/*"]
     }
   },
-  "include": ["src/core", "src/renderer/src"]
+  "include": ["src/core", "src/audio", "src/renderer/src"]
 }

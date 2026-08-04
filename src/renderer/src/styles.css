@@ -165,6 +165,11 @@ input {
   color: var(--text-dim);
 }
 
+.meter {
+  border-radius: 2px;
+  align-self: center;
+}
+
 /* ---------- Timeline ---------- */
 .timeline {
   flex: 1;
@@ -373,6 +378,7 @@ input {
 }
 
 .clip-name {
+  position: relative;
   font-size: 11px;
   font-weight: 600;
   padding: 4px 6px;
@@ -380,6 +386,13 @@ input {
   overflow: hidden;
   text-overflow: ellipsis;
   pointer-events: none;
+}
+
+.clip-wave {
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+  opacity: 0.9;
 }
 
 .clip-handle {

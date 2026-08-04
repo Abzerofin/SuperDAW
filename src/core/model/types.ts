@@ -12,6 +12,14 @@ export interface Clip {
   readonly start: number
   /** Length in ticks. */
   readonly duration: number
+  /**
+   * Audio asset this clip plays, or null (empty/MIDI clip). Asset binary
+   * data is a separate system from project state (see ARCHITECTURE.md);
+   * the document only ever references assets by id.
+   */
+  readonly assetId: string | null
+  /** Offset into the source material, in ticks (grows when trimming the left edge). */
+  readonly offset: number
   /** null = inherit the track color. */
   readonly color: string | null
 }
