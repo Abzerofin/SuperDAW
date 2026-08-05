@@ -59,7 +59,10 @@ export function ClipView({
       {asset?.peaks && (
         <Waveform asset={asset} width={width} height={height} offset={offset} duration={duration} tempo={tempo} />
       )}
-      <div className="clip-name">{clip.name}</div>
+      <div className="clip-name">
+        {clip.name}
+        {clip.assetId !== null && !asset && <span className="clip-downloading"> · downloading…</span>}
+      </div>
       <div className="clip-handle clip-handle-l" onPointerDown={(e) => onPointerDown(e, 'resize-l')} />
       <div className="clip-handle clip-handle-r" onPointerDown={(e) => onPointerDown(e, 'resize-r')} />
     </div>

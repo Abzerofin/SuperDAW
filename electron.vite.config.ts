@@ -3,7 +3,8 @@ import react from '@vitejs/plugin-react'
 import { resolve } from 'node:path'
 
 export default defineConfig({
-  main: {},
+  // ws stays a runtime require: bundling it trips on its optional native deps.
+  main: { build: { rollupOptions: { external: ['ws'] } } },
   preload: {},
   renderer: {
     resolve: {

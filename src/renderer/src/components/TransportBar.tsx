@@ -4,6 +4,8 @@ import { useProjectState, useCanUndo, useCanRedo } from '@/state/hooks'
 import { projectStore } from '@/state/projectStore'
 import { transport } from '@/state/transport'
 import { audioEngine } from '@/state/audioInstance'
+import { useCollab, USER_COLORS } from '@/state/collab'
+import { CollabPanel } from './CollabPanel'
 
 interface Props {
   activityOpen: boolean
@@ -45,6 +47,7 @@ export function TransportBar({
       </div>
 
       <div className="transport-right">
+        <CollabButton />
         <button className="tbtn" title="Undo (Ctrl+Z)" disabled={!canUndo} onClick={() => projectStore.undo()}>
           ↶
         </button>
@@ -81,6 +84,38 @@ function PlayButton(): React.JSX.Element {
     >
       {transport.isPlaying ? '■' : '▶'}
     </button>
+  )
+}
+
+function CollabButton(): React.JSX.Element {
+  const collab = useCollab()
+  const [open, setOpen] = useState(false)
+  const active = collab.mode !== 'off'
+
+  return (
+    <div className="collab-anchor">
+      <button
+        className={`tbtn ${active ? 'tbtn-active' : ''}`}
+        title="Collaboration"
+        onClick={() => setOpen((v) => !v)}
+      >
+        {active ? (
+          <span className="collab-btn-users">
+            {collab.users.slice(0, 4).map((u) => (
+              <span
+                key={u.userId}
+                className="collab-user-dot"
+                style={{ background: USER_COLORS[u.colorIndex % USER_COLORS.length] }}
+              />
+            ))}
+            {collab.reconnecting ? '⟳' : ''}
+          </span>
+        ) : (
+          'Collab'
+        )}
+      </button>
+      {open && <CollabPanel onClose={() => setOpen(false)} />}
+    </div>
   )
 }
 

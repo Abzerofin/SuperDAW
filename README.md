@@ -5,7 +5,13 @@ collaboration — multiplayer from the ground up, no accounts, no cloud
 dependency. Projects are local files; collaboration is an optional
 host-based session joined with a short code.
 
-**Status: Milestone 3 (File Bay + persistence) complete.**
+**Status: Milestone 4 (real-time collaboration) complete.**
+
+- Real-time collaboration, LAN-first: click Collab → Start, share the
+  join code, others join — no accounts, no cloud. Host-authoritative op
+  sync with optimistic local editing (see docs/PROTOCOL.md), background
+  asset transfer, offline editing with automatic resync, live cursors,
+  middle-click pings, per-user undo
 
 - Operation-based project core (every edit is a serializable op — the same
   pipeline powers undo/redo, the activity feed, and future real-time sync)

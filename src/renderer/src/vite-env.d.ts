@@ -12,5 +12,14 @@ interface Window {
       defaultName: string
     }): Promise<string | null>
     openProjectFile(): Promise<{ path: string; name: string; data: Uint8Array } | null>
+    collabHostStart(): Promise<{ host: string; port: number; token: string } | { error: string }>
+    collabHostStop(): Promise<void>
+    collabSendToPeer(connId: number, data: string): void
+    collabKickPeer(connId: number): void
+    onCollabEvent(handlers: {
+      connected(connId: number): void
+      message(connId: number, data: string): void
+      disconnected(connId: number): void
+    }): () => void
   }
 }

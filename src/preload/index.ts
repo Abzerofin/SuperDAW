@@ -17,7 +17,43 @@ const api = {
 
   /** Pick and read a project file. Null = cancelled. */
   openProjectFile: (): Promise<{ path: string; name: string; data: Uint8Array } | null> =>
-    ipcRenderer.invoke('project:open')
+    ipcRenderer.invoke('project:open'),
+
+  // ----- Hosting transport (see src/main/collabServer.ts) -----
+
+  collabHostStart: (): Promise<{ host: string; port: number; token: string } | { error: string }> =>
+    ipcRenderer.invoke('collab:host-start'),
+
+  collabHostStop: (): Promise<void> => ipcRenderer.invoke('collab:host-stop'),
+
+  collabSendToPeer: (connId: number, data: string): void => {
+    ipcRenderer.send('collab:to-peer', { connId, data })
+  },
+
+  collabKickPeer: (connId: number): void => {
+    ipcRenderer.send('collab:kick', { connId })
+  },
+
+  /** Subscribe to peer events. Returns an unsubscribe function. */
+  onCollabEvent: (handlers: {
+    connected(connId: number): void
+    message(connId: number, data: string): void
+    disconnected(connId: number): void
+  }): (() => void) => {
+    const onConnected = (_e: unknown, p: { connId: number }): void => handlers.connected(p.connId)
+    const onMessage = (_e: unknown, p: { connId: number; data: string }): void =>
+      handlers.message(p.connId, p.data)
+    const onDisconnected = (_e: unknown, p: { connId: number }): void =>
+      handlers.disconnected(p.connId)
+    ipcRenderer.on('collab:peer-connected', onConnected)
+    ipcRenderer.on('collab:peer-message', onMessage)
+    ipcRenderer.on('collab:peer-disconnected', onDisconnected)
+    return () => {
+      ipcRenderer.off('collab:peer-connected', onConnected)
+      ipcRenderer.off('collab:peer-message', onMessage)
+      ipcRenderer.off('collab:peer-disconnected', onDisconnected)
+    }
+  }
 }
 
 export type SuperDawApi = typeof api

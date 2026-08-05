@@ -54,7 +54,7 @@ class TestNetwork {
   constructor(seed = 1) {
     this.rng = mulberry32(seed)
     this.hostStore = new ProjectStore(seedProject(), 'host')
-    this.host = new HostSession(this.hostStore, 'Host')
+    this.host = new HostSession(this.hostStore, { hostName: 'Host' })
     // Baseline content, created through the normal pipeline.
     this.hostStore.dispatch({ type: 'track/create', track: makeTrack('t1'), index: 0, clips: [] })
     this.hostStore.dispatch({ type: 'track/create', track: makeTrack('t2'), index: 1, clips: [] })

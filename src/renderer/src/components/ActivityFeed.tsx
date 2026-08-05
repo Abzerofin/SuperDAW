@@ -1,7 +1,9 @@
 import { useActivity } from '@/state/hooks'
+import { useCollab } from '@/state/collab'
 
 export function ActivityFeed(): React.JSX.Element {
   const activity = useActivity()
+  const collab = useCollab()
   const newestFirst = [...activity].reverse()
 
   return (
@@ -12,7 +14,9 @@ export function ActivityFeed(): React.JSX.Element {
         {newestFirst.map((entry) => (
           <div className="activity-entry" key={entry.id}>
             <div className="activity-meta">
-              <span className="activity-user">{entry.userId === 'you' ? 'You' : entry.userId}</span>
+              <span className="activity-user" style={{ color: collab.colorFor(entry.userId) }}>
+                {collab.nameFor(entry.userId)}
+              </span>
               <span className="activity-time mono">{formatTime(entry.time)}</span>
             </div>
             <div className="activity-text">{entry.text}</div>

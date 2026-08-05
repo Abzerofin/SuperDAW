@@ -15,10 +15,12 @@ src/preload   Minimal contextBridge between renderer and main.
 src/main      Electron shell. Window management only.
 ```
 
-Planned peer layers (not yet present): `src/audio` (engine) and `src/net`
-(collaboration transport). Both will depend on `core` and nothing else in
-the app; the UI talks to them through narrow interfaces. Networking stays
-independent from UI; audio stays independent from collaboration.
+Peer layers: `src/audio` (engine) and `src/core/session` (sync protocol,
+transport-agnostic). Both depend on `core` and nothing else in the app.
+Networking stays independent from UI: the WebSocket relay lives in the
+Electron main process (`src/main/collabServer.ts`) and only moves strings;
+all session logic runs against abstract MessageSinks. Audio stays
+independent from collaboration.
 
 ## The operation pipeline (the load-bearing decision)
 
@@ -164,7 +166,11 @@ default).
    audio, MIDI) as document state; single-file `.sdaw` projects (zip of
    state + assets) with native save/open dialogs, dirty tracking,
    Ctrl+S/Ctrl+Shift+S/Ctrl+O.
-4. Collaboration: host-as-server session, join codes, op sync, presence
-   (live cursors, pings), reconnection.
+4. ✅ **Collaboration** — host-authoritative op sync with optimistic
+   rebase (docs/PROTOCOL.md), proven by simulated-network convergence and
+   fuzz tests; LAN sessions over WebSocket with join codes; background
+   asset transfer; offline editing with reconnect replay; presence (live
+   cursors, middle-click pings, roster). Internet rendezvous is a future
+   additive milestone.
 5. Chat + comments.
 6. Mixer, automation.

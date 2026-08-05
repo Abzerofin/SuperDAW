@@ -30,6 +30,14 @@ export interface HostPeer {
   user: SessionUser | null
 }
 
+export interface HostSessionOptions {
+  hostName: string
+  assetProvider?: HostAssetProvider
+  onRosterChange?: (users: SessionUser[]) => void
+  /** Client presence surfaced to the HOST's own UI (relay to others is automatic). */
+  onPresence?: (userId: string, data: PresenceData) => void
+}
+
 export class HostSession {
   private seq = 0
   private peers = new Set<HostPeer>()
@@ -40,11 +48,9 @@ export class HostSession {
 
   constructor(
     private store: ProjectStore,
-    hostName: string,
-    private assetProvider: HostAssetProvider | null = null,
-    private onRosterChange: ((users: SessionUser[]) => void) | null = null
+    private options: HostSessionOptions
   ) {
-    this.hostUser = { userId: store.userId, name: hostName, colorIndex: 0 }
+    this.hostUser = { userId: store.userId, name: options.hostName, colorIndex: 0 }
     // Every op committed on the host's store — its own edits AND client
     // ops it applied — is sequenced and broadcast in commit order.
     this.detachStore = store.onOperation((envelope) => this.broadcastOp(envelope))
@@ -70,7 +76,7 @@ export class HostSession {
     if (!this.peers.delete(peer)) return
     if (peer.user) {
       this.broadcast({ t: 'user-left', userId: peer.user.userId })
-      this.onRosterChange?.(this.users)
+      this.options.onRosterChange?.(this.users)
     }
   }
 
@@ -106,7 +112,7 @@ export class HostSession {
         })
         if (!rejoining) {
           this.broadcast({ t: 'user-joined', user }, peer)
-          this.onRosterChange?.(this.users)
+          this.options.onRosterChange?.(this.users)
         }
         return
       }
@@ -130,12 +136,13 @@ export class HostSession {
       case 'presence': {
         if (!peer.user) return
         this.broadcast({ t: 'presence', userId: peer.user.userId, data: message.data }, peer)
+        this.options.onPresence?.(peer.user.userId, message.data)
         return
       }
 
       case 'asset-request': {
-        if (!peer.user || !this.assetProvider) return
-        const asset = this.assetProvider.getAssetForTransfer(message.assetId)
+        if (!peer.user || !this.options.assetProvider) return
+        const asset = this.options.assetProvider.getAssetForTransfer(message.assetId)
         if (asset) peer.sink.send({ t: 'asset-data', assetId: message.assetId, ...asset })
         return
       }

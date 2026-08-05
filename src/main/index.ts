@@ -1,6 +1,7 @@
 import { app, BrowserWindow, dialog, ipcMain, shell } from 'electron'
 import { readFile, writeFile } from 'node:fs/promises'
 import { basename, join } from 'node:path'
+import { registerCollabIpc } from './collabServer'
 
 const PROJECT_FILTERS = [{ name: 'SuperDAW Project', extensions: ['sdaw'] }]
 
@@ -81,6 +82,7 @@ function createWindow(): void {
 
 app.whenReady().then(() => {
   registerIpc()
+  registerCollabIpc()
   createWindow()
   app.on('activate', () => {
     if (BrowserWindow.getAllWindows().length === 0) createWindow()

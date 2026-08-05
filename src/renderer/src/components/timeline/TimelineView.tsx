@@ -13,9 +13,11 @@ import {
   importFilesToTrack,
   type BayDragPayload
 } from '@/lib/importAudio'
+import { collab } from '@/state/collab'
 import { HEADER_W, RULER_H, LANE_H, MIN_PX_PER_BEAT, MAX_PX_PER_BEAT } from './geometry'
 import { TrackHeader } from './TrackHeader'
 import { ClipView } from './ClipView'
+import { PingOverlay, RemoteCursors } from './PresenceOverlay'
 
 interface DragState {
   mode: 'move' | 'resize-l' | 'resize-r'
@@ -40,7 +42,9 @@ export function TimelineView(): React.JSX.Element {
   const [pxPerBeat, setPxPerBeat] = useState(32)
   const [drag, setDrag] = useState<DragState | null>(null)
   const scrollRef = useRef<HTMLDivElement>(null)
+  const gridRef = useRef<HTMLDivElement>(null)
   const pendingScrollX = useRef<number | null>(null)
+  const lastCursorSent = useRef(0)
 
   const sig = state.timeSignature
   const pxPerTick = pxPerBeat / PPQ
@@ -124,7 +128,52 @@ export function TimelineView(): React.JSX.Element {
     })
   }
 
+  /** Share the pointer as a presence cursor, throttled to ~20 Hz. */
+  const shareCursor = (e: React.PointerEvent): void => {
+    if (collab.mode === 'off' || trackCount === 0) return
+    const now = performance.now()
+    if (now - lastCursorSent.current < 50) return
+    lastCursorSent.current = now
+    const rect = gridRef.current?.getBoundingClientRect()
+    if (!rect) return
+    const x = e.clientX - rect.left - HEADER_W
+    const y = e.clientY - rect.top - RULER_H
+    if (x < 0 || y < 0) {
+      collab.sendCursor(null)
+      return
+    }
+    collab.sendCursor({
+      ticks: Math.max(0, x / pxPerTick),
+      trackIndex: Math.min(trackCount - 1, Math.floor(y / LANE_H))
+    })
+  }
+
+  /** Middle mouse = temporary ping identifying exactly what was clicked. */
+  const onGridMouseDown = (e: React.MouseEvent): void => {
+    if (e.button !== 1) return
+    e.preventDefault() // also suppresses browser autoscroll
+    const rect = gridRef.current?.getBoundingClientRect()
+    if (!rect) return
+    const x = e.clientX - rect.left - HEADER_W
+    const y = e.clientY - rect.top
+    if (x < 0) return
+    const ticks = Math.max(0, x / pxPerTick)
+    const bar = Math.floor(ticks / barTicks) + 1
+    if (y <= RULER_H) {
+      collab.ping(ticks, null, `bar ${bar}`)
+      return
+    }
+    const trackIndex = Math.min(trackCount - 1, Math.floor((y - RULER_H) / LANE_H))
+    const track = tracks[trackIndex]
+    if (!track) return
+    const clip = Object.values(state.clips).find(
+      (c) => c.trackId === track.id && c.start <= ticks && ticks < c.start + c.duration
+    )
+    collab.ping(ticks, trackIndex, clip ? `clip "${clip.name}"` : `"${track.name}" · bar ${bar}`)
+  }
+
   const onPointerMove = (e: React.PointerEvent): void => {
+    shareCursor(e)
     if (!drag) return
     const dxTicks = (e.clientX - drag.originX) / pxPerTick
     setDrag((prev) => {
@@ -274,12 +323,15 @@ export function TimelineView(): React.JSX.Element {
     <div className="timeline" ref={scrollRef}>
       <div
         className="timeline-grid"
+        ref={gridRef}
         style={{
           gridTemplateColumns: `${HEADER_W}px ${contentW}px`,
           gridTemplateRows: `${RULER_H}px repeat(${Math.max(1, trackCount)}, ${LANE_H}px)`
         }}
         onPointerMove={onPointerMove}
         onPointerUp={onPointerUp}
+        onPointerLeave={() => collab.sendCursor(null)}
+        onMouseDown={onGridMouseDown}
       >
         <div className="timeline-corner" style={{ gridRow: 1, gridColumn: 1 }}>
           <button className="corner-btn" onClick={() => addTrack('audio')}>
@@ -359,6 +411,13 @@ export function TimelineView(): React.JSX.Element {
         {trackCount > 0 && (
           <div className="playhead-layer" style={{ gridRow: `2 / ${trackCount + 2}`, gridColumn: 2 }}>
             <Playhead pxPerTick={pxPerTick} />
+          </div>
+        )}
+
+        {trackCount > 0 && (
+          <div className="presence-layer" style={{ gridRow: `2 / ${trackCount + 2}`, gridColumn: 2 }}>
+            <RemoteCursors pxPerTick={pxPerTick} />
+            <PingOverlay pxPerTick={pxPerTick} />
           </div>
         )}
       </div>
