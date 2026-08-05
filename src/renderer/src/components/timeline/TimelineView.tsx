@@ -1,6 +1,7 @@
 ﻿import { useEffect, useLayoutEffect, useReducer, useRef, useState } from 'react'
 import type { ClipId, TrackKind } from '@core/model/types'
 import { PPQ, barsToTicks, snapTicks, ticksPerBar, ticksPerBeat } from '@core/model/timebase'
+import { synthDefaults } from '@core/model/effects'
 import { newId } from '@core/model/ids'
 import { projectStore } from '@/state/projectStore'
 import { useProjectState } from '@/state/hooks'
@@ -362,12 +363,14 @@ export function TimelineView(): React.JSX.Element {
         muted: false,
         soloed: false,
         volume: 1,
-        pan: 0
+        pan: 0,
+        synth: kind === 'midi' ? synthDefaults() : {}
       },
       index: count,
       clips: [],
       automation: [],
-      notes: []
+      notes: [],
+      effects: []
     })
   }
 

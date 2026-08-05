@@ -19,11 +19,12 @@ function stateWith(clips: Partial<Clip>[]): ProjectState {
     muted: false,
     soloed: false,
     volume: 1,
-    pan: 0
+    pan: 0,
+    synth: {}
   }
   let s = createEmptyProject('Test')
   s = { ...s, tempo: TEMPO }
-  s = apply(s, { type: 'track/create', track, index: 0, clips: [], automation: [], notes: [] })
+  s = apply(s, { type: 'track/create', track, index: 0, clips: [], automation: [], notes: [], effects: [] })
   for (const [i, partial] of clips.entries()) {
     const clip: Clip = {
       id: `c${i}`,
@@ -100,12 +101,14 @@ suite('scheduleNotes', () => {
         muted: false,
         soloed: false,
         volume: 1,
-        pan: 0
+        pan: 0,
+        synth: {}
       },
       index: 0,
       clips: [],
       automation: [],
-      notes: []
+      notes: [],
+      effects: []
     })
     s = apply(s, {
       type: 'clip/create',

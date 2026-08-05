@@ -1,5 +1,6 @@
 import type { ProjectState, Track } from '../model/types'
 import { createEmptyProject } from '../model/types'
+import { synthDefaults } from '../model/effects'
 
 /**
  * The .sdaw project file is a ZIP archive:
@@ -104,8 +105,13 @@ export function parseProjectJson(text: string): ProjectFileJson {
   const merged: ProjectState = { ...createEmptyProject(''), ...(state as unknown as ProjectState) }
   const tracks: Record<string, Track> = {}
   for (const [id, track] of Object.entries(merged.tracks)) {
-    const legacy = track as Omit<Track, 'volume' | 'pan'> & Partial<Track>
-    tracks[id] = { ...legacy, volume: legacy.volume ?? 1, pan: legacy.pan ?? 0 }
+    const legacy = track as Omit<Track, 'volume' | 'pan' | 'synth'> & Partial<Track>
+    tracks[id] = {
+      ...legacy,
+      volume: legacy.volume ?? 1,
+      pan: legacy.pan ?? 0,
+      synth: legacy.synth ?? (legacy.kind === 'midi' ? synthDefaults() : {})
+    }
   }
   const full: ProjectState = { ...merged, tracks }
   return { formatVersion: candidate.formatVersion, state: full, assets }

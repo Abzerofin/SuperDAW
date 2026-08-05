@@ -41,7 +41,8 @@ function makeTrack(id: string, kind: Track['kind'] = 'audio'): Track {
     muted: false,
     soloed: false,
     volume: 1,
-    pan: 0
+    pan: 0,
+    synth: {}
   }
 }
 
@@ -71,7 +72,8 @@ class TestNetwork {
       index: 0,
       clips: [],
       automation: [],
-      notes: []
+      notes: [],
+      effects: []
     })
     this.hostStore.dispatch({
       type: 'track/create',
@@ -79,7 +81,8 @@ class TestNetwork {
       index: 1,
       clips: [],
       automation: [],
-      notes: []
+      notes: [],
+      effects: []
     })
     this.hostStore.dispatch({ type: 'clip/create', clip: makeClip('c1', 't1'), notes: [] })
   }
@@ -335,7 +338,8 @@ suite('session sync', () => {
       index: 2,
       clips: [],
       automation: [],
-      notes: []
+      notes: [],
+      effects: []
     })
     net.flush()
 
@@ -394,7 +398,8 @@ suite('session fuzz', () => {
             index: Math.floor(rng() * (trackIds.length + 1)),
             clips: [],
             automation: [],
-            notes: []
+            notes: [],
+            effects: []
           })
         }
         if (roll < 0.3 && trackIds.length > 0) {

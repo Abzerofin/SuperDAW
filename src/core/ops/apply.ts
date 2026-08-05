@@ -5,11 +5,13 @@ import type {
   TrackId,
   ClipId,
   Comment,
+  Effect,
   FileNode,
   AutomationPoint,
   Note
 } from '../model/types'
 import { clipsOfTrack, isSelfOrDescendant, subtreeOf, MAX_GAIN } from '../model/types'
+import { EFFECT_DEFS, SYNTH_DEFS, clampParam } from '../model/effects'
 
 /** Insert notes, skipping ids that exist and notes whose clip is missing. */
 function withNotes(
@@ -67,13 +69,18 @@ export function apply(state: ProjectState, op: Operation): ProjectState {
       const automation = { ...state.automation }
       for (const point of op.automation) automation[point.id] = point
       const { notes } = withNotes(state.notes, clips, op.notes)
+      const effects = { ...state.effects }
+      for (const effect of op.effects) {
+        if (!effects[effect.id]) effects[effect.id] = effect
+      }
       return {
         ...state,
         tracks: { ...state.tracks, [op.track.id]: op.track },
         trackOrder,
         clips,
         automation,
-        notes
+        notes,
+        effects
       }
     }
 
@@ -93,13 +100,18 @@ export function apply(state: ProjectState, op: Operation): ProjectState {
       for (const note of Object.values(state.notes)) {
         if (clips[note.clipId]) notes[note.id] = note
       }
+      const effects: Record<string, Effect> = {}
+      for (const effect of Object.values(state.effects)) {
+        if (effect.trackId !== op.trackId) effects[effect.id] = effect
+      }
       return {
         ...state,
         tracks,
         trackOrder: state.trackOrder.filter((id) => id !== op.trackId),
         clips,
         automation,
-        notes
+        notes,
+        effects
       }
     }
 
@@ -184,6 +196,69 @@ export function apply(state: ProjectState, op: Operation): ProjectState {
         else notes[note.id] = note
       }
       return changed ? { ...state, notes } : state
+    }
+
+    case 'effect/add': {
+      if (state.effects[op.effect.id]) return state
+      if (!state.tracks[op.effect.trackId]) return state
+      if (!EFFECT_DEFS[op.effect.type]) return state
+      const defs = EFFECT_DEFS[op.effect.type].params
+      const params: Record<string, number> = {}
+      for (const [key, def] of Object.entries(defs)) {
+        params[key] = clampParam(def, op.effect.params[key] ?? def.default)
+      }
+      return {
+        ...state,
+        effects: { ...state.effects, [op.effect.id]: { ...op.effect, params } }
+      }
+    }
+
+    case 'effect/remove': {
+      if (!state.effects[op.effectId]) return state
+      const effects = { ...state.effects }
+      delete effects[op.effectId]
+      return { ...state, effects }
+    }
+
+    case 'effect/setParam': {
+      const effect = state.effects[op.effectId]
+      if (!effect) return state
+      const def = EFFECT_DEFS[effect.type].params[op.param]
+      if (!def) return state
+      const value = clampParam(def, op.value)
+      if (effect.params[op.param] === value) return state
+      return {
+        ...state,
+        effects: {
+          ...state.effects,
+          [op.effectId]: { ...effect, params: { ...effect.params, [op.param]: value } }
+        }
+      }
+    }
+
+    case 'effect/setEnabled': {
+      const effect = state.effects[op.effectId]
+      if (!effect || effect.enabled === op.enabled) return state
+      return {
+        ...state,
+        effects: { ...state.effects, [op.effectId]: { ...effect, enabled: op.enabled } }
+      }
+    }
+
+    case 'track/setSynthParam': {
+      const track = state.tracks[op.trackId]
+      if (!track || track.kind !== 'midi') return state
+      const def = SYNTH_DEFS[op.param]
+      if (!def) return state
+      const value = clampParam(def, op.value)
+      if (track.synth[op.param] === value) return state
+      return {
+        ...state,
+        tracks: {
+          ...state.tracks,
+          [op.trackId]: { ...track, synth: { ...track.synth, [op.param]: value } }
+        }
+      }
     }
 
     case 'track/rename':

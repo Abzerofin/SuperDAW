@@ -4,6 +4,7 @@ import { MAX_GAIN } from '@core/model/types'
 import { projectStore } from '@/state/projectStore'
 import { useProjectState } from '@/state/hooks'
 import { audioEngine } from '@/state/audioInstance'
+import { fxUi } from '@/state/fxUi'
 import { capturePointer } from '@/lib/pointer'
 
 /**
@@ -32,6 +33,9 @@ function TrackStrip({ track }: { track: Track }): React.JSX.Element {
       <div className="strip-name" title={track.name}>
         {track.name}
       </div>
+      <button className="corner-btn strip-fx" onClick={() => fxUi.toggle(track.id)}>
+        FX
+      </button>
       <PanKnob
         pan={track.pan}
         onPreview={(pan) => audioEngine.previewTrackPan(track.id, pan)}

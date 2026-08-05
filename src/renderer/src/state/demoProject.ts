@@ -1,6 +1,7 @@
 import type { Clip, ProjectState, Track, TrackKind } from '@core/model/types'
 import { barsToTicks } from '@core/model/timebase'
 import { newId } from '@core/model/ids'
+import { synthDefaults } from '@core/model/effects'
 import { nextTrackColor } from '@/lib/colors'
 
 /**
@@ -23,7 +24,8 @@ export function createDemoProject(): ProjectState {
       muted: false,
       soloed: false,
       volume: 1,
-      pan: 0
+      pan: 0,
+      synth: kind === 'midi' ? synthDefaults() : {}
     }
     tracks.push(track)
     return track
@@ -66,6 +68,7 @@ export function createDemoProject(): ProjectState {
     comments: {},
     masterVolume: 1,
     automation: {},
-    notes: {}
+    notes: {},
+    effects: {}
   }
 }

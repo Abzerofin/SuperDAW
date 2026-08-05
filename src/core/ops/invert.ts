@@ -1,5 +1,5 @@
 import type { FileNode, Note, ProjectState } from '../model/types'
-import { clipsOfTrack, notesOfClip, subtreeOf } from '../model/types'
+import { clipsOfTrack, effectsOfTrack, notesOfClip, subtreeOf } from '../model/types'
 
 function automationOfTrack(state: ProjectState, trackId: string) {
   return Object.values(state.automation).filter((p) => p.trackId === trackId)
@@ -37,7 +37,8 @@ export function invert(state: ProjectState, op: Operation): Operation | null {
         index: state.trackOrder.indexOf(op.trackId),
         clips: clipsOfTrack(state, op.trackId),
         automation: automationOfTrack(state, op.trackId),
-        notes: notesOfTrack(state, op.trackId)
+        notes: notesOfTrack(state, op.trackId),
+        effects: effectsOfTrack(state, op.trackId)
       }
     }
 
@@ -95,6 +96,43 @@ export function invert(state: ProjectState, op: Operation): Operation | null {
         .filter((n): n is Note => n !== undefined)
       if (notes.length === 0) return null
       return { type: 'note/addMany', notes }
+    }
+
+    case 'effect/add':
+      return { type: 'effect/remove', effectId: op.effect.id }
+
+    case 'effect/remove': {
+      const effect = state.effects[op.effectId]
+      if (!effect) return null
+      return { type: 'effect/add', effect }
+    }
+
+    case 'effect/setParam': {
+      const effect = state.effects[op.effectId]
+      if (!effect) return null
+      return {
+        type: 'effect/setParam',
+        effectId: op.effectId,
+        param: op.param,
+        value: effect.params[op.param] ?? 0
+      }
+    }
+
+    case 'effect/setEnabled': {
+      const effect = state.effects[op.effectId]
+      if (!effect) return null
+      return { type: 'effect/setEnabled', effectId: op.effectId, enabled: effect.enabled }
+    }
+
+    case 'track/setSynthParam': {
+      const track = state.tracks[op.trackId]
+      if (!track) return null
+      return {
+        type: 'track/setSynthParam',
+        trackId: op.trackId,
+        param: op.param,
+        value: track.synth[op.param] ?? 0
+      }
     }
 
     case 'track/rename': {

@@ -1,6 +1,7 @@
 ﻿import { describe as suite, expect, test } from 'vitest'
 import type { Clip, Comment, FileNode, ProjectState, Track } from '../../model/types'
 import { createEmptyProject } from '../../model/types'
+import { synthDefaults } from '../../model/effects'
 import { describe as describeOp } from '../describe'
 import type { Operation } from '../operations'
 import { apply } from '../apply'
@@ -16,7 +17,8 @@ function track(id: string, name = id): Track {
     muted: false,
     soloed: false,
     volume: 1,
-    pan: 0
+    pan: 0,
+    synth: {}
   }
 }
 
@@ -43,8 +45,8 @@ function comment(id: string, anchorId: string, parentId: string | null = null): 
 
 function baseState(): ProjectState {
   let s = createEmptyProject('Test')
-  s = apply(s, { type: 'track/create', track: track('t1'), index: 0, clips: [], automation: [], notes: [] })
-  s = apply(s, { type: 'track/create', track: track('t2'), index: 1, clips: [], automation: [], notes: [] })
+  s = apply(s, { type: 'track/create', track: track('t1'), index: 0, clips: [], automation: [], notes: [], effects: [] })
+  s = apply(s, { type: 'track/create', track: track('t2'), index: 1, clips: [], automation: [], notes: [], effects: [] })
   s = apply(s, { type: 'clip/create', clip: clip('c1', 't1', 0, 960), notes: [] })
   s = apply(s, { type: 'clip/create', clip: clip('c2', 't1', 1920, 960), notes: [] })
   // File bay: root folder f1 containing f2 (folder) and a1; a2 at root
@@ -70,6 +72,20 @@ function baseState(): ProjectState {
     type: 'note/add',
     note: { id: 'nA', clipId: 'c1', pitch: 60, start: 0, duration: 480, velocity: 100 }
   })
+  // An EQ on t1, and a MIDI track with default synth params
+  s = apply(s, {
+    type: 'effect/add',
+    effect: { id: 'fxA', trackId: 't1', type: 'eq3', enabled: true, rank: 1, params: {} }
+  })
+  s = apply(s, {
+    type: 'track/create',
+    track: { ...track('tm'), kind: 'midi', synth: synthDefaults() },
+    index: 2,
+    clips: [],
+    automation: [],
+    notes: [],
+    effects: []
+  })
   return s
 }
 
@@ -83,7 +99,7 @@ suite('apply', () => {
   test('deleting a track also deletes its clips', () => {
     const s = apply(baseState(), { type: 'track/delete', trackId: 't1' })
     expect(s.tracks['t1']).toBeUndefined()
-    expect(s.trackOrder).toEqual(['t2'])
+    expect(s.trackOrder).toEqual(['t2', 'tm'])
     expect(Object.keys(s.clips)).toHaveLength(0)
   })
 
@@ -113,8 +129,19 @@ suite('invert', () => {
       index: 1,
       clips: [clip('c9', 't9')],
       automation: [{ id: 'ap9', trackId: 't9', param: 'volume', ticks: 0, value: 0.5 }],
-      notes: [{ id: 'n9', clipId: 'c9', pitch: 60, start: 0, duration: 480, velocity: 100 }]
+      notes: [{ id: 'n9', clipId: 'c9', pitch: 60, start: 0, duration: 480, velocity: 100 }],
+      effects: [
+        { id: 'fx9', trackId: 't9', type: 'eq3', enabled: true, rank: 1, params: { low: 3, mid: 0, midFreq: 1000, high: -2 } }
+      ]
     },
+    {
+      type: 'effect/add',
+      effect: { id: 'fx1', trackId: 't1', type: 'compressor', enabled: true, rank: 1, params: {} }
+    },
+    { type: 'effect/remove', effectId: 'fxA' },
+    { type: 'effect/setParam', effectId: 'fxA', param: 'low', value: 6 },
+    { type: 'effect/setEnabled', effectId: 'fxA', enabled: false },
+    { type: 'track/setSynthParam', trackId: 'tm', param: 'cutoff', value: 3 },
     { type: 'note/add', note: { id: 'n1', clipId: 'c1', pitch: 64, start: 240, duration: 240, velocity: 90 } },
     { type: 'note/addMany', notes: [
       { id: 'n2', clipId: 'c1', pitch: 62, start: 0, duration: 240, velocity: 80 },

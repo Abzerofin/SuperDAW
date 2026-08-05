@@ -5,7 +5,9 @@ import { useProjectState } from '@/state/hooks'
 import { commentUi, useCommentUi } from '@/state/commentUi'
 import { automationUi, useAutomationUi } from '@/state/automationUi'
 import { recording, useRecording } from '@/state/recording'
+import { fxUi, useFxUi } from '@/state/fxUi'
 import { CommentThread } from '../comments/CommentThread'
+import { FxPanel } from '../fx/FxPanel'
 
 export function TrackHeader({ track }: { track: Track }): React.JSX.Element {
   const [editing, setEditing] = useState(false)
@@ -16,6 +18,8 @@ export function TrackHeader({ track }: { track: Track }): React.JSX.Element {
     (c) => c.parentId === null && !c.resolved && c.anchor.kind === 'track' && c.anchor.id === track.id
   ).length
   const popoverOpen = openAnchor?.kind === 'track' && openAnchor.id === track.id
+  const fxOpen = useFxUi().trackId === track.id
+  const hasFx = Object.values(useProjectState().effects).some((e) => e.trackId === track.id)
 
   const commit = (): void => {
     setEditing(false)
@@ -72,8 +76,22 @@ export function TrackHeader({ track }: { track: Track }): React.JSX.Element {
           <CommentThread anchor={{ kind: 'track', id: track.id }} />
         </div>
       )}
+      {fxOpen && (
+        <div className="comment-layer-anchor track-comment-popover">
+          <FxPanel track={track} />
+        </div>
+      )}
       <div className="track-header-bottom">
         <span className="track-kind">{track.kind === 'audio' ? 'AUDIO' : 'MIDI'}</span>
+        <button
+          className={`track-toggle track-fx ${hasFx || track.kind === 'midi' ? 'track-fx-has' : ''} ${
+            fxOpen ? 'track-toggle-auto' : ''
+          }`}
+          title="Instruments & effects"
+          onClick={() => fxUi.toggle(track.id)}
+        >
+          FX
+        </button>
         <div className="track-toggles">
           {track.kind === 'audio' && <ArmToggle trackId={track.id} />}
           <AutomationToggle trackId={track.id} />

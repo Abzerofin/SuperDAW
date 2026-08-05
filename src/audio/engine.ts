@@ -1,6 +1,8 @@
-import type { ProjectState, TrackId } from '@core/model/types'
-import { automationOf, automationValueAt } from '@core/model/types'
+import type { EffectId, ProjectState, TrackId } from '@core/model/types'
+import { automationOf, automationValueAt, effectsOfTrack } from '@core/model/types'
+import { synthDefaults, WAVE_TYPES } from '@core/model/effects'
 import type { AssetStore } from './assets'
+import { buildEffect, type EffectNodes } from './effects'
 import {
   beatIndexAt,
   metronomeClicks,
@@ -47,6 +49,8 @@ const METRO_INTERVAL_MS = 40
 const GAIN_SMOOTHING_SEC = 0.015
 
 interface TrackChain {
+  /** Where sources and synth voices connect; head of the insert chain. */
+  input: GainNode
   auto: GainNode
   fader: GainNode
   panner: StereoPannerNode
@@ -58,6 +62,7 @@ export class AudioEngine {
   private analyser: AnalyserNode | null = null
   private meterBuf: Float32Array<ArrayBuffer> | null = null
   private chains = new Map<TrackId, TrackChain>()
+  private fxNodes = new Map<EffectId, EffectNodes>()
   /** Everything currently scheduled: clip buffer sources AND synth oscillators. */
   private sources = new Set<AudioScheduledSourceNode>()
 
@@ -75,6 +80,7 @@ export class AudioEngine {
   private prevAutomation: ProjectState['automation']
   private prevMasterVolume: number
   private prevNotes: ProjectState['notes']
+  private prevEffects: ProjectState['effects']
 
   constructor(
     private store: StoreLike,
@@ -87,6 +93,7 @@ export class AudioEngine {
     this.prevAutomation = store.state.automation
     this.prevMasterVolume = store.state.masterVolume
     this.prevNotes = store.state.notes
+    this.prevEffects = store.state.effects
     store.subscribe(this.onStateChanged)
     assets.subscribe(this.onAssetsChanged)
     transport.onEvent(this.onTransportEvent)
@@ -108,7 +115,18 @@ export class AudioEngine {
     // what the user sees and what they hear.
     this.transport.setTimeSource({ now: () => ctx.currentTime })
     this.syncMixer()
+    this.syncEffects()
     return ctx
+  }
+
+  /** Live-preview an effect knob while dragging (no op until release). */
+  previewEffectParam(effectId: EffectId, param: string, value: number): void {
+    const ctx = this.ctx
+    const effect = this.store.state.effects[effectId]
+    const nodes = this.fxNodes.get(effectId)
+    if (ctx && effect && nodes) {
+      nodes.apply({ ...effect.params, [param]: value }, ctx.currentTime)
+    }
   }
 
   // ---------- Ephemeral previews (fader/knob drags before the op lands) ----------
@@ -196,10 +214,25 @@ export class AudioEngine {
 
   private onStateChanged = (): void => {
     const state = this.store.state
+    // Synth param edits must reschedule voices (envelopes bake params in).
+    let synthChanged = false
+    if (state.tracks !== this.prevTracks) {
+      for (const [id, track] of Object.entries(state.tracks)) {
+        const prev = this.prevTracks[id]
+        if (prev && prev.synth !== track.synth) {
+          synthChanged = true
+          break
+        }
+      }
+    }
     if (state.tracks !== this.prevTracks || state.masterVolume !== this.prevMasterVolume) {
       this.prevTracks = state.tracks
       this.prevMasterVolume = state.masterVolume
       if (this.ctx) this.syncMixer()
+    }
+    if (state.effects !== this.prevEffects) {
+      this.prevEffects = state.effects
+      if (this.ctx) this.syncEffects()
     }
     const automationEdited = state.automation !== this.prevAutomation
     this.prevAutomation = state.automation
@@ -209,7 +242,8 @@ export class AudioEngine {
     const editedAudio =
       state.clips !== this.prevClips ||
       state.tempo !== this.prevTempo ||
-      state.notes !== this.prevNotes
+      state.notes !== this.prevNotes ||
+      synthChanged
     this.prevClips = state.clips
     this.prevTempo = state.tempo
     this.prevNotes = state.notes
@@ -256,7 +290,7 @@ export class AudioEngine {
       if (!asset?.buffer) continue
       const source = ctx.createBufferSource()
       source.buffer = asset.buffer
-      source.connect(this.chain(s.trackId).auto)
+      source.connect(this.chain(s.trackId).input)
       source.onended = () => this.sources.delete(source)
       source.start(s.when, s.offsetSec, s.durationSec)
       this.sources.add(source)
@@ -272,18 +306,20 @@ export class AudioEngine {
   private scheduleAllNotes(): void {
     const ctx = this.ctx
     if (!ctx) return
+    const defaults = synthDefaults()
     for (const s of scheduleNotes(this.store.state, this.anchorTicks, this.anchorSec)) {
-      const dest = this.chain(s.trackId).auto
+      const dest = this.chain(s.trackId).input
+      const sp = { ...defaults, ...this.store.state.tracks[s.trackId]?.synth }
       const freq = 440 * Math.pow(2, (s.pitch - 69) / 12)
       const peak = 0.22 * s.velocity
-      const sustain = peak * 0.65
-      const attackEnd = s.startSec + 0.006
-      const decayEnd = Math.min(s.endSec, attackEnd + 0.09)
-      const releaseEnd = s.endSec + 0.07
+      const sustain = peak * sp.sustain
+      const attackEnd = s.startSec + sp.attack
+      const decayEnd = Math.min(s.endSec, attackEnd + sp.decay)
+      const releaseEnd = s.endSec + sp.release
 
       const filter = ctx.createBiquadFilter()
       filter.type = 'lowpass'
-      filter.frequency.value = Math.min(14000, freq * 7)
+      filter.frequency.value = Math.min(16000, Math.max(40, freq * sp.cutoff))
       filter.Q.value = 0.7
 
       const env = ctx.createGain()
@@ -296,9 +332,10 @@ export class AudioEngine {
       filter.connect(env)
       env.connect(dest)
 
-      for (const detune of [-4, 4]) {
+      const waveType = WAVE_TYPES[Math.round(sp.wave)] ?? 'sawtooth'
+      for (const detune of [-sp.detune, sp.detune]) {
         const osc = ctx.createOscillator()
-        osc.type = 'sawtooth'
+        osc.type = waveType
         osc.frequency.value = freq
         osc.detune.value = detune
         osc.connect(filter)
@@ -356,17 +393,64 @@ export class AudioEngine {
     const existing = this.chains.get(trackId)
     if (existing) return existing
     const ctx = this.ensureContext()
+    const input = ctx.createGain()
     const auto = ctx.createGain()
     const fader = ctx.createGain()
     const panner = ctx.createStereoPanner()
     fader.gain.value = this.effectiveGain(trackId)
     panner.pan.value = this.store.state.tracks[trackId]?.pan ?? 0
+    input.connect(auto)
     auto.connect(fader)
     fader.connect(panner)
     panner.connect(this.master!)
-    const chain: TrackChain = { auto, fader, panner }
+    const chain: TrackChain = { input, auto, fader, panner }
     this.chains.set(trackId, chain)
+    this.wireInserts(trackId, chain)
     return chain
+  }
+
+  /**
+   * Reconcile effect node instances with document state and (re)wire each
+   * track's insert path: input → enabled effects in rank order → auto.
+   * Instances persist across unrelated changes so params don't zipper.
+   */
+  private syncEffects(): void {
+    const ctx = this.ctx
+    if (!ctx) return
+    const state = this.store.state
+    for (const [effectId, nodes] of this.fxNodes) {
+      if (!state.effects[effectId]) {
+        nodes.dispose()
+        this.fxNodes.delete(effectId)
+      }
+    }
+    for (const [trackId, chain] of this.chains) this.wireInserts(trackId, chain)
+  }
+
+  private wireInserts(trackId: TrackId, chain: TrackChain): void {
+    const ctx = this.ctx
+    if (!ctx) return
+    const now = ctx.currentTime
+    const inserts = effectsOfTrack(this.store.state, trackId)
+
+    chain.input.disconnect()
+    for (const effect of inserts) {
+      this.fxNodes.get(effect.id)?.output.disconnect()
+    }
+
+    let prev: AudioNode = chain.input
+    for (const effect of inserts) {
+      if (!effect.enabled) continue
+      let nodes = this.fxNodes.get(effect.id)
+      if (!nodes) {
+        nodes = buildEffect(ctx, effect)
+        this.fxNodes.set(effect.id, nodes)
+      }
+      nodes.apply(effect.params, now)
+      prev.connect(nodes.input)
+      prev = nodes.output
+    }
+    prev.connect(chain.auto)
   }
 
   private isAudible(trackId: TrackId): boolean {
@@ -392,9 +476,16 @@ export class AudioEngine {
     for (const [trackId, chain] of this.chains) {
       const track = this.store.state.tracks[trackId]
       if (!track) {
+        chain.input.disconnect()
         chain.auto.disconnect()
         chain.fader.disconnect()
         chain.panner.disconnect()
+        for (const effect of Object.values(this.prevEffects)) {
+          if (effect.trackId === trackId) {
+            this.fxNodes.get(effect.id)?.dispose()
+            this.fxNodes.delete(effect.id)
+          }
+        }
         this.chains.delete(trackId)
         continue
       }

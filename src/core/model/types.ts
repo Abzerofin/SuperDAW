@@ -1,4 +1,5 @@
 import type { TimeSignature } from './timebase'
+import type { EffectType } from './effects'
 
 export type TrackId = string
 export type ClipId = string
@@ -53,6 +54,20 @@ export interface Track {
   readonly volume: number
   /** Stereo pan, -1 (L) .. 1 (R). */
   readonly pan: number
+  /** Built-in synth parameters (MIDI tracks; empty for audio). See SYNTH_DEFS. */
+  readonly synth: Readonly<Record<string, number>>
+}
+
+export type EffectId = string
+
+/** One insert in a track's effect chain. Chains sort by `rank`. */
+export interface Effect {
+  readonly id: EffectId
+  readonly trackId: TrackId
+  readonly type: EffectType
+  readonly enabled: boolean
+  readonly rank: number
+  readonly params: Readonly<Record<string, number>>
 }
 
 export const MAX_GAIN = 1.4 // ≈ +3 dB of headroom above unity
@@ -141,6 +156,7 @@ export interface ProjectState {
   readonly masterVolume: number
   readonly automation: Readonly<Record<AutomationPointId, AutomationPoint>>
   readonly notes: Readonly<Record<NoteId, Note>>
+  readonly effects: Readonly<Record<EffectId, Effect>>
 }
 
 export function createEmptyProject(name: string): ProjectState {
@@ -156,8 +172,16 @@ export function createEmptyProject(name: string): ProjectState {
     comments: {},
     masterVolume: 1,
     automation: {},
-    notes: {}
+    notes: {},
+    effects: {}
   }
+}
+
+/** A track's insert chain in processing order. */
+export function effectsOfTrack(state: ProjectState, trackId: TrackId): Effect[] {
+  return Object.values(state.effects)
+    .filter((e) => e.trackId === trackId)
+    .sort((a, b) => a.rank - b.rank)
 }
 
 export function notesOfClip(state: ProjectState, clipId: ClipId): Note[] {

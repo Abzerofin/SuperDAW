@@ -960,6 +960,182 @@ input {
   transform: scale(1.25);
 }
 
+/* ---------- FX panel ---------- */
+.track-fx {
+  width: auto;
+  padding: 0 5px;
+  font-size: 9px;
+  letter-spacing: 0.5px;
+}
+
+.track-fx-has {
+  color: var(--accent);
+  border-color: color-mix(in srgb, var(--accent) 50%, var(--border));
+}
+
+.strip-fx {
+  width: 100%;
+}
+
+.fx-panel {
+  width: 300px;
+  background: var(--bg-2);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.45);
+  display: flex;
+  flex-direction: column;
+  max-height: 420px;
+}
+
+.fx-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 6px 10px;
+  border-bottom: 1px solid var(--border);
+}
+
+.fx-title {
+  font-size: 12px;
+  font-weight: 600;
+  display: flex;
+  align-items: center;
+  gap: 7px;
+}
+
+.fx-body {
+  overflow-y: auto;
+  padding: 6px;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.fx-section {
+  background: var(--bg-1);
+  border: 1px solid var(--border);
+  border-radius: 5px;
+  padding: 6px 8px;
+}
+
+.fx-bypassed .fx-param,
+.fx-bypassed .fx-section-title {
+  opacity: 0.45;
+}
+
+.fx-section-head {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  margin-bottom: 4px;
+}
+
+.fx-section-title {
+  font-size: 11px;
+  font-weight: 700;
+  flex: 1;
+}
+
+.fx-power {
+  color: var(--text-dim);
+  font-size: 12px;
+  padding: 0 3px;
+  border-radius: 3px;
+}
+
+.fx-power-on {
+  color: var(--solo);
+}
+
+.fx-remove {
+  opacity: 1;
+}
+
+.fx-waves {
+  display: flex;
+  gap: 3px;
+}
+
+.fx-wave {
+  width: 22px;
+  height: 18px;
+  font-size: 11px;
+  border: 1px solid var(--border);
+  border-radius: 3px;
+  background: var(--bg-2);
+  color: var(--text-dim);
+}
+
+.fx-wave-active {
+  background: var(--accent);
+  border-color: var(--accent);
+  color: #fff;
+}
+
+.fx-param {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 2px 0;
+}
+
+.fx-param-label {
+  width: 62px;
+  font-size: 10px;
+  color: var(--text-dim);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.fx-slider {
+  position: relative;
+  height: 10px;
+  background: var(--bg-0);
+  border: 1px solid var(--border);
+  border-radius: 5px;
+  cursor: ew-resize;
+  touch-action: none;
+  overflow: hidden;
+}
+
+.fx-slider-fill {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  left: 0;
+  background: color-mix(in srgb, var(--accent) 55%, transparent);
+}
+
+.fx-param-value {
+  width: 58px;
+  font-size: 10px;
+  color: var(--text);
+  text-align: right;
+  white-space: nowrap;
+}
+
+.fx-add {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+}
+
+.fx-add-btn {
+  font-size: 10px;
+  padding: 3px 7px;
+  border-radius: 3px;
+  border: 1px solid var(--border);
+  background: var(--bg-1);
+  color: var(--text-dim);
+}
+
+.fx-add-btn:hover {
+  color: var(--text);
+  background: var(--bg-3);
+}
+
 /* ---------- Recording ---------- */
 .tbtn-rec {
   color: var(--danger);

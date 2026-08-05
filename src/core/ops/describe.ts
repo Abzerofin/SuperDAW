@@ -1,4 +1,5 @@
 import type { ProjectState } from '../model/types'
+import { EFFECT_DEFS, SYNTH_DEFS } from '../model/effects'
 import type { Operation } from './operations'
 
 /**
@@ -63,6 +64,37 @@ export function describe(state: ProjectState, op: Operation): string | null {
       return op.noteIds.length === 1
         ? `Deleted a note${suffix}`
         : `Deleted ${op.noteIds.length} notes${suffix}`
+    }
+    case 'effect/add':
+      return `Added ${EFFECT_DEFS[op.effect.type]?.label ?? op.effect.type} to "${trackName(
+        state,
+        op.effect.trackId
+      )}"`
+    case 'effect/remove': {
+      const effect = state.effects[op.effectId]
+      if (!effect) return null
+      return `Removed ${EFFECT_DEFS[effect.type].label} from "${trackName(state, effect.trackId)}"`
+    }
+    case 'effect/setParam': {
+      const effect = state.effects[op.effectId]
+      if (!effect) return null
+      const def = EFFECT_DEFS[effect.type].params[op.param]
+      return `Set ${EFFECT_DEFS[effect.type].label} ${def?.label ?? op.param} on "${trackName(
+        state,
+        effect.trackId
+      )}"`
+    }
+    case 'effect/setEnabled': {
+      const effect = state.effects[op.effectId]
+      if (!effect) return null
+      return `${op.enabled ? 'Enabled' : 'Bypassed'} ${EFFECT_DEFS[effect.type].label} on "${trackName(
+        state,
+        effect.trackId
+      )}"`
+    }
+    case 'track/setSynthParam': {
+      const def = SYNTH_DEFS[op.param]
+      return `Set synth ${def?.label ?? op.param} on "${trackName(state, op.trackId)}"`
     }
     case 'clip/create':
       return `Added clip "${op.clip.name}" to "${trackName(state, op.clip.trackId)}"`

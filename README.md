@@ -5,7 +5,10 @@ collaboration — multiplayer from the ground up, no accounts, no cloud
 dependency. Projects are local files; collaboration is an optional
 host-based session joined with a short code.
 
-**Status: milestones 1–8 complete.**
+**Status: milestones 1–9 complete.**
+
+- Per-track effects (EQ, compressor, limiter, delay, reverb) and synth
+  controls (waveform, cutoff, ADSR) — synced, undoable, saved
 
 - Piano roll with a built-in polyphonic synth — MIDI clips hold real
   notes (drop in .mid files), edited in a bottom-dock editor

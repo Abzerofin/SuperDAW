@@ -6,6 +6,8 @@ import type {
   ClipId,
   Comment,
   CommentId,
+  Effect,
+  EffectId,
   FileNode,
   FileNodeId,
   Note,
@@ -23,7 +25,7 @@ import type {
 export type Operation =
   | { type: 'project/rename'; name: string }
   | { type: 'project/setTempo'; tempo: number }
-  /** `clips`/`automation`/`notes` restore a deleted track's content on undo; empty for new tracks. */
+  /** Content arrays restore a deleted track on undo; all empty for new tracks. */
   | {
       type: 'track/create'
       track: Track
@@ -31,6 +33,7 @@ export type Operation =
       clips: Clip[]
       automation: AutomationPoint[]
       notes: Note[]
+      effects: Effect[]
     }
   | { type: 'track/delete'; trackId: TrackId }
   | { type: 'track/rename'; trackId: TrackId; name: string }
@@ -48,6 +51,11 @@ export type Operation =
   /** Plural: multi-delete and thread restores stay one undoable op. */
   | { type: 'note/delete'; noteIds: NoteId[] }
   | { type: 'note/addMany'; notes: Note[] }
+  | { type: 'effect/add'; effect: Effect }
+  | { type: 'effect/remove'; effectId: EffectId }
+  | { type: 'effect/setParam'; effectId: EffectId; param: string; value: number }
+  | { type: 'effect/setEnabled'; effectId: EffectId; enabled: boolean }
+  | { type: 'track/setSynthParam'; trackId: TrackId; param: string; value: number }
   | { type: 'track/reorder'; trackId: TrackId; index: number }
   /** `notes` seeds MIDI content (import, undo-restore); empty for new clips. */
   | { type: 'clip/create'; clip: Clip; notes: Note[] }

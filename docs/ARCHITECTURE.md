@@ -201,6 +201,18 @@ default).
    on every armed track — so takes sync to collaborators through the
    standard asset machinery. Live red region shows the take growing.
 
-Roadmap beyond: per-strip metering (AudioWorklet), internet rendezvous
-for join codes, packaging polish (icon, signing, auto-update), velocity
-editing, multi-note selection, count-in/punch recording, input monitoring.
+9. ✅ **Effects + instrument controls** — per-track insert chains (EQ,
+   compressor, limiter, delay, reverb) as document state; param metadata
+   lives in core (core/model/effects.ts) so the reducer clamps, the
+   engine builds nodes, and the UI renders controls from one definition.
+   Graph: sources → input → [enabled inserts by rank] → autoGain → fader
+   → panner → master; effect node instances persist across unrelated
+   changes. Synth params (wave/cutoff/ADSR/detune) live on MIDI tracks.
+   FX panel from track headers or mixer strips; knobs preview live and
+   dispatch one op on release.
+
+Roadmap beyond: autotune/pitch correction (dedicated AudioWorklet DSP
+milestone: pitch detection + PSOLA resynthesis), effect reordering UI,
+per-strip metering, internet rendezvous for join codes, packaging polish
+(icon, signing, auto-update), velocity editing, multi-note selection,
+count-in/punch recording, input monitoring.

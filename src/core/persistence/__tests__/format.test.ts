@@ -21,12 +21,14 @@ function sampleState() {
       muted: false,
       soloed: true,
       volume: 0.9,
-      pan: 0.25
+      pan: 0.25,
+      synth: {}
     },
     index: 0,
     clips: [],
     automation: [{ id: 'ap1', trackId: 't1', param: 'volume', ticks: 480, value: 0.6 }],
-    notes: []
+    notes: [],
+    effects: []
   })
   s = apply(s, {
     type: 'clip/create',
