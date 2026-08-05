@@ -4,6 +4,7 @@ import { projectStore } from '@/state/projectStore'
 import { useProjectState } from '@/state/hooks'
 import { commentUi, useCommentUi } from '@/state/commentUi'
 import { automationUi, useAutomationUi } from '@/state/automationUi'
+import { recording, useRecording } from '@/state/recording'
 import { CommentThread } from '../comments/CommentThread'
 
 export function TrackHeader({ track }: { track: Track }): React.JSX.Element {
@@ -74,6 +75,7 @@ export function TrackHeader({ track }: { track: Track }): React.JSX.Element {
       <div className="track-header-bottom">
         <span className="track-kind">{track.kind === 'audio' ? 'AUDIO' : 'MIDI'}</span>
         <div className="track-toggles">
+          {track.kind === 'audio' && <ArmToggle trackId={track.id} />}
           <AutomationToggle trackId={track.id} />
           <button
             className={`track-toggle ${track.muted ? 'track-toggle-mute' : ''}`}
@@ -96,6 +98,19 @@ export function TrackHeader({ track }: { track: Track }): React.JSX.Element {
         </div>
       </div>
     </div>
+  )
+}
+
+function ArmToggle({ trackId }: { trackId: string }): React.JSX.Element {
+  const rec = useRecording()
+  return (
+    <button
+      className={`track-toggle ${rec.isArmed(trackId) ? 'track-toggle-armed' : ''}`}
+      title="Arm for recording"
+      onClick={() => recording.toggleArm(trackId)}
+    >
+      ●
+    </button>
   )
 }
 

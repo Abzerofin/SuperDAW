@@ -5,7 +5,11 @@ collaboration — multiplayer from the ground up, no accounts, no cloud
 dependency. Projects are local files; collaboration is an optional
 host-based session joined with a short code.
 
-**Status: all six roadmap milestones complete.**
+**Status: milestones 1–8 complete.**
+
+- Piano roll with a built-in polyphonic synth — MIDI clips hold real
+  notes (drop in .mid files), edited in a bottom-dock editor
+- Audio recording: arm a track, hit ●, get a synced clip + waveform
 
 - Mixer (per-track fader/pan, mute/solo, master) and volume automation
   lanes with sample-accurate playback — all synced and undoable

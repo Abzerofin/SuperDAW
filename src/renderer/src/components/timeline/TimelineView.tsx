@@ -18,6 +18,7 @@ import { capturePointer } from '@/lib/pointer'
 import { commentUi, useCommentUi } from '@/state/commentUi'
 import { useAutomationUi } from '@/state/automationUi'
 import { pianoRollUi } from '@/state/pianoRollUi'
+import { useRecording } from '@/state/recording'
 import { HEADER_W, RULER_H, LANE_H, AUTO_H, MIN_PX_PER_BEAT, MAX_PX_PER_BEAT } from './geometry'
 import { TrackHeader } from './TrackHeader'
 import { ClipView } from './ClipView'
@@ -514,6 +515,16 @@ export function TimelineView(): React.JSX.Element {
           </div>
         )}
 
+        {trackCount > 0 && (
+          <div className="recording-layer" style={{ gridRow: `2 / ${lastGridRow}`, gridColumn: 2 }}>
+            <RecordingRegions
+              pxPerTick={pxPerTick}
+              trackTops={trackTops}
+              trackIds={tracks.map((t) => t.id)}
+            />
+          </div>
+        )}
+
         {trackCount > 0 &&
           openCommentAnchor?.kind === 'clip' &&
           (() => {
@@ -539,6 +550,37 @@ export function TimelineView(): React.JSX.Element {
           })()}
       </div>
     </div>
+  )
+}
+
+/** Growing red regions on armed tracks while recording. */
+function RecordingRegions({
+  pxPerTick,
+  trackTops,
+  trackIds
+}: {
+  pxPerTick: number
+  trackTops: number[]
+  trackIds: string[]
+}): React.JSX.Element | null {
+  const rec = useRecording()
+  const [, force] = useReducer((c: number) => c + 1, 0)
+  useEffect(() => transport.subscribe(force), [])
+  if (!rec.recording) return null
+  const left = rec.recordStartTicks * pxPerTick
+  const width = Math.max(2, (transport.positionTicks() - rec.recordStartTicks) * pxPerTick)
+  return (
+    <>
+      {trackIds.map((trackId, i) =>
+        rec.isArmed(trackId) ? (
+          <div
+            key={trackId}
+            className="recording-region"
+            style={{ left, top: trackTops[i] + 4, width, height: LANE_H - 8 }}
+          />
+        ) : null
+      )}
+    </>
   )
 }
 

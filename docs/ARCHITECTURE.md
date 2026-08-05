@@ -194,6 +194,13 @@ default).
    sources into the same track chains. Piano-roll bottom-dock editor
    (double-click a MIDI clip), mini note previews on clips.
 
-Roadmap beyond: recording (M8), per-strip metering (AudioWorklet),
-internet rendezvous for join codes, packaging polish (icon, signing,
-auto-update), velocity editing, multi-note selection.
+8. ✅ **Recording** — arm audio tracks (ephemeral, per-user), transport
+   record button captures the input device via an AudioWorklet (raw PCM,
+   no monitoring path). Stopping encodes a PCM16 WAV, registers it as a
+   normal asset + File Bay entry, and creates clips at the record start
+   on every armed track — so takes sync to collaborators through the
+   standard asset machinery. Live red region shows the take growing.
+
+Roadmap beyond: per-strip metering (AudioWorklet), internet rendezvous
+for join codes, packaging polish (icon, signing, auto-update), velocity
+editing, multi-note selection, count-in/punch recording, input monitoring.

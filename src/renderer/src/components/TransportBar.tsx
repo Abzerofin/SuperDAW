@@ -7,6 +7,7 @@ import { audioEngine } from '@/state/audioInstance'
 import { useCollab, USER_COLORS } from '@/state/collab'
 import { usePanels } from '@/state/panels'
 import { usePianoRollUi } from '@/state/pianoRollUi'
+import { useRecording } from '@/state/recording'
 import { CollabPanel } from './CollabPanel'
 
 export function TransportBar(): React.JSX.Element {
@@ -28,6 +29,7 @@ export function TransportBar(): React.JSX.Element {
           ⏮
         </button>
         <PlayButton />
+        <RecordButton />
         <PositionDisplay />
         <TempoField tempo={state.tempo} />
         <div className="transport-sig mono">
@@ -92,6 +94,25 @@ function PlayButton(): React.JSX.Element {
       onClick={() => transport.toggle()}
     >
       {transport.isPlaying ? '■' : '▶'}
+    </button>
+  )
+}
+
+function RecordButton(): React.JSX.Element {
+  const rec = useRecording()
+  return (
+    <button
+      className={`tbtn tbtn-rec ${rec.recording ? 'tbtn-rec-active' : ''}`}
+      title={
+        rec.armedCount === 0
+          ? 'Record (arm a track first: ● on a track header)'
+          : rec.recording
+            ? 'Stop recording'
+            : 'Record'
+      }
+      onClick={() => void rec.toggle()}
+    >
+      ●
     </button>
   )
 }

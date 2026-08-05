@@ -960,6 +960,44 @@ input {
   transform: scale(1.25);
 }
 
+/* ---------- Recording ---------- */
+.tbtn-rec {
+  color: var(--danger);
+  min-width: 34px;
+}
+
+.tbtn-rec-active {
+  background: var(--danger);
+  border-color: var(--danger);
+  color: #fff;
+  animation: rec-pulse 1.2s ease-in-out infinite;
+}
+
+@keyframes rec-pulse {
+  50% {
+    opacity: 0.65;
+  }
+}
+
+.track-toggle-armed {
+  background: var(--danger);
+  border-color: var(--danger);
+  color: #fff;
+}
+
+.recording-layer {
+  position: relative;
+  pointer-events: none;
+  z-index: 1;
+}
+
+.recording-region {
+  position: absolute;
+  background: color-mix(in srgb, var(--danger) 30%, transparent);
+  border: 1px solid var(--danger);
+  border-radius: 4px;
+}
+
 /* ---------- Piano roll ---------- */
 :root {
   --proll-black-row: rgba(0, 0, 0, 0.28);
