@@ -104,6 +104,24 @@ asset store through narrow structural interfaces.
 Known limitation (accepted until tempo maps/warping): clip `offset` is in
 ticks, so a tempo change rescales where trimmed audio starts in its source.
 
+## File Bay & persistence
+
+The bay's folder/asset structure lives IN the project document
+(`ProjectState.files`) — organizing files is a collaborative, undoable
+edit like any other, driven by `file/*` ops (subtree deletes restore in
+one undo; cycle-creating moves are rejected in the reducer). Bay entries
+reference assets by id; deleting an entry never touches clips or asset
+data. Which folder a user is browsing is ephemeral UI state.
+
+Projects save as a single `.sdaw` file: a ZIP of `project.json` (document
++ asset manifest, `src/core/persistence/format.ts` — pure, validated,
+version-gated) plus each referenced asset's original encoded bytes.
+Unreferenced assets are garbage-collected at save time. Electron shows
+native dialogs via IPC (`project:save` / `project:open`); the browser dev
+build falls back to download/file-picker. Loading is NOT an operation —
+`ProjectStore.loadProject` swaps the document and resets history; the
+future network layer will move snapshots through its own join path.
+
 ## Time
 
 Musical time is integer ticks at `PPQ = 960` (`src/core/model/timebase.ts`).
@@ -142,8 +160,10 @@ default).
 2. ✅ **Audio engine** — Web Audio playback on the audio clock, per-track
    routing with seamless mute/solo, drag-drop audio import, waveforms,
    metronome, master meter.
-3. File Bay (folders, audio, MIDI; drag-and-drop to tracks) + project file
-   persistence.
+3. ✅ **File Bay + persistence** — Content-Browser-style bay (folders,
+   audio, MIDI) as document state; single-file `.sdaw` projects (zip of
+   state + assets) with native save/open dialogs, dirty tracking,
+   Ctrl+S/Ctrl+Shift+S/Ctrl+O.
 4. Collaboration: host-as-server session, join codes, op sync, presence
    (live cursors, pings), reconnection.
 5. Chat + comments.

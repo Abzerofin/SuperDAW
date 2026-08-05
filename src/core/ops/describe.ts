@@ -40,7 +40,25 @@ export function describe(state: ProjectState, op: Operation): string {
       return `Resized clip "${clipName(state, op.clipId)}"`
     case 'clip/rename':
       return `Renamed clip "${clipName(state, op.clipId)}" to "${op.name}"`
+    case 'file/create':
+      return op.nodes.length === 1
+        ? `Added ${op.nodes[0].kind === 'folder' ? 'folder' : 'file'} "${op.nodes[0].name}" to the File Bay`
+        : `Added ${op.nodes.length} items to the File Bay`
+    case 'file/delete':
+      return op.nodeIds.length === 1
+        ? `Removed "${fileName(state, op.nodeIds[0])}" from the File Bay`
+        : `Removed ${op.nodeIds.length} items from the File Bay`
+    case 'file/rename':
+      return `Renamed "${fileName(state, op.nodeId)}" to "${op.name}"`
+    case 'file/move':
+      return `Moved "${fileName(state, op.nodeId)}" to "${
+        op.parentId === null ? 'Project' : fileName(state, op.parentId)
+      }"`
   }
+}
+
+function fileName(state: ProjectState, nodeId: string): string {
+  return state.files[nodeId]?.name ?? 'unknown item'
 }
 
 function trackName(state: ProjectState, trackId: string): string {

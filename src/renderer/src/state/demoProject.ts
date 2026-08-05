@@ -58,6 +58,7 @@ export function createDemoProject(): ProjectState {
     timeSignature: sig,
     tracks: Object.fromEntries(tracks.map((t) => [t.id, t])),
     trackOrder: tracks.map((t) => t.id),
-    clips: Object.fromEntries(clips.map((c) => [c.id, c]))
+    clips: Object.fromEntries(clips.map((c) => [c.id, c])),
+    files: {}
   }
 }

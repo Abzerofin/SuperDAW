@@ -1,5 +1,5 @@
 import { describe as suite, expect, test } from 'vitest'
-import type { Clip, ProjectState, Track } from '../../model/types'
+import type { Clip, FileNode, ProjectState, Track } from '../../model/types'
 import { createEmptyProject } from '../../model/types'
 import type { Operation } from '../operations'
 import { apply } from '../apply'
@@ -14,12 +14,26 @@ function clip(id: string, trackId: string, start = 0, duration = 960): Clip {
   return { id, trackId, name: id, start, duration, assetId: null, offset: 0, color: null }
 }
 
+function fileNode(id: string, parentId: string | null, kind: FileNode['kind'] = 'audio'): FileNode {
+  return { id, parentId, kind, name: id, assetId: kind === 'folder' ? null : `asset-${id}` }
+}
+
 function baseState(): ProjectState {
   let s = createEmptyProject('Test')
   s = apply(s, { type: 'track/create', track: track('t1'), index: 0, clips: [] })
   s = apply(s, { type: 'track/create', track: track('t2'), index: 1, clips: [] })
   s = apply(s, { type: 'clip/create', clip: clip('c1', 't1', 0, 960) })
   s = apply(s, { type: 'clip/create', clip: clip('c2', 't1', 1920, 960) })
+  // File bay: root folder f1 containing f2 (folder) and a1; a2 at root
+  s = apply(s, {
+    type: 'file/create',
+    nodes: [
+      fileNode('f1', null, 'folder'),
+      fileNode('f2', 'f1', 'folder'),
+      fileNode('a1', 'f1'),
+      fileNode('a2', null)
+    ]
+  })
   return s
 }
 
@@ -67,7 +81,12 @@ suite('invert', () => {
     { type: 'clip/delete', clipId: 'c1' },
     { type: 'clip/move', clipId: 'c1', trackId: 't2', start: 4800 },
     { type: 'clip/resize', clipId: 'c2', start: 960, duration: 1920, offset: 480 },
-    { type: 'clip/rename', clipId: 'c2', name: 'Renamed Clip' }
+    { type: 'clip/rename', clipId: 'c2', name: 'Renamed Clip' },
+    { type: 'file/create', nodes: [fileNode('f9', null, 'folder'), fileNode('a9', 'f9')] },
+    { type: 'file/delete', nodeIds: ['f1'] }, // subtree: f1, f2, a1
+    { type: 'file/delete', nodeIds: ['a2', 'f2'] },
+    { type: 'file/rename', nodeId: 'a1', name: 'Renamed File' },
+    { type: 'file/move', nodeId: 'a2', parentId: 'f2' }
   ]
 
   for (const op of roundTrips) {
@@ -80,6 +99,32 @@ suite('invert', () => {
       expect(apply(after, inverse!)).toEqual(before)
     })
   }
+})
+
+suite('file bay ops', () => {
+  test('deleting a folder deletes its whole subtree', () => {
+    const s = apply(baseState(), { type: 'file/delete', nodeIds: ['f1'] })
+    expect(Object.keys(s.files).sort()).toEqual(['a2'])
+  })
+
+  test('a folder cannot move into itself or its own subtree', () => {
+    const s = baseState()
+    expect(apply(s, { type: 'file/move', nodeId: 'f1', parentId: 'f1' })).toBe(s)
+    expect(apply(s, { type: 'file/move', nodeId: 'f1', parentId: 'f2' })).toBe(s)
+  })
+
+  test('a node cannot move into a non-folder or missing parent', () => {
+    const s = baseState()
+    expect(apply(s, { type: 'file/move', nodeId: 'f2', parentId: 'a2' })).toBe(s)
+    expect(apply(s, { type: 'file/move', nodeId: 'f2', parentId: 'ghost' })).toBe(s)
+  })
+
+  test('moving to root and back preserves structure', () => {
+    let s = apply(baseState(), { type: 'file/move', nodeId: 'a1', parentId: null })
+    expect(s.files['a1'].parentId).toBeNull()
+    s = apply(s, { type: 'file/move', nodeId: 'a1', parentId: 'f2' })
+    expect(s.files['a1'].parentId).toBe('f2')
+  })
 })
 
 suite('ProjectStore', () => {

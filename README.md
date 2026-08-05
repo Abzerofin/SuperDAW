@@ -5,7 +5,7 @@ collaboration — multiplayer from the ground up, no accounts, no cloud
 dependency. Projects are local files; collaboration is an optional
 host-based session joined with a short code.
 
-**Status: Milestone 2 (audio engine) complete.**
+**Status: Milestone 3 (File Bay + persistence) complete.**
 
 - Operation-based project core (every edit is a serializable op — the same
   pipeline powers undo/redo, the activity feed, and future real-time sync)
@@ -14,6 +14,10 @@ host-based session joined with a short code.
 - Audio playback on the Web Audio clock: drop audio files onto tracks,
   waveforms, per-track routing with click-free mute/solo, metronome,
   master meter
+- File Bay: Content-Browser-style panel with folders, waveform thumbnails,
+  drag assets onto tracks, drag OS files in to import
+- Single-file `.sdaw` projects — save/open with native dialogs (Ctrl+S /
+  Ctrl+Shift+S / Ctrl+O), unsaved-changes indicator
 - Activity feed
 - Full undo/redo
 

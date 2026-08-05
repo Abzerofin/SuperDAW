@@ -190,7 +190,7 @@ export class AudioEngine {
     )
     for (const s of schedules) {
       const asset = this.assets.get(s.assetId)
-      if (!asset) continue
+      if (!asset?.buffer) continue
       const source = ctx.createBufferSource()
       source.buffer = asset.buffer
       source.connect(this.trackGain(s.trackId))

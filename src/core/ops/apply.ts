@@ -1,5 +1,5 @@
-import type { ProjectState, Track, Clip, TrackId, ClipId } from '../model/types'
-import { clipsOfTrack } from '../model/types'
+import type { ProjectState, Track, Clip, TrackId, ClipId, FileNode } from '../model/types'
+import { clipsOfTrack, isSelfOrDescendant, subtreeOf } from '../model/types'
 import type { Operation } from './operations'
 
 /**
@@ -102,6 +102,56 @@ export function apply(state: ProjectState, op: Operation): ProjectState {
 
     case 'clip/rename':
       return updateClip(state, op.clipId, (c) => ({ ...c, name: op.name }))
+
+    case 'file/create': {
+      const files = { ...state.files }
+      let changed = false
+      for (const node of op.nodes) {
+        if (files[node.id]) continue
+        // A node's parent must exist (or be root) and be a folder.
+        if (node.parentId !== null) {
+          const parent = files[node.parentId]
+          if (!parent || parent.kind !== 'folder') continue
+        }
+        files[node.id] = node
+        changed = true
+      }
+      return changed ? { ...state, files } : state
+    }
+
+    case 'file/delete': {
+      const doomed = new Set<string>()
+      for (const nodeId of op.nodeIds) {
+        for (const node of subtreeOf(state, nodeId)) doomed.add(node.id)
+      }
+      if (doomed.size === 0) return state
+      const files: Record<string, FileNode> = {}
+      for (const node of Object.values(state.files)) {
+        if (!doomed.has(node.id)) files[node.id] = node
+      }
+      return { ...state, files }
+    }
+
+    case 'file/rename': {
+      const node = state.files[op.nodeId]
+      if (!node || node.name === op.name) return state
+      return { ...state, files: { ...state.files, [op.nodeId]: { ...node, name: op.name } } }
+    }
+
+    case 'file/move': {
+      const node = state.files[op.nodeId]
+      if (!node || node.parentId === op.parentId) return state
+      if (op.parentId !== null) {
+        const target = state.files[op.parentId]
+        if (!target || target.kind !== 'folder') return state
+        // A folder can never be moved into itself or its own subtree.
+        if (isSelfOrDescendant(state, op.parentId, op.nodeId)) return state
+      }
+      return {
+        ...state,
+        files: { ...state.files, [op.nodeId]: { ...node, parentId: op.parentId } }
+      }
+    }
   }
 }
 

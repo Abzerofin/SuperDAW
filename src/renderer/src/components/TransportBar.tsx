@@ -8,9 +8,16 @@ import { audioEngine } from '@/state/audioInstance'
 interface Props {
   activityOpen: boolean
   onToggleActivity: () => void
+  bayOpen: boolean
+  onToggleBay: () => void
 }
 
-export function TransportBar({ activityOpen, onToggleActivity }: Props): React.JSX.Element {
+export function TransportBar({
+  activityOpen,
+  onToggleActivity,
+  bayOpen,
+  onToggleBay
+}: Props): React.JSX.Element {
   const state = useProjectState()
   const canUndo = useCanUndo()
   const canRedo = useCanRedo()
@@ -43,6 +50,13 @@ export function TransportBar({ activityOpen, onToggleActivity }: Props): React.J
         </button>
         <button className="tbtn" title="Redo (Ctrl+Y)" disabled={!canRedo} onClick={() => projectStore.redo()}>
           ↷
+        </button>
+        <button
+          className={`tbtn ${bayOpen ? 'tbtn-active' : ''}`}
+          title="Toggle File Bay"
+          onClick={onToggleBay}
+        >
+          Files
         </button>
         <button
           className={`tbtn ${activityOpen ? 'tbtn-active' : ''}`}

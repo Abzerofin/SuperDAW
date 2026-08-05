@@ -1,4 +1,4 @@
-import type { Clip, ClipId, Track, TrackId } from '../model/types'
+import type { Clip, ClipId, FileNode, FileNodeId, Track, TrackId } from '../model/types'
 
 /**
  * Every mutation of project state is expressed as one of these operations.
@@ -21,6 +21,12 @@ export type Operation =
   | { type: 'clip/move'; clipId: ClipId; trackId: TrackId; start: number }
   | { type: 'clip/resize'; clipId: ClipId; start: number; duration: number; offset: number }
   | { type: 'clip/rename'; clipId: ClipId; name: string }
+  /** Plural so that undoing a subtree delete restores everything in one op. */
+  | { type: 'file/create'; nodes: FileNode[] }
+  /** Deletes each node AND its descendants. */
+  | { type: 'file/delete'; nodeIds: FileNodeId[] }
+  | { type: 'file/rename'; nodeId: FileNodeId; name: string }
+  | { type: 'file/move'; nodeId: FileNodeId; parentId: FileNodeId | null }
 
 /** Wire/log format: an operation plus provenance metadata. */
 export interface OpEnvelope {

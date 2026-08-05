@@ -1,5 +1,50 @@
-import { app, BrowserWindow, shell } from 'electron'
-import { join } from 'node:path'
+import { app, BrowserWindow, dialog, ipcMain, shell } from 'electron'
+import { readFile, writeFile } from 'node:fs/promises'
+import { basename, join } from 'node:path'
+
+const PROJECT_FILTERS = [{ name: 'SuperDAW Project', extensions: ['sdaw'] }]
+
+function registerIpc(): void {
+  // Save project bytes. Shows a Save dialog unless a known path is passed
+  // (plain Ctrl+S re-save). Returns the path written, or null if cancelled.
+  ipcMain.handle(
+    'project:save',
+    async (
+      event,
+      args: { data: Uint8Array; path: string | null; defaultName: string }
+    ): Promise<string | null> => {
+      let filePath = args.path
+      if (!filePath) {
+        const win = BrowserWindow.fromWebContents(event.sender)
+        if (!win) return null
+        const result = await dialog.showSaveDialog(win, {
+          defaultPath: args.defaultName,
+          filters: PROJECT_FILTERS
+        })
+        if (result.canceled || !result.filePath) return null
+        filePath = result.filePath
+      }
+      await writeFile(filePath, Buffer.from(args.data))
+      return filePath
+    }
+  )
+
+  ipcMain.handle(
+    'project:open',
+    async (event): Promise<{ path: string; name: string; data: Uint8Array } | null> => {
+      const win = BrowserWindow.fromWebContents(event.sender)
+      if (!win) return null
+      const result = await dialog.showOpenDialog(win, {
+        filters: PROJECT_FILTERS,
+        properties: ['openFile']
+      })
+      if (result.canceled || result.filePaths.length === 0) return null
+      const path = result.filePaths[0]
+      const data = await readFile(path)
+      return { path, name: basename(path), data: new Uint8Array(data) }
+    }
+  )
+}
 
 function createWindow(): void {
   const win = new BrowserWindow({
@@ -35,6 +80,7 @@ function createWindow(): void {
 }
 
 app.whenReady().then(() => {
+  registerIpc()
   createWindow()
   app.on('activate', () => {
     if (BrowserWindow.getAllWindows().length === 0) createWindow()

@@ -7,7 +7,12 @@ import { useProjectState } from '@/state/hooks'
 import { selection, useSelectedClipId } from '@/state/selection'
 import { transport } from '@/state/transport'
 import { nextTrackColor } from '@/lib/colors'
-import { importAudioFiles } from '@/lib/importAudio'
+import {
+  BAY_DRAG_MIME,
+  createClipFromBayAsset,
+  importFilesToTrack,
+  type BayDragPayload
+} from '@/lib/importAudio'
 import { HEADER_W, RULER_H, LANE_H, MIN_PX_PER_BEAT, MAX_PX_PER_BEAT } from './geometry'
 import { TrackHeader } from './TrackHeader'
 import { ClipView } from './ClipView'
@@ -201,7 +206,12 @@ export function TimelineView(): React.JSX.Element {
 
   const onLaneDragOver = (e: React.DragEvent, trackIndex: number): void => {
     const track = tracks[trackIndex]
-    if (track?.kind === 'audio' && e.dataTransfer.types.includes('Files')) {
+    if (!track) return
+    // Bay assets announce their kind as a data type so we can filter here,
+    // before the payload itself is readable (it only is on drop).
+    const bayMatch = e.dataTransfer.types.includes(`${BAY_DRAG_MIME}-${track.kind}`)
+    const osFiles = e.dataTransfer.types.includes('Files')
+    if (bayMatch || osFiles) {
       e.preventDefault()
       e.dataTransfer.dropEffect = 'copy'
     }
@@ -209,12 +219,18 @@ export function TimelineView(): React.JSX.Element {
 
   const onLaneDrop = (e: React.DragEvent, trackIndex: number): void => {
     const track = tracks[trackIndex]
-    if (track?.kind !== 'audio') return
+    if (!track) return
     e.preventDefault()
     const laneRect = (e.currentTarget as HTMLElement).getBoundingClientRect()
     const ticks = (e.clientX - laneRect.left) / pxPerTick
     const start = Math.max(0, Math.floor(ticks / gridTicks) * gridTicks)
-    void importAudioFiles(Array.from(e.dataTransfer.files), track, start)
+
+    const bayData = e.dataTransfer.getData(BAY_DRAG_MIME)
+    if (bayData) {
+      createClipFromBayAsset(JSON.parse(bayData) as BayDragPayload, track, start)
+      return
+    }
+    void importFilesToTrack(Array.from(e.dataTransfer.files), track, start)
   }
 
   const onRulerPointerDown = (e: React.PointerEvent): void => {

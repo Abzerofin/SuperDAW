@@ -1,4 +1,4 @@
-import { contextBridge } from 'electron'
+import { contextBridge, ipcRenderer } from 'electron'
 
 /**
  * Minimal bridge between the sandboxed renderer and the main process.
@@ -6,7 +6,18 @@ import { contextBridge } from 'electron'
  * exposed here is optional from the renderer's perspective.
  */
 const api = {
-  platform: process.platform
+  platform: process.platform,
+
+  /** Write project bytes; dialog shown unless `path` given. Null = cancelled. */
+  saveProjectFile: (args: {
+    data: Uint8Array
+    path: string | null
+    defaultName: string
+  }): Promise<string | null> => ipcRenderer.invoke('project:save', args),
+
+  /** Pick and read a project file. Null = cancelled. */
+  openProjectFile: (): Promise<{ path: string; name: string; data: Uint8Array } | null> =>
+    ipcRenderer.invoke('project:open')
 }
 
 export type SuperDawApi = typeof api

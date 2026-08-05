@@ -6,5 +6,11 @@
 interface Window {
   superdaw?: {
     platform: string
+    saveProjectFile(args: {
+      data: Uint8Array
+      path: string | null
+      defaultName: string
+    }): Promise<string | null>
+    openProjectFile(): Promise<{ path: string; name: string; data: Uint8Array } | null>
   }
 }

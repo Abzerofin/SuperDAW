@@ -1,5 +1,5 @@
-import type { ProjectState } from '../model/types'
-import { clipsOfTrack } from '../model/types'
+import type { FileNode, ProjectState } from '../model/types'
+import { clipsOfTrack, subtreeOf } from '../model/types'
 import type { Operation } from './operations'
 
 /**
@@ -89,6 +89,36 @@ export function invert(state: ProjectState, op: Operation): Operation | null {
       const clip = state.clips[op.clipId]
       if (!clip) return null
       return { type: 'clip/rename', clipId: op.clipId, name: clip.name }
+    }
+
+    case 'file/create':
+      return { type: 'file/delete', nodeIds: op.nodes.map((n) => n.id) }
+
+    case 'file/delete': {
+      const nodes: FileNode[] = []
+      const seen = new Set<string>()
+      for (const nodeId of op.nodeIds) {
+        for (const node of subtreeOf(state, nodeId)) {
+          if (!seen.has(node.id)) {
+            seen.add(node.id)
+            nodes.push(node)
+          }
+        }
+      }
+      if (nodes.length === 0) return null
+      return { type: 'file/create', nodes }
+    }
+
+    case 'file/rename': {
+      const node = state.files[op.nodeId]
+      if (!node) return null
+      return { type: 'file/rename', nodeId: op.nodeId, name: node.name }
+    }
+
+    case 'file/move': {
+      const node = state.files[op.nodeId]
+      if (!node) return null
+      return { type: 'file/move', nodeId: op.nodeId, parentId: node.parentId }
     }
   }
 }

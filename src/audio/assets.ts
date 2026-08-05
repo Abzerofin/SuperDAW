@@ -4,6 +4,10 @@ import { newId } from '@core/model/ids'
  * Decoded audio assets, held OUTSIDE project state. The project document
  * only references assets by id — this split is what later allows instant
  * state sync while asset binaries transfer in the background.
+ *
+ * The original encoded bytes are retained: they are what gets written into
+ * project files (and, later, transferred to collaborators). MIDI assets
+ * carry bytes only for now; parsing arrives with the piano-roll milestone.
  */
 
 /** Minimal shape of an AudioBuffer; lets peak math run in tests without Web Audio. */
@@ -14,29 +18,55 @@ export interface AudioBufferLike {
   getChannelData(channel: number): Float32Array
 }
 
-export interface AudioAsset {
+export interface ProjectAsset {
   readonly id: string
   readonly name: string
-  readonly seconds: number
-  readonly buffer: AudioBuffer
-  /** Interleaved [min, max] pairs for waveform drawing. */
-  readonly peaks: Float32Array
+  readonly kind: 'audio' | 'midi'
+  /** Original file extension without the dot, e.g. "wav". */
+  readonly ext: string
+  /** Original encoded file bytes (written into project files). */
+  readonly encoded: Uint8Array
+  /** Decoded audio; null for MIDI assets. */
+  readonly buffer: AudioBuffer | null
+  /** Playable length in seconds; null when unknown (MIDI, for now). */
+  readonly seconds: number | null
+  /** Interleaved [min, max] pairs for waveform drawing; null for MIDI. */
+  readonly peaks: Float32Array | null
   readonly peaksPerSecond: number
 }
 
 export const PEAKS_PER_SECOND = 120
 
 export class AssetStore {
-  private assets = new Map<string, AudioAsset>()
+  private assets = new Map<string, ProjectAsset>()
   private listeners = new Set<() => void>()
 
-  add(name: string, buffer: AudioBuffer): AudioAsset {
-    const asset: AudioAsset = {
-      id: newId('ast'),
+  addAudio(name: string, ext: string, encoded: Uint8Array, buffer: AudioBuffer): ProjectAsset {
+    return this.restore(newId('ast'), name, 'audio', ext, encoded, buffer)
+  }
+
+  addMidi(name: string, ext: string, encoded: Uint8Array): ProjectAsset {
+    return this.restore(newId('ast'), name, 'midi', ext, encoded, null)
+  }
+
+  /** Register an asset under a fixed id (loading project files, remote sync). */
+  restore(
+    id: string,
+    name: string,
+    kind: 'audio' | 'midi',
+    ext: string,
+    encoded: Uint8Array,
+    buffer: AudioBuffer | null
+  ): ProjectAsset {
+    const asset: ProjectAsset = {
+      id,
       name,
-      seconds: buffer.length / buffer.sampleRate,
+      kind,
+      ext,
+      encoded,
       buffer,
-      peaks: computePeaks(buffer, PEAKS_PER_SECOND),
+      seconds: buffer ? buffer.length / buffer.sampleRate : null,
+      peaks: buffer ? computePeaks(buffer, PEAKS_PER_SECOND) : null,
       peaksPerSecond: PEAKS_PER_SECOND
     }
     this.assets.set(asset.id, asset)
@@ -44,13 +74,23 @@ export class AssetStore {
     return asset
   }
 
-  get(id: string): AudioAsset | undefined {
+  get(id: string): ProjectAsset | undefined {
     return this.assets.get(id)
   }
 
-  /** Duration in seconds, or null if the asset isn't (yet) available. */
+  all(): ProjectAsset[] {
+    return [...this.assets.values()]
+  }
+
+  /** Playable duration in seconds, or null if unavailable. */
   getSeconds(id: string): number | null {
     return this.assets.get(id)?.seconds ?? null
+  }
+
+  /** Drop everything (loading a different project). */
+  clear(): void {
+    this.assets.clear()
+    for (const listener of this.listeners) listener()
   }
 
   subscribe = (listener: () => void): (() => void) => {

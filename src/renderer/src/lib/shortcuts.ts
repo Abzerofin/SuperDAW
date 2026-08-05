@@ -2,6 +2,7 @@ import { useEffect } from 'react'
 import { projectStore } from '@/state/projectStore'
 import { transport } from '@/state/transport'
 import { selection } from '@/state/selection'
+import { openProject, saveProject } from './projectFile'
 
 /** App-wide keyboard shortcuts. Inactive while a text field has focus. */
 export function useGlobalShortcuts(): void {
@@ -18,6 +19,16 @@ export function useGlobalShortcuts(): void {
       }
 
       const mod = e.ctrlKey || e.metaKey
+      if (mod && e.key.toLowerCase() === 's') {
+        e.preventDefault()
+        void saveProject(e.shiftKey) // Ctrl+Shift+S = Save As
+        return
+      }
+      if (mod && e.key.toLowerCase() === 'o') {
+        e.preventDefault()
+        void openProject()
+        return
+      }
       if (mod && e.key.toLowerCase() === 'z') {
         e.preventDefault()
         if (e.shiftKey) projectStore.redo()

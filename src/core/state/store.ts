@@ -82,6 +82,20 @@ export class ProjectStore {
   }
 
   /**
+   * Replace the entire document (opening a project file). NOT an operation:
+   * history and activity reset because they describe a document that no
+   * longer exists. The future network layer moves whole-state snapshots
+   * through its own join/sync path, never through dispatch.
+   */
+  loadProject(state: ProjectState): void {
+    this.current = state
+    this.undoStack = []
+    this.redoStack = []
+    this.activityLog = []
+    for (const listener of this.stateListeners) listener()
+  }
+
+  /**
    * Apply an operation. Returns false if it was a no-op (e.g. it targeted
    * an entity that no longer exists).
    */

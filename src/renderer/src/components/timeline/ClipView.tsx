@@ -1,7 +1,7 @@
 import { useEffect, useRef, useSyncExternalStore } from 'react'
 import type { Clip } from '@core/model/types'
 import { ticksPerSecond } from '@audio/scheduling'
-import type { AudioAsset } from '@audio/assets'
+import type { ProjectAsset } from '@audio/assets'
 import { assetStore } from '@/state/audioInstance'
 import { LANE_H } from './geometry'
 
@@ -56,7 +56,7 @@ export function ClipView({
       } as React.CSSProperties}
       onPointerDown={(e) => onPointerDown(e, 'move')}
     >
-      {asset && (
+      {asset?.peaks && (
         <Waveform asset={asset} width={width} height={height} offset={offset} duration={duration} tempo={tempo} />
       )}
       <div className="clip-name">{clip.name}</div>
@@ -67,7 +67,7 @@ export function ClipView({
 }
 
 interface WaveformProps {
-  asset: AudioAsset
+  asset: ProjectAsset
   width: number
   height: number
   offset: number
@@ -88,6 +88,8 @@ function Waveform({ asset, width, height, offset, duration, tempo }: WaveformPro
     const g = canvas.getContext('2d')
     if (!g) return
 
+    const peaks = asset.peaks
+    if (!peaks) return
     const tps = ticksPerSecond(tempo)
     const fromSec = offset / tps
     const spanSec = duration / tps
@@ -99,9 +101,9 @@ function Waveform({ asset, width, height, offset, duration, tempo }: WaveformPro
     for (let x = 0; x < w; x++) {
       const sec = fromSec + (x / w) * spanSec
       const bucket = Math.floor(sec * asset.peaksPerSecond)
-      if (bucket < 0 || bucket * 2 + 1 >= asset.peaks.length) continue // silence past source end
-      const min = asset.peaks[bucket * 2]
-      const max = asset.peaks[bucket * 2 + 1]
+      if (bucket < 0 || bucket * 2 + 1 >= peaks.length) continue // silence past source end
+      const min = peaks[bucket * 2]
+      const max = peaks[bucket * 2 + 1]
       g.fillRect(x, mid - max * amp, 1, Math.max(1, (max - min) * amp))
     }
   }, [asset, width, height, offset, duration, tempo])
