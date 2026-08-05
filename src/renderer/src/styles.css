@@ -67,9 +67,15 @@ input {
   grid-template-rows: 44px 1fr 26px;
 }
 
+/* overflow: hidden at each level stops the timeline's intrinsic content
+ * width (thousands of px of bars) escaping up through the column-flex
+ * wrapper and blowing out the whole app grid — the timeline must scroll
+ * internally, never widen the window layout. */
 .app-main {
   display: flex;
   min-height: 0;
+  min-width: 0;
+  overflow: hidden;
 }
 
 .app-center {
@@ -78,6 +84,7 @@ input {
   flex-direction: column;
   min-width: 0;
   min-height: 0;
+  overflow: hidden;
 }
 
 /* ---------- Transport bar ---------- */
