@@ -19,7 +19,7 @@ export function TrackHeader({ track }: { track: Track }): React.JSX.Element {
   ).length
   const popoverOpen = openAnchor?.kind === 'track' && openAnchor.id === track.id
   const fxOpen = useFxUi().trackId === track.id
-  const hasFx = Object.values(useProjectState().effects).some((e) => e.trackId === track.id)
+  const hasFx = Object.values(useProjectState().plugins).some((p) => p.trackId === track.id)
 
   const commit = (): void => {
     setEditing(false)

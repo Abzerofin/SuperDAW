@@ -1,5 +1,5 @@
 import type { FileNode, Note, ProjectState } from '../model/types'
-import { clipsOfTrack, effectsOfTrack, notesOfClip, subtreeOf } from '../model/types'
+import { clipsOfTrack, pluginsOfTrack, notesOfClip, subtreeOf } from '../model/types'
 
 function automationOfTrack(state: ProjectState, trackId: string) {
   return Object.values(state.automation).filter((p) => p.trackId === trackId)
@@ -41,7 +41,7 @@ export function invert(state: ProjectState, op: Operation): Operation | null {
         clips: clipsOfTrack(state, op.trackId),
         automation: automationOfTrack(state, op.trackId),
         notes: notesOfTrack(state, op.trackId),
-        effects: effectsOfTrack(state, op.trackId)
+        plugins: pluginsOfTrack(state, op.trackId)
       }
     }
 
@@ -107,30 +107,30 @@ export function invert(state: ProjectState, op: Operation): Operation | null {
       return { type: 'note/addMany', notes }
     }
 
-    case 'effect/add':
-      return { type: 'effect/remove', effectId: op.effect.id }
+    case 'plugin/add':
+      return { type: 'plugin/remove', instanceId: op.instance.id }
 
-    case 'effect/remove': {
-      const effect = state.effects[op.effectId]
-      if (!effect) return null
-      return { type: 'effect/add', effect }
+    case 'plugin/remove': {
+      const instance = state.plugins[op.instanceId]
+      if (!instance) return null
+      return { type: 'plugin/add', instance }
     }
 
-    case 'effect/setParam': {
-      const effect = state.effects[op.effectId]
-      if (!effect) return null
+    case 'plugin/setParam': {
+      const instance = state.plugins[op.instanceId]
+      if (!instance) return null
       return {
-        type: 'effect/setParam',
-        effectId: op.effectId,
+        type: 'plugin/setParam',
+        instanceId: op.instanceId,
         param: op.param,
-        value: effect.params[op.param] ?? 0
+        value: instance.params[op.param] ?? 0
       }
     }
 
-    case 'effect/setEnabled': {
-      const effect = state.effects[op.effectId]
-      if (!effect) return null
-      return { type: 'effect/setEnabled', effectId: op.effectId, enabled: effect.enabled }
+    case 'plugin/setEnabled': {
+      const instance = state.plugins[op.instanceId]
+      if (!instance) return null
+      return { type: 'plugin/setEnabled', instanceId: op.instanceId, enabled: instance.enabled }
     }
 
     case 'track/setSynthParam': {

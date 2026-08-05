@@ -1,5 +1,5 @@
 import type { TimeSignature } from './timebase'
-import type { EffectType } from './effects'
+import type { PluginDescriptor } from '../plugins/descriptor'
 
 export type TrackId = string
 export type ClipId = string
@@ -58,16 +58,23 @@ export interface Track {
   readonly synth: Readonly<Record<string, number>>
 }
 
-export type EffectId = string
+export type PluginInstanceId = string
 
-/** One insert in a track's effect chain. Chains sort by `rank`. */
-export interface Effect {
-  readonly id: EffectId
+/**
+ * One insert in a track's chain: a use of a plugin, identified by
+ * descriptor metadata (never a filesystem path — see core/plugins).
+ * Chains sort by `rank`. Whether the plugin is actually available is a
+ * per-client runtime question and lives outside the document.
+ */
+export interface PluginInstance {
+  readonly id: PluginInstanceId
   readonly trackId: TrackId
-  readonly type: EffectType
+  readonly descriptor: PluginDescriptor
   readonly enabled: boolean
   readonly rank: number
   readonly params: Readonly<Record<string, number>>
+  /** Opaque serialized plugin chunk state (external formats); null for builtins. */
+  readonly stateBlob: string | null
 }
 
 export const MAX_GAIN = 1.4 // ≈ +3 dB of headroom above unity
@@ -156,7 +163,7 @@ export interface ProjectState {
   readonly masterVolume: number
   readonly automation: Readonly<Record<AutomationPointId, AutomationPoint>>
   readonly notes: Readonly<Record<NoteId, Note>>
-  readonly effects: Readonly<Record<EffectId, Effect>>
+  readonly plugins: Readonly<Record<PluginInstanceId, PluginInstance>>
 }
 
 export function createEmptyProject(name: string): ProjectState {
@@ -173,14 +180,14 @@ export function createEmptyProject(name: string): ProjectState {
     masterVolume: 1,
     automation: {},
     notes: {},
-    effects: {}
+    plugins: {}
   }
 }
 
 /** A track's insert chain in processing order. */
-export function effectsOfTrack(state: ProjectState, trackId: TrackId): Effect[] {
-  return Object.values(state.effects)
-    .filter((e) => e.trackId === trackId)
+export function pluginsOfTrack(state: ProjectState, trackId: TrackId): PluginInstance[] {
+  return Object.values(state.plugins)
+    .filter((p) => p.trackId === trackId)
     .sort((a, b) => a.rank - b.rank)
 }
 

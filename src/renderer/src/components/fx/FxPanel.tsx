@@ -1,22 +1,18 @@
 import { useEffect, useRef, useState } from 'react'
-import type { Effect, Track } from '@core/model/types'
-import { effectsOfTrack } from '@core/model/types'
-import {
-  EFFECT_DEFS,
-  EFFECT_TYPES,
-  SYNTH_DEFS,
-  WAVE_TYPES,
-  effectDefaults,
-  synthDefaults,
-  type EffectType,
-  type ParamDef
-} from '@core/model/effects'
+import type { PluginInstance, Track } from '@core/model/types'
+import { pluginsOfTrack } from '@core/model/types'
+import { SYNTH_DEFS, WAVE_TYPES, synthDefaults, type ParamDef } from '@core/model/effects'
+import type { PluginDescriptor } from '@core/plugins/descriptor'
+import { BUILTIN_EFFECT_DESCRIPTORS, paramDefsOf, pluginDefaults } from '@core/plugins/builtin'
+import { pluginRegistry } from '@audio/pluginRegistry'
 import { newId } from '@core/model/ids'
 import { projectStore } from '@/state/projectStore'
 import { useProjectState } from '@/state/hooks'
+import { usePluginRegistry } from '@/state/pluginRegistryHook'
 import { audioEngine } from '@/state/audioInstance'
 import { fxUi } from '@/state/fxUi'
 import { capturePointer } from '@/lib/pointer'
+import { PluginPlaceholder } from './PluginPlaceholder'
 
 /**
  * Per-track FX panel: the built-in synth's controls (MIDI tracks) and the
@@ -26,7 +22,7 @@ import { capturePointer } from '@/lib/pointer'
 export function FxPanel({ track }: { track: Track }): React.JSX.Element {
   const state = useProjectState()
   const rootRef = useRef<HTMLDivElement>(null)
-  const inserts = effectsOfTrack(state, track.id)
+  const inserts = pluginsOfTrack(state, track.id)
 
   useEffect(() => {
     const onPointerDown = (e: PointerEvent): void => {
@@ -43,17 +39,18 @@ export function FxPanel({ track }: { track: Track }): React.JSX.Element {
     }
   }, [])
 
-  const addEffect = (type: EffectType): void => {
-    const maxRank = inserts.reduce((max, e) => Math.max(max, e.rank), 0)
+  const addPlugin = (descriptor: PluginDescriptor): void => {
+    const maxRank = inserts.reduce((max, p) => Math.max(max, p.rank), 0)
     projectStore.dispatch({
-      type: 'effect/add',
-      effect: {
-        id: newId('efx'),
+      type: 'plugin/add',
+      instance: {
+        id: newId('plg'),
         trackId: track.id,
-        type,
+        descriptor,
         enabled: true,
         rank: maxRank + 1,
-        params: effectDefaults(type)
+        params: pluginDefaults(descriptor),
+        stateBlob: null
       }
     })
   }
@@ -73,14 +70,18 @@ export function FxPanel({ track }: { track: Track }): React.JSX.Element {
       <div className="fx-body">
         {track.kind === 'midi' && <SynthSection track={track} />}
 
-        {inserts.map((effect) => (
-          <EffectSection key={effect.id} effect={effect} />
+        {inserts.map((instance) => (
+          <PluginSection key={instance.id} instance={instance} />
         ))}
 
         <div className="fx-add">
-          {EFFECT_TYPES.map((type) => (
-            <button key={type} className="fx-add-btn" onClick={() => addEffect(type)}>
-              + {EFFECT_DEFS[type].label}
+          {BUILTIN_EFFECT_DESCRIPTORS.map((descriptor) => (
+            <button
+              key={descriptor.uid}
+              className="fx-add-btn"
+              onClick={() => addPlugin(descriptor)}
+            >
+              + {descriptor.name}
             </button>
           ))}
         </div>
@@ -126,43 +127,50 @@ function SynthSection({ track }: { track: Track }): React.JSX.Element {
   )
 }
 
-function EffectSection({ effect }: { effect: Effect }): React.JSX.Element {
-  const def = EFFECT_DEFS[effect.type]
+function PluginSection({ instance }: { instance: PluginInstance }): React.JSX.Element {
+  usePluginRegistry() // re-render when a plugin gets installed mid-session
+  const status = pluginRegistry.status(instance.descriptor)
+  if (status !== 'local') {
+    return <PluginPlaceholder instance={instance} status={status} />
+  }
+  const defs = paramDefsOf(instance.descriptor) ?? {}
   return (
-    <div className={`fx-section ${effect.enabled ? '' : 'fx-bypassed'}`}>
+    <div className={`fx-section ${instance.enabled ? '' : 'fx-bypassed'}`}>
       <div className="fx-section-head">
         <button
-          className={`fx-power ${effect.enabled ? 'fx-power-on' : ''}`}
-          title={effect.enabled ? 'Bypass' : 'Enable'}
+          className={`fx-power ${instance.enabled ? 'fx-power-on' : ''}`}
+          title={instance.enabled ? 'Bypass' : 'Enable'}
           onClick={() =>
             projectStore.dispatch({
-              type: 'effect/setEnabled',
-              effectId: effect.id,
-              enabled: !effect.enabled
+              type: 'plugin/setEnabled',
+              instanceId: instance.id,
+              enabled: !instance.enabled
             })
           }
         >
           ⏻
         </button>
-        <span className="fx-section-title">{def.label}</span>
+        <span className="fx-section-title">{instance.descriptor.name}</span>
         <button
           className="comment-delete fx-remove"
-          title="Remove effect"
-          onClick={() => projectStore.dispatch({ type: 'effect/remove', effectId: effect.id })}
+          title="Remove plugin"
+          onClick={() =>
+            projectStore.dispatch({ type: 'plugin/remove', instanceId: instance.id })
+          }
         >
           ×
         </button>
       </div>
-      {Object.entries(def.params).map(([key, paramDef]) => (
+      {Object.entries(defs).map(([key, paramDef]) => (
         <ParamSlider
           key={key}
           def={paramDef}
-          value={effect.params[key] ?? paramDef.default}
-          onPreview={(v) => audioEngine.previewEffectParam(effect.id, key, v)}
+          value={instance.params[key] ?? paramDef.default}
+          onPreview={(v) => audioEngine.previewPluginParam(instance.id, key, v)}
           onCommit={(v) =>
             projectStore.dispatch({
-              type: 'effect/setParam',
-              effectId: effect.id,
+              type: 'plugin/setParam',
+              instanceId: instance.id,
               param: key,
               value: v
             })

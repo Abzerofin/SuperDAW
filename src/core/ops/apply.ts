@@ -5,13 +5,14 @@ import type {
   TrackId,
   ClipId,
   Comment,
-  Effect,
   FileNode,
   AutomationPoint,
-  Note
+  Note,
+  PluginInstance
 } from '../model/types'
 import { clipsOfTrack, isSelfOrDescendant, subtreeOf, MAX_GAIN } from '../model/types'
-import { EFFECT_DEFS, SYNTH_DEFS, clampParam } from '../model/effects'
+import { SYNTH_DEFS, clampParam, type ParamDef } from '../model/effects'
+import { paramDefsOf } from '../plugins/builtin'
 
 /** Insert notes, skipping ids that exist and notes whose clip is missing. */
 function withNotes(
@@ -37,6 +38,29 @@ function withNotes(
 
 function clampInt(value: number, min: number, max: number): number {
   return Math.min(max, Math.max(min, Math.round(value)))
+}
+
+/**
+ * With param defs (builtins, or external plugins that snapshotted defs):
+ * exactly the defined params, each clamped. Without defs the params pass
+ * through with only a finite-number guard — clamping must depend solely on
+ * document data so every peer sanitizes identically.
+ */
+function sanitizeParams(
+  defs: Readonly<Record<string, ParamDef>> | null,
+  incoming: Readonly<Record<string, number>>
+): Record<string, number> {
+  const params: Record<string, number> = {}
+  if (defs) {
+    for (const [key, def] of Object.entries(defs)) {
+      params[key] = clampParam(def, incoming[key] ?? def.default)
+    }
+    return params
+  }
+  for (const [key, value] of Object.entries(incoming)) {
+    if (Number.isFinite(value)) params[key] = value
+  }
+  return params
 }
 import type { Operation } from './operations'
 
@@ -77,9 +101,9 @@ export function apply(state: ProjectState, op: Operation): ProjectState {
       const automation = { ...state.automation }
       for (const point of op.automation) automation[point.id] = point
       const { notes } = withNotes(state.notes, clips, op.notes)
-      const effects = { ...state.effects }
-      for (const effect of op.effects) {
-        if (!effects[effect.id]) effects[effect.id] = effect
+      const plugins = { ...state.plugins }
+      for (const instance of op.plugins) {
+        if (!plugins[instance.id]) plugins[instance.id] = instance
       }
       return {
         ...state,
@@ -88,7 +112,7 @@ export function apply(state: ProjectState, op: Operation): ProjectState {
         clips,
         automation,
         notes,
-        effects
+        plugins
       }
     }
 
@@ -108,9 +132,9 @@ export function apply(state: ProjectState, op: Operation): ProjectState {
       for (const note of Object.values(state.notes)) {
         if (clips[note.clipId]) notes[note.id] = note
       }
-      const effects: Record<string, Effect> = {}
-      for (const effect of Object.values(state.effects)) {
-        if (effect.trackId !== op.trackId) effects[effect.id] = effect
+      const plugins: Record<string, PluginInstance> = {}
+      for (const instance of Object.values(state.plugins)) {
+        if (instance.trackId !== op.trackId) plugins[instance.id] = instance
       }
       return {
         ...state,
@@ -119,7 +143,7 @@ export function apply(state: ProjectState, op: Operation): ProjectState {
         clips,
         automation,
         notes,
-        effects
+        plugins
       }
     }
 
@@ -214,50 +238,49 @@ export function apply(state: ProjectState, op: Operation): ProjectState {
       return changed ? { ...state, notes } : state
     }
 
-    case 'effect/add': {
-      if (state.effects[op.effect.id]) return state
-      if (!state.tracks[op.effect.trackId]) return state
-      if (!EFFECT_DEFS[op.effect.type]) return state
-      const defs = EFFECT_DEFS[op.effect.type].params
-      const params: Record<string, number> = {}
-      for (const [key, def] of Object.entries(defs)) {
-        params[key] = clampParam(def, op.effect.params[key] ?? def.default)
-      }
+    case 'plugin/add': {
+      if (state.plugins[op.instance.id]) return state
+      if (!state.tracks[op.instance.trackId]) return state
+      const defs = paramDefsOf(op.instance.descriptor)
+      // A builtin descriptor whose uid core doesn't know is unusable.
+      if (op.instance.descriptor.format === 'builtin' && !defs) return state
+      const params = sanitizeParams(defs, op.instance.params)
       return {
         ...state,
-        effects: { ...state.effects, [op.effect.id]: { ...op.effect, params } }
+        plugins: { ...state.plugins, [op.instance.id]: { ...op.instance, params } }
       }
     }
 
-    case 'effect/remove': {
-      if (!state.effects[op.effectId]) return state
-      const effects = { ...state.effects }
-      delete effects[op.effectId]
-      return { ...state, effects }
+    case 'plugin/remove': {
+      if (!state.plugins[op.instanceId]) return state
+      const plugins = { ...state.plugins }
+      delete plugins[op.instanceId]
+      return { ...state, plugins }
     }
 
-    case 'effect/setParam': {
-      const effect = state.effects[op.effectId]
-      if (!effect) return state
-      const def = EFFECT_DEFS[effect.type].params[op.param]
-      if (!def) return state
-      const value = clampParam(def, op.value)
-      if (effect.params[op.param] === value) return state
+    case 'plugin/setParam': {
+      const instance = state.plugins[op.instanceId]
+      if (!instance || !Number.isFinite(op.value)) return state
+      const defs = paramDefsOf(instance.descriptor)
+      const def = defs?.[op.param]
+      if (defs && !def) return state
+      const value = def ? clampParam(def, op.value) : op.value
+      if (instance.params[op.param] === value) return state
       return {
         ...state,
-        effects: {
-          ...state.effects,
-          [op.effectId]: { ...effect, params: { ...effect.params, [op.param]: value } }
+        plugins: {
+          ...state.plugins,
+          [op.instanceId]: { ...instance, params: { ...instance.params, [op.param]: value } }
         }
       }
     }
 
-    case 'effect/setEnabled': {
-      const effect = state.effects[op.effectId]
-      if (!effect || effect.enabled === op.enabled) return state
+    case 'plugin/setEnabled': {
+      const instance = state.plugins[op.instanceId]
+      if (!instance || instance.enabled === op.enabled) return state
       return {
         ...state,
-        effects: { ...state.effects, [op.effectId]: { ...effect, enabled: op.enabled } }
+        plugins: { ...state.plugins, [op.instanceId]: { ...instance, enabled: op.enabled } }
       }
     }
 

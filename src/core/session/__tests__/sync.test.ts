@@ -73,7 +73,7 @@ class TestNetwork {
       clips: [],
       automation: [],
       notes: [],
-      effects: []
+      plugins: []
     })
     this.hostStore.dispatch({
       type: 'track/create',
@@ -82,7 +82,7 @@ class TestNetwork {
       clips: [],
       automation: [],
       notes: [],
-      effects: []
+      plugins: []
     })
     this.hostStore.dispatch({ type: 'clip/create', clip: makeClip('c1', 't1'), notes: [] })
   }
@@ -339,7 +339,7 @@ suite('session sync', () => {
       clips: [],
       automation: [],
       notes: [],
-      effects: []
+      plugins: []
     })
     net.flush()
 
@@ -399,7 +399,7 @@ suite('session fuzz', () => {
             clips: [],
             automation: [],
             notes: [],
-            effects: []
+            plugins: []
           })
         }
         if (roll < 0.3 && trackIds.length > 0) {

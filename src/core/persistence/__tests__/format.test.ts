@@ -28,7 +28,7 @@ function sampleState() {
     clips: [],
     automation: [{ id: 'ap1', trackId: 't1', param: 'volume', ticks: 480, value: 0.6 }],
     notes: [],
-    effects: []
+    plugins: []
   })
   s = apply(s, {
     type: 'clip/create',
@@ -94,6 +94,30 @@ suite('project file format', () => {
     expect(parsed.state.tracks['t1'].pan).toBe(0)
     expect(parsed.state.masterVolume).toBe(1)
     expect(parsed.state.automation).toEqual({})
+  })
+
+  test('v1 files with legacy effects load as builtin plugin instances', () => {
+    const state = sampleState()
+    const { plugins: _plugins, ...rest } = state
+    const legacyState = {
+      ...rest,
+      effects: {
+        fx1: { id: 'fx1', trackId: 't1', type: 'eq3', enabled: false, rank: 2, params: { low: 3 } },
+        fx2: { id: 'fx2', trackId: 't1', type: 'notAnEffect', enabled: true, rank: 1, params: {} }
+      }
+    }
+    const parsed = parseProjectJson(
+      JSON.stringify({ formatVersion: 1, state: legacyState, assets: [] })
+    )
+    const inst = parsed.state.plugins['fx1']
+    expect(inst.descriptor).toMatchObject({ format: 'builtin', uid: 'superdaw.eq3' })
+    expect(inst.enabled).toBe(false)
+    expect(inst.rank).toBe(2)
+    expect(inst.params).toEqual({ low: 3 })
+    expect(inst.stateBlob).toBeNull()
+    // Unknown legacy types are dropped, and the legacy key doesn't linger
+    expect(parsed.state.plugins['fx2']).toBeUndefined()
+    expect('effects' in parsed.state).toBe(false)
   })
 
   test('a v1 file missing a required section is rejected, not half-loaded', () => {

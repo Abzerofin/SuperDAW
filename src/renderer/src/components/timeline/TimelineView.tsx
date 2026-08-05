@@ -458,7 +458,7 @@ export function TimelineView(): React.JSX.Element {
       clips: [],
       automation: [],
       notes: [],
-      effects: []
+      plugins: []
     })
   }
 

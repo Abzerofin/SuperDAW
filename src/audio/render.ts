@@ -1,6 +1,6 @@
 import type { ProjectState } from '@core/model/types'
-import { automationOf, automationValueAt, effectsOfTrack } from '@core/model/types'
-import { buildEffect } from './effects'
+import { automationOf, automationValueAt, pluginsOfTrack } from '@core/model/types'
+import { pluginRegistry } from './pluginRegistry'
 import { buildSynthVoice } from './synth'
 import { scheduleClips, scheduleNotes, ticksPerSecond } from './scheduling'
 import { encodeWavPcm16 } from './wav'
@@ -53,12 +53,15 @@ export async function renderMixdown(
     fader.gain.value = audible ? track.volume : 0
     panner.pan.value = track.pan
 
-    // Insert chain: input → enabled effects by rank → auto.
+    // Insert chain: input → enabled plugins by rank → auto. Plugins this
+    // client can't resolve are bypassed, exactly as in live playback.
     let prev: AudioNode = input
-    for (const effect of effectsOfTrack(state, trackId)) {
-      if (!effect.enabled) continue
-      const nodes = buildEffect(ctx, effect)
-      nodes.apply(effect.params, 0)
+    for (const instance of pluginsOfTrack(state, trackId)) {
+      if (!instance.enabled) continue
+      const resolved = pluginRegistry.resolve(instance.descriptor)
+      if (!resolved) continue
+      const nodes = resolved.provider.create(ctx)
+      nodes.apply(instance.params, 0)
       prev.connect(nodes.input)
       prev = nodes.output
     }

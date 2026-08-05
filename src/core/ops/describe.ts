@@ -1,5 +1,6 @@
 import type { ProjectState } from '../model/types'
-import { EFFECT_DEFS, SYNTH_DEFS } from '../model/effects'
+import { SYNTH_DEFS } from '../model/effects'
+import { paramDefsOf } from '../plugins/builtin'
 import type { Operation } from './operations'
 
 /**
@@ -73,31 +74,31 @@ export function describe(state: ProjectState, op: Operation): string | null {
         ? `Deleted a note${suffix}`
         : `Deleted ${op.noteIds.length} notes${suffix}`
     }
-    case 'effect/add':
-      return `Added ${EFFECT_DEFS[op.effect.type]?.label ?? op.effect.type} to "${trackName(
+    case 'plugin/add':
+      return `Added ${op.instance.descriptor.name} to "${trackName(
         state,
-        op.effect.trackId
+        op.instance.trackId
       )}"`
-    case 'effect/remove': {
-      const effect = state.effects[op.effectId]
-      if (!effect) return null
-      return `Removed ${EFFECT_DEFS[effect.type].label} from "${trackName(state, effect.trackId)}"`
+    case 'plugin/remove': {
+      const instance = state.plugins[op.instanceId]
+      if (!instance) return null
+      return `Removed ${instance.descriptor.name} from "${trackName(state, instance.trackId)}"`
     }
-    case 'effect/setParam': {
-      const effect = state.effects[op.effectId]
-      if (!effect) return null
-      const def = EFFECT_DEFS[effect.type].params[op.param]
-      return `Set ${EFFECT_DEFS[effect.type].label} ${def?.label ?? op.param} on "${trackName(
+    case 'plugin/setParam': {
+      const instance = state.plugins[op.instanceId]
+      if (!instance) return null
+      const def = paramDefsOf(instance.descriptor)?.[op.param]
+      return `Set ${instance.descriptor.name} ${def?.label ?? op.param} on "${trackName(
         state,
-        effect.trackId
+        instance.trackId
       )}"`
     }
-    case 'effect/setEnabled': {
-      const effect = state.effects[op.effectId]
-      if (!effect) return null
-      return `${op.enabled ? 'Enabled' : 'Bypassed'} ${EFFECT_DEFS[effect.type].label} on "${trackName(
+    case 'plugin/setEnabled': {
+      const instance = state.plugins[op.instanceId]
+      if (!instance) return null
+      return `${op.enabled ? 'Enabled' : 'Bypassed'} ${instance.descriptor.name} on "${trackName(
         state,
-        effect.trackId
+        instance.trackId
       )}"`
     }
     case 'track/setSynthParam': {

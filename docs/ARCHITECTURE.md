@@ -106,6 +106,41 @@ asset store through narrow structural interfaces.
 Known limitation (accepted until tempo maps/warping): clip `offset` is in
 ticks, so a tempo change rescales where trimmed audio starts in its source.
 
+## Plugin architecture (`src/core/plugins` + `src/audio/pluginRegistry.ts`)
+
+**Identity lives in the document; availability is ephemeral.** An insert is
+a `PluginInstance` whose `PluginDescriptor` (format/uid/vendor/name/version
+— never a filesystem path) identifies the plugin. Each client resolves
+descriptors against its own local `PluginRegistry`, so the same project can
+be fully editable on one collaborator's machine while showing placeholders
+on another's — with zero document divergence.
+
+- **Runtime status** (`local | remote | proxy | missing`) is computed per
+  client, never stored. A missing plugin bypasses cleanly (engine and
+  offline render both skip unresolved inserts) and its instance stays fully
+  intact — params, rank, opaque `stateBlob` — so it comes alive the moment
+  a matching provider registers (the registry is observable; the engine
+  rewires and placeholders swap to live controls automatically). `remote`
+  (collaborator streams the processed audio) and `proxy` (rendered stand-in
+  plays) are reserved states for the collaboration-streaming milestone; the
+  state machine, UI and document model already accommodate them.
+- **Builtins are plugins.** The five insert effects register as providers
+  (`format: 'builtin'`, uid `superdaw.<type>`) and flow through the same
+  descriptor → registry → provider pipeline external formats (VST2/VST3/
+  CLAP/AU) will use. Their param defs stay in `core/model/effects.ts`;
+  external plugins snapshot `paramDefs` into the descriptor so the reducer
+  clamps deterministically on every peer regardless of who has the plugin.
+- **No silent substitution.** Resolution ladder: exact (format+uid+version)
+  → compatible version (same format+uid) → same vendor/name in another
+  format, which `resolve()` never auto-uses — `formatAlternatives()` exists
+  so the UI can ask the user first.
+- **The manifest is derived** (`pluginManifest(state)`): distinct
+  descriptors in use, their instances and tracks, joined with local status
+  in the status bar — never persisted, so it can't drift.
+
+The built-in synth still lives on MIDI tracks (`Track.synth`); folding it
+into an instrument-plugin instance is a future, separate migration.
+
 ## File Bay & persistence
 
 The bay's folder/asset structure lives IN the project document
@@ -223,7 +258,18 @@ default).
     scheduling math, synth voice and effect builders); unsaved-changes
     close guard (Electron dialog handshake, browser beforeunload).
 
-Roadmap beyond: autotune/pitch correction (dedicated AudioWorklet DSP
+11. ✅ **Plugin architecture** — inserts became `PluginInstance`s carrying
+    `PluginDescriptor` metadata (see the plugin architecture section):
+    `plugin/*` ops, per-client `PluginRegistry` resolution with the four
+    runtime states (local/remote/proxy/missing), builtin effects as
+    providers, placeholder UI for unavailable plugins, derived plugin
+    manifest in the status bar, and `.sdaw` format v2 with transparent
+    migration of v1 `effects`. No external hosting yet — the contracts it
+    will slot into.
+
+Roadmap beyond: VST3 hosting (native module; first consumer of the
+provider/`stateBlob` contracts), collaborator audio streaming + proxy
+renders for remote/missing plugins, autotune/pitch correction (dedicated AudioWorklet DSP
 milestone: pitch detection + PSOLA resynthesis), effect reordering UI,
 per-strip metering, internet rendezvous for join codes, packaging polish
 (icon, signing, auto-update), multi-clip/multi-note selection, loop/cycle

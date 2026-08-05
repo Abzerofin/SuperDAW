@@ -1,7 +1,7 @@
-import type { EffectId, ProjectState, TrackId } from '@core/model/types'
-import { automationOf, automationValueAt, effectsOfTrack } from '@core/model/types'
+import type { PluginInstanceId, ProjectState, TrackId } from '@core/model/types'
+import { automationOf, automationValueAt, pluginsOfTrack } from '@core/model/types'
 import type { AssetStore } from './assets'
-import { buildEffect, type EffectNodes } from './effects'
+import { pluginRegistry, type PluginNodes } from './pluginRegistry'
 import { buildSynthVoice } from './synth'
 import {
   beatIndexAt,
@@ -62,7 +62,7 @@ export class AudioEngine {
   private analyser: AnalyserNode | null = null
   private meterBuf: Float32Array<ArrayBuffer> | null = null
   private chains = new Map<TrackId, TrackChain>()
-  private fxNodes = new Map<EffectId, EffectNodes>()
+  private fxNodes = new Map<PluginInstanceId, PluginNodes>()
   /** Everything currently scheduled: clip buffer sources AND synth oscillators. */
   private sources = new Set<AudioScheduledSourceNode>()
 
@@ -80,7 +80,7 @@ export class AudioEngine {
   private prevAutomation: ProjectState['automation']
   private prevMasterVolume: number
   private prevNotes: ProjectState['notes']
-  private prevEffects: ProjectState['effects']
+  private prevPlugins: ProjectState['plugins']
 
   constructor(
     private store: StoreLike,
@@ -93,10 +93,15 @@ export class AudioEngine {
     this.prevAutomation = store.state.automation
     this.prevMasterVolume = store.state.masterVolume
     this.prevNotes = store.state.notes
-    this.prevEffects = store.state.effects
+    this.prevPlugins = store.state.plugins
     store.subscribe(this.onStateChanged)
     assets.subscribe(this.onAssetsChanged)
     transport.onEvent(this.onTransportEvent)
+    // A provider registering later (plugin installed mid-session) rewires
+    // chains so placeholders come alive without any document change.
+    pluginRegistry.subscribe(() => {
+      if (this.ctx) this.syncPlugins()
+    })
   }
 
   /** Create the AudioContext (idempotent). Safe pre-gesture; starts suspended. */
@@ -115,17 +120,17 @@ export class AudioEngine {
     // what the user sees and what they hear.
     this.transport.setTimeSource({ now: () => ctx.currentTime })
     this.syncMixer()
-    this.syncEffects()
+    this.syncPlugins()
     return ctx
   }
 
-  /** Live-preview an effect knob while dragging (no op until release). */
-  previewEffectParam(effectId: EffectId, param: string, value: number): void {
+  /** Live-preview a plugin knob while dragging (no op until release). */
+  previewPluginParam(instanceId: PluginInstanceId, param: string, value: number): void {
     const ctx = this.ctx
-    const effect = this.store.state.effects[effectId]
-    const nodes = this.fxNodes.get(effectId)
-    if (ctx && effect && nodes) {
-      nodes.apply({ ...effect.params, [param]: value }, ctx.currentTime)
+    const instance = this.store.state.plugins[instanceId]
+    const nodes = this.fxNodes.get(instanceId)
+    if (ctx && instance && nodes) {
+      nodes.apply({ ...instance.params, [param]: value }, ctx.currentTime)
     }
   }
 
@@ -230,9 +235,9 @@ export class AudioEngine {
       this.prevMasterVolume = state.masterVolume
       if (this.ctx) this.syncMixer()
     }
-    if (state.effects !== this.prevEffects) {
-      this.prevEffects = state.effects
-      if (this.ctx) this.syncEffects()
+    if (state.plugins !== this.prevPlugins) {
+      this.prevPlugins = state.plugins
+      if (this.ctx) this.syncPlugins()
     }
     const automationEdited = state.automation !== this.prevAutomation
     this.prevAutomation = state.automation
@@ -377,18 +382,20 @@ export class AudioEngine {
   }
 
   /**
-   * Reconcile effect node instances with document state and (re)wire each
-   * track's insert path: input → enabled effects in rank order → auto.
-   * Instances persist across unrelated changes so params don't zipper.
+   * Reconcile plugin node instances with document state and (re)wire each
+   * track's insert path: input → enabled plugins in rank order → auto.
+   * Node instances persist across unrelated changes so params don't
+   * zipper. Unresolvable plugins (MISSING on this client) are bypassed —
+   * a missing plugin never breaks playback or the project.
    */
-  private syncEffects(): void {
+  private syncPlugins(): void {
     const ctx = this.ctx
     if (!ctx) return
     const state = this.store.state
-    for (const [effectId, nodes] of this.fxNodes) {
-      if (!state.effects[effectId]) {
+    for (const [instanceId, nodes] of this.fxNodes) {
+      if (!state.plugins[instanceId]) {
         nodes.dispose()
-        this.fxNodes.delete(effectId)
+        this.fxNodes.delete(instanceId)
       }
     }
     for (const [trackId, chain] of this.chains) this.wireInserts(trackId, chain)
@@ -398,22 +405,24 @@ export class AudioEngine {
     const ctx = this.ctx
     if (!ctx) return
     const now = ctx.currentTime
-    const inserts = effectsOfTrack(this.store.state, trackId)
+    const inserts = pluginsOfTrack(this.store.state, trackId)
 
     chain.input.disconnect()
-    for (const effect of inserts) {
-      this.fxNodes.get(effect.id)?.output.disconnect()
+    for (const instance of inserts) {
+      this.fxNodes.get(instance.id)?.output.disconnect()
     }
 
     let prev: AudioNode = chain.input
-    for (const effect of inserts) {
-      if (!effect.enabled) continue
-      let nodes = this.fxNodes.get(effect.id)
+    for (const instance of inserts) {
+      if (!instance.enabled) continue
+      let nodes = this.fxNodes.get(instance.id)
       if (!nodes) {
-        nodes = buildEffect(ctx, effect)
-        this.fxNodes.set(effect.id, nodes)
+        const resolved = pluginRegistry.resolve(instance.descriptor)
+        if (!resolved) continue // MISSING here: bypass until a provider appears
+        nodes = resolved.provider.create(ctx)
+        this.fxNodes.set(instance.id, nodes)
       }
-      nodes.apply(effect.params, now)
+      nodes.apply(instance.params, now)
       prev.connect(nodes.input)
       prev = nodes.output
     }
@@ -447,10 +456,10 @@ export class AudioEngine {
         chain.auto.disconnect()
         chain.fader.disconnect()
         chain.panner.disconnect()
-        for (const effect of Object.values(this.prevEffects)) {
-          if (effect.trackId === trackId) {
-            this.fxNodes.get(effect.id)?.dispose()
-            this.fxNodes.delete(effect.id)
+        for (const instance of Object.values(this.prevPlugins)) {
+          if (instance.trackId === trackId) {
+            this.fxNodes.get(instance.id)?.dispose()
+            this.fxNodes.delete(instance.id)
           }
         }
         this.chains.delete(trackId)

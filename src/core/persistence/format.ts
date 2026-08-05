@@ -1,6 +1,7 @@
-import type { ProjectState, Track } from '../model/types'
+import type { PluginInstance, ProjectState, Track } from '../model/types'
 import { createEmptyProject } from '../model/types'
-import { synthDefaults } from '../model/effects'
+import { synthDefaults, EFFECT_DEFS, type EffectType } from '../model/effects'
+import { builtinEffectDescriptor } from '../plugins/builtin'
 
 /**
  * The .sdaw project file is a ZIP archive:
@@ -17,7 +18,8 @@ import { synthDefaults } from '../model/effects'
  * is garbage-collected at save time.
  */
 
-export const FORMAT_VERSION = 1
+/** 2: insert chain became plugin instances with descriptors (was `effects` keyed by EffectType). */
+export const FORMAT_VERSION = 2
 export const PROJECT_FILE_EXTENSION = 'sdaw'
 
 export interface AssetManifestEntry {
@@ -113,6 +115,45 @@ export function parseProjectJson(text: string): ProjectFileJson {
       synth: legacy.synth ?? (legacy.kind === 'midi' ? synthDefaults() : {})
     }
   }
-  const full: ProjectState = { ...merged, tracks }
+  const full: ProjectState = { ...merged, tracks, plugins: migratePlugins(merged) }
+  // v1 stored inserts under `effects`; migratePlugins consumed it.
+  delete (full as { effects?: unknown }).effects
   return { formatVersion: candidate.formatVersion, state: full, assets }
+}
+
+interface LegacyEffect {
+  readonly id: string
+  readonly trackId: string
+  readonly type: EffectType
+  readonly enabled?: boolean
+  readonly rank?: number
+  readonly params?: Record<string, number>
+}
+
+/**
+ * v1 inserts were `effects` records identified by a bare EffectType; they
+ * become plugin instances with builtin descriptors. v2+ instances pass
+ * through with `stateBlob` defaulted for forward compatibility.
+ */
+function migratePlugins(merged: ProjectState): Record<string, PluginInstance> {
+  const plugins: Record<string, PluginInstance> = {}
+  for (const [id, instance] of Object.entries(merged.plugins ?? {})) {
+    plugins[id] = { ...instance, stateBlob: instance.stateBlob ?? null }
+  }
+  const legacy = (merged as { effects?: Record<string, LegacyEffect> }).effects
+  if (legacy) {
+    for (const [id, fx] of Object.entries(legacy)) {
+      if (plugins[id] || !EFFECT_DEFS[fx.type]) continue
+      plugins[id] = {
+        id,
+        trackId: fx.trackId,
+        descriptor: builtinEffectDescriptor(fx.type),
+        enabled: fx.enabled ?? true,
+        rank: fx.rank ?? 1,
+        params: fx.params ?? {},
+        stateBlob: null
+      }
+    }
+  }
+  return plugins
 }

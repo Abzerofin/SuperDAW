@@ -1136,6 +1136,93 @@ input {
   background: var(--bg-3);
 }
 
+/* Plugin placeholders (plugin missing on this client) + runtime status */
+.fx-placeholder {
+  border: 1px dashed var(--border);
+}
+
+.fx-placeholder-meta {
+  font-size: 10px;
+}
+
+.fx-placeholder-status {
+  font-size: 10px;
+  color: var(--text-dim);
+  font-style: italic;
+}
+
+.fx-status-dot {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  flex: none;
+  display: inline-block;
+}
+
+.fx-status-local {
+  background: var(--ok, #4caf7d);
+}
+
+.fx-status-remote,
+.fx-status-proxy {
+  background: var(--warn, #d9a441);
+}
+
+.fx-status-missing {
+  background: var(--danger);
+}
+
+/* Plugin manifest (status bar) */
+.statusbar-plugins {
+  position: relative;
+}
+
+.statusbar-plugins-btn {
+  font: inherit;
+  color: inherit;
+  background: none;
+  border: none;
+  padding: 0;
+  cursor: pointer;
+}
+
+.statusbar-plugins-btn:hover {
+  color: var(--text);
+}
+
+.statusbar-plugins-warn {
+  color: var(--danger);
+}
+
+.plugin-manifest {
+  position: absolute;
+  right: 0;
+  bottom: 20px;
+  min-width: 300px;
+  padding: 6px;
+  background: var(--bg-1);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  box-shadow: 0 4px 16px rgba(0, 0, 0, 0.4);
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  z-index: 40;
+  text-align: left;
+}
+
+.plugin-manifest-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 11px;
+  white-space: nowrap;
+}
+
+.plugin-manifest-name {
+  color: var(--text);
+}
+
 /* ---------- Recording ---------- */
 .tbtn-rec {
   color: var(--danger);
