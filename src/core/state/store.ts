@@ -10,14 +10,19 @@ import { newId } from '../model/ids'
  *
  * Every edit — local UI action, remote collaborator op, undo, redo — flows
  * through this store. That single path is what makes the DAW collaborative
- * by construction:
+ * by construction. See docs/PROTOCOL.md for the sync model.
  *
- *   - local ops are recorded for undo and (later) broadcast to peers
- *   - remote ops apply through the exact same reducer, so peers converge
- *   - the activity feed is a byproduct of the op stream, not separate logic
+ * The store holds THREE layers (collapsed when not in a session):
  *
- * UI-only, ephemeral state (drag previews, scroll, selection) intentionally
- * lives outside this store: it is per-user and never synchronized as ops.
+ *   confirmed  state per the host's authoritative op order
+ *   pending    own ops not yet confirmed (in flight, or offline backlog)
+ *   displayed  confirmed + pending, what the UI renders
+ *
+ * Solo mode and host mode have no pending set: confirmed === displayed.
+ * Client mode (a `SequencerLink` is attached) dispatches optimistically:
+ * displayed advances at once, the op joins `pending` and goes to the host;
+ * `receiveAuthoritative` later confirms it (or interleaves remote ops,
+ * rebasing pending on top).
  */
 
 export type OpSource = 'local' | 'remote' | 'history'
@@ -31,6 +36,11 @@ export interface ActivityEntry {
 
 export type OpListener = (envelope: OpEnvelope, source: OpSource) => void
 
+/** Where a client session sends its locally-originated ops. */
+export interface SequencerLink {
+  sendLocalOp(envelope: OpEnvelope): void
+}
+
 interface HistoryEntry {
   forward: Operation
   inverse: Operation
@@ -40,7 +50,11 @@ interface HistoryEntry {
 const ACTIVITY_LIMIT = 500
 
 export class ProjectStore {
-  private current: ProjectState
+  private confirmed: ProjectState
+  private displayed: ProjectState
+  private pending: OpEnvelope[] = []
+  private link: SequencerLink | null = null
+
   private undoStack: HistoryEntry[] = []
   private redoStack: HistoryEntry[] = []
   private activityLog: readonly ActivityEntry[] = []
@@ -51,11 +65,20 @@ export class ProjectStore {
     initial: ProjectState,
     readonly userId: string
   ) {
-    this.current = initial
+    this.confirmed = initial
+    this.displayed = initial
   }
 
   get state(): ProjectState {
-    return this.current
+    return this.displayed
+  }
+
+  get confirmedState(): ProjectState {
+    return this.confirmed
+  }
+
+  get pendingOps(): readonly OpEnvelope[] {
+    return this.pending
   }
 
   get activity(): readonly ActivityEntry[] {
@@ -81,44 +104,119 @@ export class ProjectStore {
     return () => this.opListeners.delete(listener)
   }
 
-  /**
-   * Replace the entire document (opening a project file). NOT an operation:
-   * history and activity reset because they describe a document that no
-   * longer exists. The future network layer moves whole-state snapshots
-   * through its own join/sync path, never through dispatch.
-   */
-  loadProject(state: ProjectState): void {
-    this.current = state
-    this.undoStack = []
-    this.redoStack = []
-    this.activityLog = []
-    for (const listener of this.stateListeners) listener()
+  // ---------- Session lifecycle (client mode) ----------
+
+  /** Enter client mode: local ops become optimistic and flow to the host. */
+  attachSession(link: SequencerLink): void {
+    this.link = link
   }
 
   /**
-   * Apply an operation. Returns false if it was a no-op (e.g. it targeted
-   * an entity that no longer exists).
+   * Leave client mode. Whatever is displayed (including unconfirmed local
+   * edits) is adopted as the local document — the project becomes a plain
+   * local project again.
    */
-  dispatch(op: Operation, source: OpSource = 'local', userId = this.userId): boolean {
-    const next = apply(this.current, op)
-    if (next === this.current) return false
+  detachSession(): void {
+    this.link = null
+    this.confirmed = this.displayed
+    this.pending = []
+  }
 
-    const text = describe(this.current, op)
+  /**
+   * Replace the entire document (opening a project file, or first join
+   * snapshot). NOT an operation: history, activity, and pending reset
+   * because they describe a document that no longer exists.
+   */
+  loadProject(state: ProjectState): void {
+    this.confirmed = state
+    this.displayed = state
+    this.pending = []
+    this.undoStack = []
+    this.redoStack = []
+    this.activityLog = []
+    this.emitState()
+  }
+
+  /**
+   * Reconnect resync: adopt a fresh authoritative snapshot but KEEP local
+   * history and pending edits — pending rebases on top and the session
+   * will re-send it (ops are idempotent, so double-delivery is safe).
+   */
+  resetToSnapshot(state: ProjectState): void {
+    this.confirmed = state
+    this.rebase()
+    this.emitState()
+  }
+
+  /**
+   * An op arrived in authoritative order (client mode). Confirms our own
+   * in-flight ops; interleaves everyone else's, rebasing pending on top.
+   */
+  receiveAuthoritative(envelope: OpEnvelope): void {
+    const ownIndex = this.pending.findIndex((p) => p.id === envelope.id)
+    const isOwn = ownIndex !== -1
+    // Describe against pre-apply confirmed state so names resolve.
+    const text = isOwn ? null : describe(this.confirmed, envelope.op)
+
+    this.confirmed = apply(this.confirmed, envelope.op)
+    if (isOwn) this.pending.splice(ownIndex, 1)
+    this.rebase()
+
+    if (!isOwn && text) {
+      // Own ops were logged optimistically at dispatch time.
+      this.pushActivity(envelope.userId, text)
+      for (const listener of this.opListeners) listener(envelope, 'remote')
+    }
+    this.emitState()
+  }
+
+  /**
+   * The host acked one of our ops as a no-op (its target vanished, or it
+   * was an idempotent re-send). Drop it from pending; the rebase removes
+   * its optimistic effect if the target is gone.
+   */
+  confirmNoop(envelopeId: string): void {
+    const index = this.pending.findIndex((p) => p.id === envelopeId)
+    if (index === -1) return
+    this.pending.splice(index, 1)
+    this.rebase()
+    this.emitState()
+  }
+
+  // ---------- Edits ----------
+
+  /**
+   * Apply an operation. Returns false if it was a no-op (e.g. it targeted
+   * an entity that no longer exists). `source: 'remote'` is for a HOST
+   * applying a client's op (clients receive remote ops via
+   * `receiveAuthoritative` instead); pass the originating envelope id so
+   * the origin peer can match the echo.
+   */
+  dispatch(
+    op: Operation,
+    source: OpSource = 'local',
+    userId: string = this.userId,
+    envelopeId?: string
+  ): boolean {
+    const next = apply(this.displayed, op)
+    if (next === this.displayed) return false
+
+    const text = describe(this.displayed, op)
     if (source === 'local') {
-      const inverse = invert(this.current, op)
+      const inverse = invert(this.displayed, op)
       if (inverse) {
         this.undoStack.push({ forward: op, inverse, text })
         this.redoStack = []
       }
     }
-    this.commit(op, next, text, source, userId)
+    this.commit(op, next, text, source, userId, envelopeId)
     return true
   }
 
   undo(): boolean {
     const entry = this.undoStack.pop()
     if (!entry) return false
-    const next = apply(this.current, entry.inverse)
+    const next = apply(this.displayed, entry.inverse)
     this.redoStack.push(entry)
     this.commit(entry.inverse, next, `Undo · ${entry.text}`, 'history', this.userId)
     return true
@@ -127,27 +225,59 @@ export class ProjectStore {
   redo(): boolean {
     const entry = this.redoStack.pop()
     if (!entry) return false
-    const inverse = invert(this.current, entry.forward)
-    const next = apply(this.current, entry.forward)
+    const inverse = invert(this.displayed, entry.forward)
+    const next = apply(this.displayed, entry.forward)
     if (inverse) this.undoStack.push({ ...entry, inverse })
     this.commit(entry.forward, next, `Redo · ${entry.text}`, 'history', this.userId)
     return true
   }
+
+  // ---------- Internals ----------
 
   private commit(
     op: Operation,
     next: ProjectState,
     text: string,
     source: OpSource,
-    userId: string
+    userId: string,
+    envelopeId?: string
   ): void {
-    this.current = next
+    const envelope: OpEnvelope = {
+      id: envelopeId ?? newId('op'),
+      userId,
+      time: Date.now(),
+      op
+    }
+
+    this.displayed = next
+    if (this.link !== null && source !== 'remote') {
+      // Client mode: optimistic. Confirmed advances only via the host echo.
+      this.pending.push(envelope)
+      this.link.sendLocalOp(envelope)
+    } else {
+      // Solo/host mode: confirmed and displayed advance together.
+      this.confirmed = apply(this.confirmed, op)
+    }
+
+    this.pushActivity(userId, text)
+    for (const listener of this.opListeners) listener(envelope, source)
+    this.emitState()
+  }
+
+  private rebase(): void {
+    let state = this.confirmed
+    for (const p of this.pending) state = apply(state, p.op)
+    this.displayed = state
+  }
+
+  private pushActivity(userId: string, text: string): void {
     this.activityLog = [
       ...this.activityLog.slice(-(ACTIVITY_LIMIT - 1)),
       { id: newId('act'), userId, time: Date.now(), text }
     ]
-    const envelope: OpEnvelope = { id: newId('op'), userId, time: Date.now(), op }
-    for (const listener of this.opListeners) listener(envelope, source)
+  }
+
+  private emitState(): void {
     for (const listener of this.stateListeners) listener()
   }
 }
