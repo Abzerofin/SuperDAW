@@ -1,6 +1,7 @@
-import type { FileNodeId, Track } from '@core/model/types'
+import type { FileNodeId, Note, Track } from '@core/model/types'
 import { newId } from '@core/model/ids'
-import { barsToTicks } from '@core/model/timebase'
+import { barsToTicks, ticksPerBar } from '@core/model/timebase'
+import { parseSmf } from '@core/midi/smf'
 import { ticksPerSecond } from '@audio/scheduling'
 import type { ProjectAsset } from '@audio/assets'
 import { audioEngine, assetStore } from '@/state/audioInstance'
@@ -43,7 +44,29 @@ async function importAsset(file: File): Promise<ProjectAsset | null> {
   return null
 }
 
-/** One import = one op: asset's bay entry (and optional clip) undo together. */
+/** Notes for a MIDI asset, remapped onto a fresh clip id. */
+function midiNotesFor(asset: ProjectAsset, clipId: string): { notes: Note[]; totalTicks: number } {
+  if (asset.kind !== 'midi') return { notes: [], totalTicks: 0 }
+  try {
+    const parsed = parseSmf(asset.encoded)
+    return {
+      notes: parsed.notes.map((n) => ({
+        id: newId('not'),
+        clipId,
+        pitch: n.pitch,
+        start: n.start,
+        duration: n.duration,
+        velocity: n.velocity
+      })),
+      totalTicks: parsed.totalTicks
+    }
+  } catch (error) {
+    console.warn(`Could not parse MIDI in "${asset.name}"`, error)
+    return { notes: [], totalTicks: 0 }
+  }
+}
+
+/** One import = one op per concern: bay entry, then clip (with its notes). */
 function dispatchImported(
   asset: ProjectAsset,
   folderId: FileNodeId | null,
@@ -61,30 +84,37 @@ function dispatchImported(
       }
     ]
   })
-  const durationTicks = clipDurationTicks(asset)
-  if (clipTarget) {
-    projectStore.dispatch({
-      type: 'clip/create',
-      clip: {
-        id: newId('clp'),
-        trackId: clipTarget.track.id,
-        name: baseName(asset.name),
-        start: clipTarget.startTicks,
-        duration: durationTicks,
-        assetId: asset.id,
-        offset: 0,
-        color: null
-      }
-    })
-  }
+  if (!clipTarget) return clipDurationTicks(asset, 0)
+
+  const clipId = newId('clp')
+  const { notes, totalTicks } = midiNotesFor(asset, clipId)
+  const durationTicks = clipDurationTicks(asset, totalTicks)
+  projectStore.dispatch({
+    type: 'clip/create',
+    clip: {
+      id: clipId,
+      trackId: clipTarget.track.id,
+      name: baseName(asset.name),
+      start: clipTarget.startTicks,
+      duration: durationTicks,
+      assetId: asset.id,
+      offset: 0,
+      color: null
+    },
+    notes
+  })
   return durationTicks
 }
 
-export function clipDurationTicks(asset: ProjectAsset): number {
+export function clipDurationTicks(asset: ProjectAsset, midiTicks = 0): number {
   if (asset.seconds !== null) {
     return Math.max(1, Math.round(asset.seconds * ticksPerSecond(projectStore.state.tempo)))
   }
-  // Unknown length (MIDI, un-decoded audio): a sensible default.
+  if (midiTicks > 0) {
+    // Round MIDI content up to whole bars so the clip sits neatly on the grid.
+    const bar = ticksPerBar(projectStore.state.timeSignature)
+    return Math.max(bar, Math.ceil(midiTicks / bar) * bar)
+  }
   return barsToTicks(4, projectStore.state.timeSignature)
 }
 
@@ -143,17 +173,20 @@ export function createClipFromBayAsset(
 ): void {
   const asset = assetStore.get(payload.assetId)
   if (!asset || asset.kind !== track.kind) return
+  const clipId = newId('clp')
+  const { notes, totalTicks } = midiNotesFor(asset, clipId)
   projectStore.dispatch({
     type: 'clip/create',
     clip: {
-      id: newId('clp'),
+      id: clipId,
       trackId: track.id,
       name: payload.name,
       start: Math.max(0, startTicks),
-      duration: clipDurationTicks(asset),
+      duration: clipDurationTicks(asset, totalTicks),
       assetId: asset.id,
       offset: 0,
       color: null
-    }
+    },
+    notes
   })
 }

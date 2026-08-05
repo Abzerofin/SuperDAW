@@ -8,6 +8,8 @@ import type {
   CommentId,
   FileNode,
   FileNodeId,
+  Note,
+  NoteId,
   Track,
   TrackId
 } from '../model/types'
@@ -21,8 +23,15 @@ import type {
 export type Operation =
   | { type: 'project/rename'; name: string }
   | { type: 'project/setTempo'; tempo: number }
-  /** `clips`/`automation` restore a deleted track's content on undo; empty for new tracks. */
-  | { type: 'track/create'; track: Track; index: number; clips: Clip[]; automation: AutomationPoint[] }
+  /** `clips`/`automation`/`notes` restore a deleted track's content on undo; empty for new tracks. */
+  | {
+      type: 'track/create'
+      track: Track
+      index: number
+      clips: Clip[]
+      automation: AutomationPoint[]
+      notes: Note[]
+    }
   | { type: 'track/delete'; trackId: TrackId }
   | { type: 'track/rename'; trackId: TrackId; name: string }
   | { type: 'track/setMute'; trackId: TrackId; muted: boolean }
@@ -33,8 +42,15 @@ export type Operation =
   | { type: 'automation/add'; point: AutomationPoint }
   | { type: 'automation/move'; pointId: AutomationPointId; ticks: number; value: number }
   | { type: 'automation/delete'; pointId: AutomationPointId }
+  | { type: 'note/add'; note: Note }
+  | { type: 'note/move'; noteId: NoteId; pitch: number; start: number }
+  | { type: 'note/resize'; noteId: NoteId; duration: number }
+  /** Plural: multi-delete and thread restores stay one undoable op. */
+  | { type: 'note/delete'; noteIds: NoteId[] }
+  | { type: 'note/addMany'; notes: Note[] }
   | { type: 'track/reorder'; trackId: TrackId; index: number }
-  | { type: 'clip/create'; clip: Clip }
+  /** `notes` seeds MIDI content (import, undo-restore); empty for new clips. */
+  | { type: 'clip/create'; clip: Clip; notes: Note[] }
   | { type: 'clip/delete'; clipId: ClipId }
   | { type: 'clip/move'; clipId: ClipId; trackId: TrackId; start: number }
   | { type: 'clip/resize'; clipId: ClipId; start: number; duration: number; offset: number }

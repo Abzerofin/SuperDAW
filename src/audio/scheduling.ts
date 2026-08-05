@@ -64,6 +64,52 @@ export function scheduleClips(
   return out
 }
 
+export interface NoteSchedule {
+  readonly trackId: string
+  readonly pitch: number
+  /** Normalized 0..1 from MIDI velocity. */
+  readonly velocity: number
+  /** Absolute clock time, >= anchorSec. */
+  readonly startSec: number
+  readonly endSec: number
+}
+
+/**
+ * Upcoming synth notes. Note times are clip-relative; notes are clipped to
+ * their clip's window (shortening a clip mutes notes past its end). A note
+ * already sounding at the anchor restarts from its attack — acceptable
+ * chase behavior for a synth.
+ */
+export function scheduleNotes(
+  state: ProjectState,
+  anchorTicks: number,
+  anchorSec: number
+): NoteSchedule[] {
+  const tps = ticksPerSecond(state.tempo)
+  const out: NoteSchedule[] = []
+
+  for (const note of Object.values(state.notes)) {
+    const clip = state.clips[note.clipId]
+    if (!clip) continue
+    const track = state.tracks[clip.trackId]
+    if (!track || track.kind !== 'midi') continue
+
+    const absStart = clip.start + note.start
+    const absEnd = Math.min(absStart + note.duration, clip.start + clip.duration)
+    if (absEnd <= absStart) continue // entirely past the clip end
+    if (absEnd <= anchorTicks) continue // in the past
+
+    out.push({
+      trackId: track.id,
+      pitch: note.pitch,
+      velocity: note.velocity / 127,
+      startSec: anchorSec + (Math.max(absStart, anchorTicks) - anchorTicks) / tps,
+      endSec: anchorSec + (absEnd - anchorTicks) / tps
+    })
+  }
+  return out.sort((a, b) => a.startSec - b.startSec)
+}
+
 export interface MetronomeClick {
   readonly when: number
   readonly isDownbeat: boolean

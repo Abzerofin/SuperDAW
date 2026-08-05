@@ -1,4 +1,4 @@
-import { useEffect, useLayoutEffect, useReducer, useRef, useState } from 'react'
+﻿import { useEffect, useLayoutEffect, useReducer, useRef, useState } from 'react'
 import type { ClipId, TrackKind } from '@core/model/types'
 import { PPQ, barsToTicks, snapTicks, ticksPerBar, ticksPerBeat } from '@core/model/timebase'
 import { newId } from '@core/model/ids'
@@ -17,6 +17,7 @@ import { collab } from '@/state/collab'
 import { capturePointer } from '@/lib/pointer'
 import { commentUi, useCommentUi } from '@/state/commentUi'
 import { useAutomationUi } from '@/state/automationUi'
+import { pianoRollUi } from '@/state/pianoRollUi'
 import { HEADER_W, RULER_H, LANE_H, AUTO_H, MIN_PX_PER_BEAT, MAX_PX_PER_BEAT } from './geometry'
 import { TrackHeader } from './TrackHeader'
 import { ClipView } from './ClipView'
@@ -52,6 +53,14 @@ export function TimelineView(): React.JSX.Element {
     if (comment.parentId === null && !comment.resolved && comment.anchor.kind === 'clip') {
       clipCommentCounts.set(comment.anchor.id, (clipCommentCounts.get(comment.anchor.id) ?? 0) + 1)
     }
+  }
+
+  // Notes grouped by clip, for MIDI clip previews.
+  const notesByClip = new Map<string, typeof state.notes[string][]>()
+  for (const note of Object.values(state.notes)) {
+    const list = notesByClip.get(note.clipId)
+    if (list) list.push(note)
+    else notesByClip.set(note.clipId, [note])
   }
   const [pxPerBeat, setPxPerBeat] = useState(32)
   const [drag, setDrag] = useState<DragState | null>(null)
@@ -221,7 +230,7 @@ export function TimelineView(): React.JSX.Element {
     const clip = Object.values(state.clips).find(
       (c) => c.trackId === track.id && c.start <= ticks && ticks < c.start + c.duration
     )
-    collab.ping(ticks, trackIndex, clip ? `clip "${clip.name}"` : `"${track.name}" · bar ${bar}`)
+    collab.ping(ticks, trackIndex, clip ? `clip "${clip.name}"` : `"${track.name}" Â· bar ${bar}`)
   }
 
   const onPointerMove = (e: React.PointerEvent): void => {
@@ -260,7 +269,7 @@ export function TimelineView(): React.JSX.Element {
   const onPointerUp = (): void => {
     if (!drag) return
     // A drag is many ephemeral previews but exactly ONE operation, dispatched
-    // on release. Keeps undo atomic and (later) the network op stream lean —
+    // on release. Keeps undo atomic and (later) the network op stream lean â€”
     // intermediate motion becomes presence data, not document ops.
     if (drag.moved) {
       if (drag.mode === 'move') {
@@ -302,7 +311,7 @@ export function TimelineView(): React.JSX.Element {
       offset: 0,
       color: null
     }
-    projectStore.dispatch({ type: 'clip/create', clip })
+    projectStore.dispatch({ type: 'clip/create', clip, notes: [] })
     selection.select(clip.id)
   }
 
@@ -356,7 +365,8 @@ export function TimelineView(): React.JSX.Element {
       },
       index: count,
       clips: [],
-      automation: []
+      automation: [],
+      notes: []
     })
   }
 
@@ -479,8 +489,12 @@ export function TimelineView(): React.JSX.Element {
                   tempo={state.tempo}
                   laneTops={trackTops}
                   commentCount={clipCommentCounts.get(clip.id) ?? 0}
+                  notes={notesByClip.get(clip.id) ?? []}
                   onPointerDown={(e, mode) => beginDrag(e, clip.id, mode)}
                   onOpenComments={() => commentUi.open({ kind: 'clip', id: clip.id })}
+                  onOpenEditor={
+                    track.kind === 'midi' ? () => pianoRollUi.open(clip.id) : undefined
+                  }
                 />
               )
             })}

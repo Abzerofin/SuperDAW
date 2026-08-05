@@ -65,6 +65,7 @@ export function createDemoProject(): ProjectState {
     chat: [],
     comments: {},
     masterVolume: 1,
-    automation: {}
+    automation: {},
+    notes: {}
   }
 }

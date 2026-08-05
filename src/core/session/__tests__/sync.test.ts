@@ -1,4 +1,4 @@
-import { describe as suite, expect, test } from 'vitest'
+﻿import { describe as suite, expect, test } from 'vitest'
 import type { Clip, ProjectState, Track } from '../../model/types'
 import { createEmptyProject } from '../../model/types'
 import { PPQ } from '../../model/timebase'
@@ -70,16 +70,18 @@ class TestNetwork {
       track: makeTrack('t1'),
       index: 0,
       clips: [],
-      automation: []
+      automation: [],
+      notes: []
     })
     this.hostStore.dispatch({
       type: 'track/create',
       track: makeTrack('t2'),
       index: 1,
       clips: [],
-      automation: []
+      automation: [],
+      notes: []
     })
-    this.hostStore.dispatch({ type: 'clip/create', clip: makeClip('c1', 't1') })
+    this.hostStore.dispatch({ type: 'clip/create', clip: makeClip('c1', 't1'), notes: [] })
   }
 
   addClient(name: string): TestClient {
@@ -256,7 +258,7 @@ suite('session sync', () => {
 
     net.disconnect(a)
     // Both sides edit during the partition.
-    a.store.dispatch({ type: 'clip/create', clip: makeClip('c-offline', 't1', PPQ * 8) })
+    a.store.dispatch({ type: 'clip/create', clip: makeClip('c-offline', 't1', PPQ * 8), notes: [] })
     a.store.dispatch({ type: 'track/rename', trackId: 't2', name: 'Offline Rename' })
     b.store.dispatch({ type: 'clip/move', clipId: 'c1', trackId: 't2', start: PPQ * 2 })
     net.flush()
@@ -278,7 +280,7 @@ suite('session sync', () => {
     net.addClient('bob')
     net.flush()
 
-    a.store.dispatch({ type: 'clip/create', clip: makeClip('c-dup', 't1', PPQ * 4) })
+    a.store.dispatch({ type: 'clip/create', clip: makeClip('c-dup', 't1', PPQ * 4), notes: [] })
     a.store.dispatch({ type: 'clip/resize', clipId: 'c1', start: PPQ, duration: PPQ * 2, offset: 0 })
     // Duplicate every outbound op message.
     a.toHost = a.toHost.flatMap((m): ClientToHost[] => (m.t === 'op' ? [m, m] : [m]))
@@ -311,7 +313,7 @@ suite('session sync', () => {
     const b = net.addClient('bob')
     net.flush()
 
-    a.store.dispatch({ type: 'clip/create', clip: makeClip('c-undo', 't2', 0) })
+    a.store.dispatch({ type: 'clip/create', clip: makeClip('c-undo', 't2', 0), notes: [] })
     net.flush()
     expect(b.store.state.clips['c-undo']).toBeDefined()
 
@@ -332,7 +334,8 @@ suite('session sync', () => {
       track: makeTrack('t3', 'midi'),
       index: 2,
       clips: [],
-      automation: []
+      automation: [],
+      notes: []
     })
     net.flush()
 
@@ -390,7 +393,8 @@ suite('session fuzz', () => {
             track: makeTrack(`t-${seed}-${idCounter++}`),
             index: Math.floor(rng() * (trackIds.length + 1)),
             clips: [],
-            automation: []
+            automation: [],
+            notes: []
           })
         }
         if (roll < 0.3 && trackIds.length > 0) {
@@ -400,7 +404,8 @@ suite('session fuzz', () => {
               `c-${seed}-${idCounter++}`,
               pick(trackIds),
               Math.floor(rng() * 32) * PPQ
-            )
+            ),
+            notes: []
           })
         }
         if (roll < 0.45 && clipIds.length > 0 && trackIds.length > 0) {

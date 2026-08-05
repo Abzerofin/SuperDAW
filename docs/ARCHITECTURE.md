@@ -186,6 +186,14 @@ default).
    release. Mixer is a bottom-dock tab beside Files; automation lanes
    expand under tracks (per-user ephemeral visibility).
 
-Roadmap beyond the original six: piano roll/MIDI editing, per-strip
-metering (AudioWorklet), internet rendezvous for join codes, packaging
-polish (icon, signing, auto-update).
+7. ✅ **Piano roll + MIDI** — notes live in the document, clip-relative
+   (moving a clip carries them; shortening clips silences the overhang).
+   note/* ops with cascades through clip/track deletes. SMF parser
+   (core/midi) turns dropped .mid files into real notes. Built-in
+   polyphonic synth (detuned saws → lowpass → ADSR) scheduled like clip
+   sources into the same track chains. Piano-roll bottom-dock editor
+   (double-click a MIDI clip), mini note previews on clips.
+
+Roadmap beyond: recording (M8), per-strip metering (AudioWorklet),
+internet rendezvous for join codes, packaging polish (icon, signing,
+auto-update), velocity editing, multi-note selection.

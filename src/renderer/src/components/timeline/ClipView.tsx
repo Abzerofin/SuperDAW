@@ -1,5 +1,5 @@
 import { useEffect, useRef, useSyncExternalStore } from 'react'
-import type { Clip } from '@core/model/types'
+import type { Clip, Note } from '@core/model/types'
 import { ticksPerSecond } from '@audio/scheduling'
 import type { ProjectAsset } from '@audio/assets'
 import { assetStore } from '@/state/audioInstance'
@@ -19,8 +19,12 @@ interface Props {
   laneTops: number[]
   /** Open (unresolved) comment threads on this clip. */
   commentCount: number
+  /** This clip's notes (MIDI clips); empty for audio. */
+  notes: Note[]
   onPointerDown: (e: React.PointerEvent, mode: 'move' | 'resize-l' | 'resize-r') => void
   onOpenComments: () => void
+  /** Double-click action (MIDI: open the piano roll). */
+  onOpenEditor?: () => void
 }
 
 export function ClipView({
@@ -34,8 +38,10 @@ export function ClipView({
   tempo,
   laneTops,
   commentCount,
+  notes,
   onPointerDown,
-  onOpenComments
+  onOpenComments,
+  onOpenEditor
 }: Props): React.JSX.Element {
   const start = preview?.start ?? clip.start
   const duration = preview?.duration ?? clip.duration
@@ -63,10 +69,17 @@ export function ClipView({
         '--clip-color': color
       } as React.CSSProperties}
       onPointerDown={(e) => onPointerDown(e, 'move')}
+      onDoubleClick={(e) => {
+        if (onOpenEditor) {
+          e.stopPropagation()
+          onOpenEditor()
+        }
+      }}
     >
       {asset?.peaks && (
         <Waveform asset={asset} width={width} height={height} offset={offset} duration={duration} tempo={tempo} />
       )}
+      {notes.length > 0 && <NotePreview notes={notes} duration={duration} width={width} height={height} />}
       <div className="clip-name">
         {clip.name}
         {clip.assetId !== null && !asset && <span className="clip-downloading"> · downloading…</span>}
@@ -86,6 +99,44 @@ export function ClipView({
       <div className="clip-handle clip-handle-l" onPointerDown={(e) => onPointerDown(e, 'resize-l')} />
       <div className="clip-handle clip-handle-r" onPointerDown={(e) => onPointerDown(e, 'resize-r')} />
     </div>
+  )
+}
+
+/** Tiny note rectangles inside a MIDI clip, spanning its pitch range. */
+function NotePreview({
+  notes,
+  duration,
+  width,
+  height
+}: {
+  notes: Note[]
+  duration: number
+  width: number
+  height: number
+}): React.JSX.Element {
+  let min = 127
+  let max = 0
+  for (const note of notes) {
+    if (note.pitch < min) min = note.pitch
+    if (note.pitch > max) max = note.pitch
+  }
+  const span = Math.max(12, max - min + 1)
+  const pad = 16 // clear of the name row
+  const usable = Math.max(4, height - pad - 4)
+
+  return (
+    <svg className="clip-notes" width={width} height={height}>
+      {notes.map((note) => (
+        <rect
+          key={note.id}
+          x={(note.start / duration) * width}
+          y={pad + ((max - note.pitch) / span) * usable}
+          width={Math.max(2, (note.duration / duration) * width)}
+          height={Math.max(2, usable / span)}
+          rx={1}
+        />
+      ))}
+    </svg>
   )
 }
 

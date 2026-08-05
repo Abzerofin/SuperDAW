@@ -6,9 +6,36 @@ import type {
   ClipId,
   Comment,
   FileNode,
-  AutomationPoint
+  AutomationPoint,
+  Note
 } from '../model/types'
 import { clipsOfTrack, isSelfOrDescendant, subtreeOf, MAX_GAIN } from '../model/types'
+
+/** Insert notes, skipping ids that exist and notes whose clip is missing. */
+function withNotes(
+  notes: Readonly<Record<string, Note>>,
+  clips: Readonly<Record<string, Clip>>,
+  incoming: readonly Note[]
+): { notes: Record<string, Note>; changed: boolean } {
+  const next = { ...notes }
+  let changed = false
+  for (const note of incoming) {
+    if (next[note.id] || !clips[note.clipId]) continue
+    next[note.id] = {
+      ...note,
+      pitch: clampInt(note.pitch, 0, 127),
+      start: Math.max(0, note.start),
+      duration: Math.max(1, note.duration),
+      velocity: clampInt(note.velocity, 1, 127)
+    }
+    changed = true
+  }
+  return { notes: next, changed }
+}
+
+function clampInt(value: number, min: number, max: number): number {
+  return Math.min(max, Math.max(min, Math.round(value)))
+}
 import type { Operation } from './operations'
 
 /**
@@ -39,12 +66,14 @@ export function apply(state: ProjectState, op: Operation): ProjectState {
       for (const clip of op.clips) clips[clip.id] = clip
       const automation = { ...state.automation }
       for (const point of op.automation) automation[point.id] = point
+      const { notes } = withNotes(state.notes, clips, op.notes)
       return {
         ...state,
         tracks: { ...state.tracks, [op.track.id]: op.track },
         trackOrder,
         clips,
-        automation
+        automation,
+        notes
       }
     }
 
@@ -60,12 +89,17 @@ export function apply(state: ProjectState, op: Operation): ProjectState {
       for (const point of Object.values(state.automation)) {
         if (point.trackId !== op.trackId) automation[point.id] = point
       }
+      const notes: Record<string, Note> = {}
+      for (const note of Object.values(state.notes)) {
+        if (clips[note.clipId]) notes[note.id] = note
+      }
       return {
         ...state,
         tracks,
         trackOrder: state.trackOrder.filter((id) => id !== op.trackId),
         clips,
-        automation
+        automation,
+        notes
       }
     }
 
@@ -114,6 +148,44 @@ export function apply(state: ProjectState, op: Operation): ProjectState {
       return { ...state, automation }
     }
 
+    case 'note/add': {
+      const { notes, changed } = withNotes(state.notes, state.clips, [op.note])
+      return changed ? { ...state, notes } : state
+    }
+
+    case 'note/addMany': {
+      const { notes, changed } = withNotes(state.notes, state.clips, op.notes)
+      return changed ? { ...state, notes } : state
+    }
+
+    case 'note/move': {
+      const note = state.notes[op.noteId]
+      if (!note) return state
+      const pitch = clampInt(op.pitch, 0, 127)
+      const start = Math.max(0, op.start)
+      if (note.pitch === pitch && note.start === start) return state
+      return { ...state, notes: { ...state.notes, [op.noteId]: { ...note, pitch, start } } }
+    }
+
+    case 'note/resize': {
+      const note = state.notes[op.noteId]
+      if (!note) return state
+      const duration = Math.max(1, op.duration)
+      if (note.duration === duration) return state
+      return { ...state, notes: { ...state.notes, [op.noteId]: { ...note, duration } } }
+    }
+
+    case 'note/delete': {
+      const doomed = new Set(op.noteIds)
+      let changed = false
+      const notes: Record<string, Note> = {}
+      for (const note of Object.values(state.notes)) {
+        if (doomed.has(note.id)) changed = true
+        else notes[note.id] = note
+      }
+      return changed ? { ...state, notes } : state
+    }
+
     case 'track/rename':
       return updateTrack(state, op.trackId, (t) => ({ ...t, name: op.name }))
 
@@ -135,14 +207,20 @@ export function apply(state: ProjectState, op: Operation): ProjectState {
     case 'clip/create': {
       if (state.clips[op.clip.id]) return state
       if (!state.tracks[op.clip.trackId]) return state
-      return { ...state, clips: { ...state.clips, [op.clip.id]: op.clip } }
+      const clips = { ...state.clips, [op.clip.id]: op.clip }
+      const { notes } = withNotes(state.notes, clips, op.notes)
+      return { ...state, clips, notes }
     }
 
     case 'clip/delete': {
       if (!state.clips[op.clipId]) return state
       const clips = { ...state.clips }
       delete clips[op.clipId]
-      return { ...state, clips }
+      const notes: Record<string, Note> = {}
+      for (const note of Object.values(state.notes)) {
+        if (note.clipId !== op.clipId) notes[note.id] = note
+      }
+      return { ...state, clips, notes }
     }
 
     case 'clip/move': {

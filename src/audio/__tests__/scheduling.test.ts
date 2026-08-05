@@ -1,9 +1,9 @@
-import { describe as suite, expect, test } from 'vitest'
+﻿import { describe as suite, expect, test } from 'vitest'
 import type { Clip, ProjectState, Track } from '@core/model/types'
 import { createEmptyProject } from '@core/model/types'
 import { PPQ } from '@core/model/timebase'
 import { apply } from '@core/ops/apply'
-import { beatIndexAt, metronomeClicks, scheduleClips, ticksPerSecond } from '../scheduling'
+import { beatIndexAt, metronomeClicks, scheduleClips, scheduleNotes, ticksPerSecond } from '../scheduling'
 import { computePeaks, type AudioBufferLike } from '../assets'
 
 // 120 BPM => 2 beats/sec => 1920 ticks/sec; 1 beat = 960 ticks = 0.5 s
@@ -23,7 +23,7 @@ function stateWith(clips: Partial<Clip>[]): ProjectState {
   }
   let s = createEmptyProject('Test')
   s = { ...s, tempo: TEMPO }
-  s = apply(s, { type: 'track/create', track, index: 0, clips: [], automation: [] })
+  s = apply(s, { type: 'track/create', track, index: 0, clips: [], automation: [], notes: [] })
   for (const [i, partial] of clips.entries()) {
     const clip: Clip = {
       id: `c${i}`,
@@ -36,7 +36,7 @@ function stateWith(clips: Partial<Clip>[]): ProjectState {
       color: null,
       ...partial
     }
-    s = apply(s, { type: 'clip/create', clip })
+    s = apply(s, { type: 'clip/create', clip, notes: [] })
   }
   return s
 }
@@ -79,6 +79,84 @@ suite('scheduleClips', () => {
   test('clip trimmed entirely past the end of its source is silent', () => {
     const s = stateWith([{ start: 0, offset: Math.round(11 * TPS) }])
     expect(scheduleClips(s, tenSecondAsset, 0, 0)).toHaveLength(0)
+  })
+})
+
+suite('scheduleNotes', () => {
+  function midiState(
+    clipStart: number,
+    clipDuration: number,
+    notes: Array<{ id: string; start: number; duration: number; pitch?: number }>
+  ): ProjectState {
+    let s = createEmptyProject('Test')
+    s = { ...s, tempo: TEMPO }
+    s = apply(s, {
+      type: 'track/create',
+      track: {
+        id: 'm1',
+        kind: 'midi',
+        name: 'M',
+        color: '#fff',
+        muted: false,
+        soloed: false,
+        volume: 1,
+        pan: 0
+      },
+      index: 0,
+      clips: [],
+      automation: [],
+      notes: []
+    })
+    s = apply(s, {
+      type: 'clip/create',
+      clip: {
+        id: 'mc1',
+        trackId: 'm1',
+        name: 'MC',
+        start: clipStart,
+        duration: clipDuration,
+        assetId: null,
+        offset: 0,
+        color: null
+      },
+      notes: notes.map((n) => ({
+        id: n.id,
+        clipId: 'mc1',
+        pitch: n.pitch ?? 60,
+        start: n.start,
+        duration: n.duration,
+        velocity: 100
+      }))
+    })
+    return s
+  }
+
+  test('maps clip-relative note time to absolute clock time', () => {
+    // clip at bar 2 (tick 3840 = 2 s); note one beat in, one beat long
+    const s = midiState(3840, PPQ * 4, [{ id: 'n1', start: PPQ, duration: PPQ }])
+    const [n] = scheduleNotes(s, 0, 100)
+    expect(n.startSec).toBeCloseTo(102.5)
+    expect(n.endSec).toBeCloseTo(103)
+    expect(n.velocity).toBeCloseTo(100 / 127)
+  })
+
+  test('notes are clipped to the clip window and past notes skipped', () => {
+    const s = midiState(0, PPQ * 2, [
+      { id: 'ended', start: 0, duration: PPQ }, // past when anchored at 3 beats
+      { id: 'overhang', start: PPQ, duration: PPQ * 4 } // truncated at clip end
+    ])
+    const scheduled = scheduleNotes(s, PPQ * 3, 100)
+    expect(scheduled).toHaveLength(0) // both fully before the anchor after clipping
+
+    const fromStart = scheduleNotes(s, 0, 100)
+    const overhang = fromStart.find((n) => n.startSec > 100)!
+    expect(overhang.endSec).toBeCloseTo(101) // clip end at 1 s, not note end at 2.5 s
+  })
+
+  test('notes on audio tracks or dead clips are ignored', () => {
+    const s = midiState(0, PPQ * 4, [{ id: 'n1', start: 0, duration: PPQ }])
+    const dead = apply(s, { type: 'clip/delete', clipId: 'mc1' })
+    expect(scheduleNotes(dead, 0, 0)).toHaveLength(0)
   })
 })
 

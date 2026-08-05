@@ -1,8 +1,14 @@
-import type { FileNode, ProjectState } from '../model/types'
-import { clipsOfTrack, subtreeOf } from '../model/types'
+import type { FileNode, Note, ProjectState } from '../model/types'
+import { clipsOfTrack, notesOfClip, subtreeOf } from '../model/types'
 
 function automationOfTrack(state: ProjectState, trackId: string) {
   return Object.values(state.automation).filter((p) => p.trackId === trackId)
+}
+
+function notesOfTrack(state: ProjectState, trackId: string): Note[] {
+  return Object.values(state.notes).filter(
+    (n) => state.clips[n.clipId]?.trackId === trackId
+  )
 }
 import type { Operation } from './operations'
 
@@ -30,7 +36,8 @@ export function invert(state: ProjectState, op: Operation): Operation | null {
         track,
         index: state.trackOrder.indexOf(op.trackId),
         clips: clipsOfTrack(state, op.trackId),
-        automation: automationOfTrack(state, op.trackId)
+        automation: automationOfTrack(state, op.trackId),
+        notes: notesOfTrack(state, op.trackId)
       }
     }
 
@@ -64,6 +71,32 @@ export function invert(state: ProjectState, op: Operation): Operation | null {
       return { type: 'automation/add', point }
     }
 
+    case 'note/add':
+      return { type: 'note/delete', noteIds: [op.note.id] }
+
+    case 'note/addMany':
+      return { type: 'note/delete', noteIds: op.notes.map((n) => n.id) }
+
+    case 'note/move': {
+      const note = state.notes[op.noteId]
+      if (!note) return null
+      return { type: 'note/move', noteId: op.noteId, pitch: note.pitch, start: note.start }
+    }
+
+    case 'note/resize': {
+      const note = state.notes[op.noteId]
+      if (!note) return null
+      return { type: 'note/resize', noteId: op.noteId, duration: note.duration }
+    }
+
+    case 'note/delete': {
+      const notes = op.noteIds
+        .map((id) => state.notes[id])
+        .filter((n): n is Note => n !== undefined)
+      if (notes.length === 0) return null
+      return { type: 'note/addMany', notes }
+    }
+
     case 'track/rename': {
       const track = state.tracks[op.trackId]
       if (!track) return null
@@ -94,7 +127,7 @@ export function invert(state: ProjectState, op: Operation): Operation | null {
     case 'clip/delete': {
       const clip = state.clips[op.clipId]
       if (!clip) return null
-      return { type: 'clip/create', clip }
+      return { type: 'clip/create', clip, notes: notesOfClip(state, op.clipId) }
     }
 
     case 'clip/move': {

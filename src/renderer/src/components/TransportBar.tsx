@@ -6,6 +6,7 @@ import { transport } from '@/state/transport'
 import { audioEngine } from '@/state/audioInstance'
 import { useCollab, USER_COLORS } from '@/state/collab'
 import { usePanels } from '@/state/panels'
+import { usePianoRollUi } from '@/state/pianoRollUi'
 import { CollabPanel } from './CollabPanel'
 
 export function TransportBar(): React.JSX.Element {
@@ -58,6 +59,7 @@ export function TransportBar(): React.JSX.Element {
         >
           Mixer
         </button>
+        <PianoRollTab />
         <button
           className={`tbtn ${panelState.rightPanel === 'chat' ? 'tbtn-active' : ''}`}
           title="Toggle chat"
@@ -90,6 +92,21 @@ function PlayButton(): React.JSX.Element {
       onClick={() => transport.toggle()}
     >
       {transport.isPlaying ? '■' : '▶'}
+    </button>
+  )
+}
+
+function PianoRollTab(): React.JSX.Element | null {
+  const rollState = usePianoRollUi()
+  const panelState = usePanels()
+  if (rollState.clipId === null) return null
+  return (
+    <button
+      className={`tbtn ${panelState.bottomPanel === 'pianoroll' ? 'tbtn-active' : ''}`}
+      title="Toggle piano roll"
+      onClick={() => panelState.toggleBottom('pianoroll')}
+    >
+      Piano
     </button>
   )
 }

@@ -1,4 +1,4 @@
-import { describe as suite, expect, test } from 'vitest'
+﻿import { describe as suite, expect, test } from 'vitest'
 import { createEmptyProject } from '../../model/types'
 import { apply } from '../../ops/apply'
 import {
@@ -25,7 +25,8 @@ function sampleState() {
     },
     index: 0,
     clips: [],
-    automation: [{ id: 'ap1', trackId: 't1', param: 'volume', ticks: 480, value: 0.6 }]
+    automation: [{ id: 'ap1', trackId: 't1', param: 'volume', ticks: 480, value: 0.6 }],
+    notes: []
   })
   s = apply(s, {
     type: 'clip/create',
@@ -38,7 +39,8 @@ function sampleState() {
       assetId: 'ast_1',
       offset: 480,
       color: null
-    }
+    },
+    notes: [{ id: 'n1', clipId: 'c1', pitch: 60, start: 0, duration: 960, velocity: 100 }]
   })
   s = apply(s, {
     type: 'file/create',

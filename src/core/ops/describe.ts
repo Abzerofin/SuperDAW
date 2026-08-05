@@ -41,6 +41,29 @@ export function describe(state: ProjectState, op: Operation): string | null {
       const point = state.automation[op.pointId]
       return `Deleted automation point${point ? ` on "${trackName(state, point.trackId)}"` : ''}`
     }
+    case 'note/add':
+      return `Added a note to "${clipName(state, op.note.clipId)}"`
+    case 'note/addMany': {
+      const clipId = op.notes[0]?.clipId
+      return clipId
+        ? `Added ${op.notes.length} notes to "${clipName(state, clipId)}"`
+        : 'Added notes'
+    }
+    case 'note/move': {
+      const note = state.notes[op.noteId]
+      return `Moved a note${note ? ` in "${clipName(state, note.clipId)}"` : ''}`
+    }
+    case 'note/resize': {
+      const note = state.notes[op.noteId]
+      return `Resized a note${note ? ` in "${clipName(state, note.clipId)}"` : ''}`
+    }
+    case 'note/delete': {
+      const first = state.notes[op.noteIds[0]]
+      const suffix = first ? ` from "${clipName(state, first.clipId)}"` : ''
+      return op.noteIds.length === 1
+        ? `Deleted a note${suffix}`
+        : `Deleted ${op.noteIds.length} notes${suffix}`
+    }
     case 'clip/create':
       return `Added clip "${op.clip.name}" to "${trackName(state, op.clip.trackId)}"`
     case 'clip/delete':

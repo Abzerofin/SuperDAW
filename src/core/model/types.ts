@@ -57,6 +57,26 @@ export interface Track {
 
 export const MAX_GAIN = 1.4 // ≈ +3 dB of headroom above unity
 
+export type NoteId = string
+
+/**
+ * A MIDI note. `start` is relative to the owning clip's start, so moving
+ * a clip carries its notes with zero note ops. Notes whose window falls
+ * outside the clip's duration are clipped at playback (standard DAW
+ * behavior when a clip is shortened).
+ */
+export interface Note {
+  readonly id: NoteId
+  readonly clipId: ClipId
+  /** MIDI pitch 0..127 (60 = middle C). */
+  readonly pitch: number
+  /** Ticks from clip start. */
+  readonly start: number
+  readonly duration: number
+  /** 1..127. */
+  readonly velocity: number
+}
+
 export type AutomationParam = 'volume'
 export type AutomationPointId = string
 
@@ -120,6 +140,7 @@ export interface ProjectState {
   readonly comments: Readonly<Record<CommentId, Comment>>
   readonly masterVolume: number
   readonly automation: Readonly<Record<AutomationPointId, AutomationPoint>>
+  readonly notes: Readonly<Record<NoteId, Note>>
 }
 
 export function createEmptyProject(name: string): ProjectState {
@@ -134,8 +155,15 @@ export function createEmptyProject(name: string): ProjectState {
     chat: [],
     comments: {},
     masterVolume: 1,
-    automation: {}
+    automation: {},
+    notes: {}
   }
+}
+
+export function notesOfClip(state: ProjectState, clipId: ClipId): Note[] {
+  return Object.values(state.notes)
+    .filter((n) => n.clipId === clipId)
+    .sort((a, b) => a.start - b.start || a.pitch - b.pitch)
 }
 
 /** A track's points for one parameter, in timeline order. */

@@ -1,7 +1,13 @@
 import type { ProjectState, TrackId } from '@core/model/types'
 import { automationOf, automationValueAt } from '@core/model/types'
 import type { AssetStore } from './assets'
-import { beatIndexAt, metronomeClicks, scheduleClips, ticksPerSecond } from './scheduling'
+import {
+  beatIndexAt,
+  metronomeClicks,
+  scheduleClips,
+  scheduleNotes,
+  ticksPerSecond
+} from './scheduling'
 
 /**
  * The audio engine: owns the AudioContext and all routing.
@@ -52,7 +58,8 @@ export class AudioEngine {
   private analyser: AnalyserNode | null = null
   private meterBuf: Float32Array<ArrayBuffer> | null = null
   private chains = new Map<TrackId, TrackChain>()
-  private sources = new Set<AudioBufferSourceNode>()
+  /** Everything currently scheduled: clip buffer sources AND synth oscillators. */
+  private sources = new Set<AudioScheduledSourceNode>()
 
   private anchorTicks = 0
   private anchorSec = 0
@@ -67,6 +74,7 @@ export class AudioEngine {
   private prevTempo: number
   private prevAutomation: ProjectState['automation']
   private prevMasterVolume: number
+  private prevNotes: ProjectState['notes']
 
   constructor(
     private store: StoreLike,
@@ -78,6 +86,7 @@ export class AudioEngine {
     this.prevTempo = store.state.tempo
     this.prevAutomation = store.state.automation
     this.prevMasterVolume = store.state.masterVolume
+    this.prevNotes = store.state.notes
     store.subscribe(this.onStateChanged)
     assets.subscribe(this.onAssetsChanged)
     transport.onEvent(this.onTransportEvent)
@@ -177,6 +186,7 @@ export class AudioEngine {
       this.stopAllSources()
       this.reanchor()
       this.scheduleAllClips()
+      this.scheduleAllNotes()
       this.scheduleAutomation()
       this.startMetronome()
     }
@@ -196,15 +206,20 @@ export class AudioEngine {
     if (automationEdited && this.transport.isPlaying && this.ctx) {
       this.scheduleAutomation()
     }
-    const editedAudio = state.clips !== this.prevClips || state.tempo !== this.prevTempo
+    const editedAudio =
+      state.clips !== this.prevClips ||
+      state.tempo !== this.prevTempo ||
+      state.notes !== this.prevNotes
     this.prevClips = state.clips
     this.prevTempo = state.tempo
+    this.prevNotes = state.notes
     // Reschedule only when something audible changed; unrelated ops
     // (renames etc.) must never interrupt playback.
     if (editedAudio && this.transport.isPlaying && this.ctx) {
       this.stopAllSources()
       this.reanchor()
       this.scheduleAllClips()
+      this.scheduleAllNotes()
       this.resyncMetronome()
     }
   }
@@ -215,6 +230,7 @@ export class AudioEngine {
       this.stopAllSources()
       this.reanchor()
       this.scheduleAllClips()
+      this.scheduleAllNotes()
     }
   }
 
@@ -244,6 +260,58 @@ export class AudioEngine {
       source.onended = () => this.sources.delete(source)
       source.start(s.when, s.offsetSec, s.durationSec)
       this.sources.add(source)
+    }
+  }
+
+  /**
+   * Schedule synth voices for upcoming MIDI notes. Each voice: two detuned
+   * saws → lowpass → ADSR gain, into the track chain (so fader, automation,
+   * pan, mute/solo all apply). Envelope times are absolute clock times, so
+   * voices are sample-accurate like clip sources.
+   */
+  private scheduleAllNotes(): void {
+    const ctx = this.ctx
+    if (!ctx) return
+    for (const s of scheduleNotes(this.store.state, this.anchorTicks, this.anchorSec)) {
+      const dest = this.chain(s.trackId).auto
+      const freq = 440 * Math.pow(2, (s.pitch - 69) / 12)
+      const peak = 0.22 * s.velocity
+      const sustain = peak * 0.65
+      const attackEnd = s.startSec + 0.006
+      const decayEnd = Math.min(s.endSec, attackEnd + 0.09)
+      const releaseEnd = s.endSec + 0.07
+
+      const filter = ctx.createBiquadFilter()
+      filter.type = 'lowpass'
+      filter.frequency.value = Math.min(14000, freq * 7)
+      filter.Q.value = 0.7
+
+      const env = ctx.createGain()
+      env.gain.setValueAtTime(0, s.startSec)
+      env.gain.linearRampToValueAtTime(peak, attackEnd)
+      env.gain.linearRampToValueAtTime(sustain, decayEnd)
+      env.gain.setValueAtTime(sustain, s.endSec)
+      env.gain.linearRampToValueAtTime(0.0001, releaseEnd)
+
+      filter.connect(env)
+      env.connect(dest)
+
+      for (const detune of [-4, 4]) {
+        const osc = ctx.createOscillator()
+        osc.type = 'sawtooth'
+        osc.frequency.value = freq
+        osc.detune.value = detune
+        osc.connect(filter)
+        osc.onended = () => {
+          this.sources.delete(osc)
+          osc.disconnect()
+          filter.disconnect()
+          env.disconnect()
+        }
+        osc.start(s.startSec)
+        osc.stop(releaseEnd + 0.01)
+        this.sources.add(osc)
+      }
     }
   }
 

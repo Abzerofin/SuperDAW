@@ -7,7 +7,7 @@ import { projectStore } from './projectStore'
  * is hidden accumulate; opening the tab clears them.
  */
 export type RightPanel = 'activity' | 'chat' | null
-export type BottomPanel = 'files' | 'mixer' | null
+export type BottomPanel = 'files' | 'mixer' | 'pianoroll' | null
 
 class PanelStore {
   rightPanel: RightPanel = 'activity'
@@ -38,6 +38,12 @@ class PanelStore {
 
   toggleBottom(panel: Exclude<BottomPanel, null>): void {
     this.bottomPanel = this.bottomPanel === panel ? null : panel
+    this.emit()
+  }
+
+  setBottom(panel: BottomPanel): void {
+    if (this.bottomPanel === panel) return
+    this.bottomPanel = panel
     this.emit()
   }
 
