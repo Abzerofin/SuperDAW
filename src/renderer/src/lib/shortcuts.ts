@@ -2,6 +2,7 @@ import { useEffect } from 'react'
 import { projectStore } from '@/state/projectStore'
 import { transport } from '@/state/transport'
 import { selection } from '@/state/selection'
+import { commentUi } from '@/state/commentUi'
 import { openProject, saveProject } from './projectFile'
 
 /** App-wide keyboard shortcuts. Inactive while a text field has focus. */
@@ -38,6 +39,15 @@ export function useGlobalShortcuts(): void {
       if (mod && e.key.toLowerCase() === 'y') {
         e.preventDefault()
         projectStore.redo()
+        return
+      }
+
+      if (e.key.toLowerCase() === 'c' && !mod && !e.altKey) {
+        const clipId = selection.selectedClipId
+        if (clipId) {
+          e.preventDefault()
+          commentUi.open({ kind: 'clip', id: clipId })
+        }
         return
       }
 

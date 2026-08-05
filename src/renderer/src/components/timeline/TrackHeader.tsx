@@ -1,10 +1,19 @@
 import { useState } from 'react'
 import type { Track } from '@core/model/types'
 import { projectStore } from '@/state/projectStore'
+import { useProjectState } from '@/state/hooks'
+import { commentUi, useCommentUi } from '@/state/commentUi'
+import { CommentThread } from '../comments/CommentThread'
 
 export function TrackHeader({ track }: { track: Track }): React.JSX.Element {
   const [editing, setEditing] = useState(false)
   const [name, setName] = useState('')
+  const openAnchor = useCommentUi().anchor
+  const comments = useProjectState().comments
+  const commentCount = Object.values(comments).filter(
+    (c) => c.parentId === null && !c.resolved && c.anchor.kind === 'track' && c.anchor.id === track.id
+  ).length
+  const popoverOpen = openAnchor?.kind === 'track' && openAnchor.id === track.id
 
   const commit = (): void => {
     setEditing(false)
@@ -42,6 +51,13 @@ export function TrackHeader({ track }: { track: Track }): React.JSX.Element {
           </span>
         )}
         <button
+          className={`track-comment ${commentCount > 0 ? 'track-comment-active' : ''}`}
+          title="Comments"
+          onClick={() => commentUi.open({ kind: 'track', id: track.id })}
+        >
+          {commentCount > 0 ? commentCount : '🗨'}
+        </button>
+        <button
           className="track-delete"
           title="Delete track"
           onClick={() => projectStore.dispatch({ type: 'track/delete', trackId: track.id })}
@@ -49,6 +65,11 @@ export function TrackHeader({ track }: { track: Track }): React.JSX.Element {
           ×
         </button>
       </div>
+      {popoverOpen && (
+        <div className="comment-layer-anchor track-comment-popover">
+          <CommentThread anchor={{ kind: 'track', id: track.id }} />
+        </div>
+      )}
       <div className="track-header-bottom">
         <span className="track-kind">{track.kind === 'audio' ? 'AUDIO' : 'MIDI'}</span>
         <div className="track-toggles">

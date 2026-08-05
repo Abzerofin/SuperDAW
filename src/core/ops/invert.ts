@@ -120,5 +120,28 @@ export function invert(state: ProjectState, op: Operation): Operation | null {
       if (!node) return null
       return { type: 'file/move', nodeId: op.nodeId, parentId: node.parentId }
     }
+
+    // Chat is conversation, not editing: deliberately not undoable.
+    case 'chat/post':
+      return null
+
+    case 'comment/add':
+      return op.comments.length > 0 ? { type: 'comment/delete', commentId: op.comments[0].id } : null
+
+    case 'comment/delete': {
+      const target = state.comments[op.commentId]
+      if (!target) return null
+      const thread = [
+        target,
+        ...Object.values(state.comments).filter((c) => c.parentId === op.commentId)
+      ]
+      return { type: 'comment/add', comments: thread }
+    }
+
+    case 'comment/setResolved': {
+      const comment = state.comments[op.commentId]
+      if (!comment) return null
+      return { type: 'comment/setResolved', commentId: op.commentId, resolved: comment.resolved }
+    }
   }
 }

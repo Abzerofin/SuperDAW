@@ -5,7 +5,11 @@ collaboration — multiplayer from the ground up, no accounts, no cloud
 dependency. Projects are local files; collaboration is an optional
 host-based session joined with a short code.
 
-**Status: Milestone 4 (real-time collaboration) complete.**
+**Status: Milestone 5 (chat + comments) complete.**
+
+- Project chat (dockable tab, unread badge) and comment threads on clips
+  and tracks (reply, resolve) — both sync live in sessions and persist
+  inside the project file
 
 - Real-time collaboration, LAN-first: click Collab → Start, share the
   join code, others join — no accounts, no cloud. Host-authoritative op

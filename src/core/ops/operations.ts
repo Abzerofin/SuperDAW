@@ -1,4 +1,14 @@
-import type { Clip, ClipId, FileNode, FileNodeId, Track, TrackId } from '../model/types'
+import type {
+  ChatMessage,
+  Clip,
+  ClipId,
+  Comment,
+  CommentId,
+  FileNode,
+  FileNodeId,
+  Track,
+  TrackId
+} from '../model/types'
 
 /**
  * Every mutation of project state is expressed as one of these operations.
@@ -27,6 +37,13 @@ export type Operation =
   | { type: 'file/delete'; nodeIds: FileNodeId[] }
   | { type: 'file/rename'; nodeId: FileNodeId; name: string }
   | { type: 'file/move'; nodeId: FileNodeId; parentId: FileNodeId | null }
+  /** Conversation: chat is append-only and NOT undoable (invert = null). */
+  | { type: 'chat/post'; message: ChatMessage }
+  /** Plural so undoing a thread delete restores root + replies in one op. */
+  | { type: 'comment/add'; comments: Comment[] }
+  /** Deletes the comment and, for a thread root, all its replies. */
+  | { type: 'comment/delete'; commentId: CommentId }
+  | { type: 'comment/setResolved'; commentId: CommentId; resolved: boolean }
 
 /** Wire/log format: an operation plus provenance metadata. */
 export interface OpEnvelope {

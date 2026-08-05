@@ -172,5 +172,10 @@ default).
    asset transfer; offline editing with reconnect replay; presence (live
    cursors, middle-click pings, roster). Internet rendezvous is a future
    additive milestone.
-5. Chat + comments.
+5. ✅ **Chat + comments** — conversation lives in the document (syncs in
+   sessions, persists in .sdaw files, author names snapshotted). Chat:
+   tabbed right dock, unread badge, append-only, deliberately NOT
+   undoable and absent from the activity feed. Comments: threads anchored
+   to clips/tracks (model supports files) with replies and resolve;
+   undoable (thread deletes restore atomically) and surfaced in activity.
 6. Mixer, automation.

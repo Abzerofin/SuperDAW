@@ -4,9 +4,10 @@ import type { Operation } from './operations'
 /**
  * Human-readable description of an operation, evaluated against the state
  * *before* the op is applied (so deletions can name what they removed).
- * Feeds the activity feed.
+ * Feeds the activity feed. Returns null for ops that deliberately stay out
+ * of the feed (chat has its own panel).
  */
-export function describe(state: ProjectState, op: Operation): string {
+export function describe(state: ProjectState, op: Operation): string | null {
   switch (op.type) {
     case 'project/rename':
       return `Renamed project to "${op.name}"`
@@ -54,7 +55,35 @@ export function describe(state: ProjectState, op: Operation): string {
       return `Moved "${fileName(state, op.nodeId)}" to "${
         op.parentId === null ? 'Project' : fileName(state, op.parentId)
       }"`
+    case 'chat/post':
+      return null
+    case 'comment/add': {
+      const root = op.comments[0]
+      if (!root) return null
+      if (root.parentId !== null) return 'Replied to a comment'
+      return `Commented on ${anchorName(state, root.anchor.kind, root.anchor.id)}`
+    }
+    case 'comment/delete': {
+      const comment = state.comments[op.commentId]
+      if (!comment) return null
+      return `Deleted a comment on ${anchorName(state, comment.anchor.kind, comment.anchor.id)}`
+    }
+    case 'comment/setResolved': {
+      const comment = state.comments[op.commentId]
+      if (!comment) return null
+      return `${op.resolved ? 'Resolved' : 'Reopened'} a comment on ${anchorName(
+        state,
+        comment.anchor.kind,
+        comment.anchor.id
+      )}`
+    }
   }
+}
+
+function anchorName(state: ProjectState, kind: 'clip' | 'track' | 'file', id: string): string {
+  if (kind === 'clip') return `clip "${clipName(state, id)}"`
+  if (kind === 'track') return `track "${trackName(state, id)}"`
+  return `file "${state.files[id]?.name ?? 'unknown'}"`
 }
 
 function fileName(state: ProjectState, nodeId: string): string {

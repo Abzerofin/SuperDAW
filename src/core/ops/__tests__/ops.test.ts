@@ -1,6 +1,7 @@
 import { describe as suite, expect, test } from 'vitest'
-import type { Clip, FileNode, ProjectState, Track } from '../../model/types'
+import type { Clip, Comment, FileNode, ProjectState, Track } from '../../model/types'
 import { createEmptyProject } from '../../model/types'
+import { describe as describeOp } from '../describe'
 import type { Operation } from '../operations'
 import { apply } from '../apply'
 import { invert } from '../invert'
@@ -16,6 +17,19 @@ function clip(id: string, trackId: string, start = 0, duration = 960): Clip {
 
 function fileNode(id: string, parentId: string | null, kind: FileNode['kind'] = 'audio'): FileNode {
   return { id, parentId, kind, name: id, assetId: kind === 'folder' ? null : `asset-${id}` }
+}
+
+function comment(id: string, anchorId: string, parentId: string | null = null): Comment {
+  return {
+    id,
+    anchor: { kind: 'clip', id: anchorId },
+    parentId,
+    userId: 'u1',
+    authorName: 'Tester',
+    time: 1000,
+    text: `text of ${id}`,
+    resolved: false
+  }
 }
 
 function baseState(): ProjectState {
@@ -34,6 +48,9 @@ function baseState(): ProjectState {
       fileNode('a2', null)
     ]
   })
+  // A comment thread on c1: root cm1 with reply cm2
+  s = apply(s, { type: 'comment/add', comments: [comment('cm1', 'c1')] })
+  s = apply(s, { type: 'comment/add', comments: [comment('cm2', 'c1', 'cm1')] })
   return s
 }
 
@@ -86,7 +103,12 @@ suite('invert', () => {
     { type: 'file/delete', nodeIds: ['f1'] }, // subtree: f1, f2, a1
     { type: 'file/delete', nodeIds: ['a2', 'f2'] },
     { type: 'file/rename', nodeId: 'a1', name: 'Renamed File' },
-    { type: 'file/move', nodeId: 'a2', parentId: 'f2' }
+    { type: 'file/move', nodeId: 'a2', parentId: 'f2' },
+    { type: 'comment/add', comments: [comment('cm9', 'c2')] },
+    { type: 'comment/add', comments: [comment('cm9', 'c1', 'cm1')] },
+    { type: 'comment/delete', commentId: 'cm2' }, // a reply
+    { type: 'comment/delete', commentId: 'cm1' }, // a thread root + its reply
+    { type: 'comment/setResolved', commentId: 'cm1', resolved: true }
   ]
 
   for (const op of roundTrips) {
@@ -124,6 +146,59 @@ suite('file bay ops', () => {
     expect(s.files['a1'].parentId).toBeNull()
     s = apply(s, { type: 'file/move', nodeId: 'a1', parentId: 'f2' })
     expect(s.files['a1'].parentId).toBe('f2')
+  })
+})
+
+suite('conversation ops', () => {
+  const msg = {
+    id: 'msg1',
+    userId: 'u1',
+    authorName: 'Tester',
+    time: 2000,
+    text: 'hello'
+  }
+
+  test('chat/post appends, is idempotent, and is NOT undoable', () => {
+    const store = new ProjectStore(baseState(), 'tester')
+    expect(store.dispatch({ type: 'chat/post', message: msg })).toBe(true)
+    expect(store.dispatch({ type: 'chat/post', message: msg })).toBe(false) // idempotent
+    expect(store.state.chat).toHaveLength(1)
+    expect(store.canUndo).toBe(false)
+    // …and it stays out of the activity feed.
+    expect(store.activity.some((a) => a.text.includes('hello'))).toBe(false)
+  })
+
+  test('comment ops ARE undoable and appear in the activity feed', () => {
+    const store = new ProjectStore(baseState(), 'tester')
+    store.dispatch({ type: 'comment/add', comments: [comment('cm5', 'c1')] })
+    expect(store.activity.at(-1)?.text).toBe('Commented on clip "c1"')
+    expect(store.canUndo).toBe(true)
+    store.undo()
+    expect(store.state.comments['cm5']).toBeUndefined()
+  })
+
+  test('deleting a thread root deletes its replies; undo restores both', () => {
+    const store = new ProjectStore(baseState(), 'tester')
+    store.dispatch({ type: 'comment/delete', commentId: 'cm1' })
+    expect(store.state.comments['cm1']).toBeUndefined()
+    expect(store.state.comments['cm2']).toBeUndefined()
+    store.undo()
+    expect(store.state.comments['cm1']).toBeDefined()
+    expect(store.state.comments['cm2']).toBeDefined()
+  })
+
+  test('a reply to a deleted thread is dropped, not orphaned', () => {
+    const s = apply(baseState(), { type: 'comment/delete', commentId: 'cm1' })
+    const after = apply(s, { type: 'comment/add', comments: [comment('cm9', 'c1', 'cm1')] })
+    expect(after).toBe(s)
+  })
+
+  test('describe returns null only for chat', () => {
+    const s = baseState()
+    expect(describeOp(s, { type: 'chat/post', message: msg })).toBeNull()
+    expect(describeOp(s, { type: 'comment/setResolved', commentId: 'cm1', resolved: true })).toBe(
+      'Resolved a comment on clip "c1"'
+    )
   })
 })
 

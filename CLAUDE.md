@@ -31,6 +31,8 @@ host-based collaboration sessions via join codes.
 - Vite is pinned to 7.x (electron-vite compatibility) — don't bump to 8
   until electron-vite supports it.
 - Every new op type needs an `invert` round-trip test in
-  `src/core/ops/__tests__/ops.test.ts`.
+  `src/core/ops/__tests__/ops.test.ts` (or, for deliberately non-undoable
+  conversation ops like `chat/post`, an explicit null-invert test). All ops
+  must stay idempotent — the sync layer relies on at-least-once delivery.
 - Implement features incrementally; finish one milestone before starting the
   next (roadmap at the end of docs/ARCHITECTURE.md).

@@ -155,16 +155,17 @@ export class ProjectStore {
   receiveAuthoritative(envelope: OpEnvelope): void {
     const ownIndex = this.pending.findIndex((p) => p.id === envelope.id)
     const isOwn = ownIndex !== -1
-    // Describe against pre-apply confirmed state so names resolve.
+    // Describe against pre-apply confirmed state so names resolve. A null
+    // description (chat) stays out of the activity feed but still applies.
     const text = isOwn ? null : describe(this.confirmed, envelope.op)
 
     this.confirmed = apply(this.confirmed, envelope.op)
     if (isOwn) this.pending.splice(ownIndex, 1)
     this.rebase()
 
-    if (!isOwn && text) {
+    if (!isOwn) {
       // Own ops were logged optimistically at dispatch time.
-      this.pushActivity(envelope.userId, text)
+      if (text) this.pushActivity(envelope.userId, text)
       for (const listener of this.opListeners) listener(envelope, 'remote')
     }
     this.emitState()
@@ -205,7 +206,7 @@ export class ProjectStore {
     if (source === 'local') {
       const inverse = invert(this.displayed, op)
       if (inverse) {
-        this.undoStack.push({ forward: op, inverse, text })
+        this.undoStack.push({ forward: op, inverse, text: text ?? op.type })
         this.redoStack = []
       }
     }
@@ -237,7 +238,7 @@ export class ProjectStore {
   private commit(
     op: Operation,
     next: ProjectState,
-    text: string,
+    text: string | null,
     source: OpSource,
     userId: string,
     envelopeId?: string
@@ -259,7 +260,7 @@ export class ProjectStore {
       this.confirmed = apply(this.confirmed, op)
     }
 
-    this.pushActivity(userId, text)
+    if (text) this.pushActivity(userId, text)
     for (const listener of this.opListeners) listener(envelope, source)
     this.emitState()
   }

@@ -14,10 +14,12 @@ import {
   type BayDragPayload
 } from '@/lib/importAudio'
 import { collab } from '@/state/collab'
+import { commentUi, useCommentUi } from '@/state/commentUi'
 import { HEADER_W, RULER_H, LANE_H, MIN_PX_PER_BEAT, MAX_PX_PER_BEAT } from './geometry'
 import { TrackHeader } from './TrackHeader'
 import { ClipView } from './ClipView'
 import { PingOverlay, RemoteCursors } from './PresenceOverlay'
+import { CommentThread } from '../comments/CommentThread'
 
 interface DragState {
   mode: 'move' | 'resize-l' | 'resize-r'
@@ -39,6 +41,15 @@ interface DragState {
 export function TimelineView(): React.JSX.Element {
   const state = useProjectState()
   const selectedClipId = useSelectedClipId()
+  const openCommentAnchor = useCommentUi().anchor
+
+  // Open (unresolved) thread counts per clip, for the clip chips.
+  const clipCommentCounts = new Map<string, number>()
+  for (const comment of Object.values(state.comments)) {
+    if (comment.parentId === null && !comment.resolved && comment.anchor.kind === 'clip') {
+      clipCommentCounts.set(comment.anchor.id, (clipCommentCounts.get(comment.anchor.id) ?? 0) + 1)
+    }
+  }
   const [pxPerBeat, setPxPerBeat] = useState(32)
   const [drag, setDrag] = useState<DragState | null>(null)
   const scrollRef = useRef<HTMLDivElement>(null)
@@ -401,7 +412,9 @@ export function TimelineView(): React.JSX.Element {
                   dimmed={track.muted || (anySoloed && !track.soloed)}
                   pxPerTick={pxPerTick}
                   tempo={state.tempo}
+                  commentCount={clipCommentCounts.get(clip.id) ?? 0}
                   onPointerDown={(e, mode) => beginDrag(e, clip.id, mode)}
+                  onOpenComments={() => commentUi.open({ kind: 'clip', id: clip.id })}
                 />
               )
             })}
@@ -420,6 +433,27 @@ export function TimelineView(): React.JSX.Element {
             <PingOverlay pxPerTick={pxPerTick} />
           </div>
         )}
+
+        {trackCount > 0 &&
+          openCommentAnchor?.kind === 'clip' &&
+          (() => {
+            const clip = state.clips[openCommentAnchor.id]
+            const laneIndex = clip ? state.trackOrder.indexOf(clip.trackId) : -1
+            if (!clip || laneIndex === -1) return null
+            return (
+              <div
+                className="comment-layer"
+                style={{ gridRow: `2 / ${trackCount + 2}`, gridColumn: 2 }}
+              >
+                <div
+                  className="comment-layer-anchor"
+                  style={{ left: clip.start * pxPerTick + 8, top: laneIndex * LANE_H + LANE_H - 8 }}
+                >
+                  <CommentThread anchor={openCommentAnchor} />
+                </div>
+              </div>
+            )
+          })()}
       </div>
     </div>
   )

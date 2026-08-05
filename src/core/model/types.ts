@@ -51,6 +51,41 @@ export interface Track {
   readonly soloed: boolean
 }
 
+export type CommentId = string
+export type ChatMessageId = string
+
+/** What a comment thread is attached to. Extend as new surfaces appear. */
+export interface CommentAnchor {
+  readonly kind: 'clip' | 'track' | 'file'
+  readonly id: string
+}
+
+/**
+ * Conversation data lives in the document: it syncs in sessions and
+ * persists in project files, so a handed-off project carries its
+ * discussion. Author names are snapshotted — peer ids are per-run and
+ * the roster is ephemeral.
+ */
+export interface ChatMessage {
+  readonly id: ChatMessageId
+  readonly userId: string
+  readonly authorName: string
+  readonly time: number
+  readonly text: string
+}
+
+export interface Comment {
+  readonly id: CommentId
+  /** Root comments carry the anchor; replies inherit via parentId. */
+  readonly anchor: CommentAnchor
+  readonly parentId: CommentId | null
+  readonly userId: string
+  readonly authorName: string
+  readonly time: number
+  readonly text: string
+  readonly resolved: boolean
+}
+
 export interface ProjectState {
   readonly name: string
   readonly tempo: number
@@ -59,6 +94,8 @@ export interface ProjectState {
   readonly trackOrder: readonly TrackId[]
   readonly clips: Readonly<Record<ClipId, Clip>>
   readonly files: Readonly<Record<FileNodeId, FileNode>>
+  readonly chat: readonly ChatMessage[]
+  readonly comments: Readonly<Record<CommentId, Comment>>
 }
 
 export function createEmptyProject(name: string): ProjectState {
@@ -69,8 +106,24 @@ export function createEmptyProject(name: string): ProjectState {
     tracks: {},
     trackOrder: [],
     clips: {},
-    files: {}
+    files: {},
+    chat: [],
+    comments: {}
   }
+}
+
+/** Root comments (threads) attached to an anchor, oldest first. */
+export function threadsFor(state: ProjectState, anchor: CommentAnchor): Comment[] {
+  return Object.values(state.comments)
+    .filter((c) => c.parentId === null && c.anchor.kind === anchor.kind && c.anchor.id === anchor.id)
+    .sort((a, b) => a.time - b.time)
+}
+
+/** Replies to a root comment, oldest first. */
+export function repliesTo(state: ProjectState, commentId: CommentId): Comment[] {
+  return Object.values(state.comments)
+    .filter((c) => c.parentId === commentId)
+    .sort((a, b) => a.time - b.time)
 }
 
 export function clipsOfTrack(state: ProjectState, trackId: TrackId): Clip[] {

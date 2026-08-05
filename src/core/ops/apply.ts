@@ -1,4 +1,4 @@
-import type { ProjectState, Track, Clip, TrackId, ClipId, FileNode } from '../model/types'
+import type { ProjectState, Track, Clip, TrackId, ClipId, Comment, FileNode } from '../model/types'
 import { clipsOfTrack, isSelfOrDescendant, subtreeOf } from '../model/types'
 import type { Operation } from './operations'
 
@@ -136,6 +136,44 @@ export function apply(state: ProjectState, op: Operation): ProjectState {
       const node = state.files[op.nodeId]
       if (!node || node.name === op.name) return state
       return { ...state, files: { ...state.files, [op.nodeId]: { ...node, name: op.name } } }
+    }
+
+    case 'chat/post': {
+      if (state.chat.some((m) => m.id === op.message.id)) return state
+      return { ...state, chat: [...state.chat, op.message] }
+    }
+
+    case 'comment/add': {
+      const comments = { ...state.comments }
+      let changed = false
+      for (const comment of op.comments) {
+        if (comments[comment.id]) continue
+        // A reply's root must exist (deleted-thread replies are dropped).
+        if (comment.parentId !== null && !comments[comment.parentId]) continue
+        comments[comment.id] = comment
+        changed = true
+      }
+      return changed ? { ...state, comments } : state
+    }
+
+    case 'comment/delete': {
+      const target = state.comments[op.commentId]
+      if (!target) return state
+      const comments: Record<string, Comment> = {}
+      for (const comment of Object.values(state.comments)) {
+        if (comment.id === op.commentId || comment.parentId === op.commentId) continue
+        comments[comment.id] = comment
+      }
+      return { ...state, comments }
+    }
+
+    case 'comment/setResolved': {
+      const comment = state.comments[op.commentId]
+      if (!comment || comment.resolved === op.resolved) return state
+      return {
+        ...state,
+        comments: { ...state.comments, [op.commentId]: { ...comment, resolved: op.resolved } }
+      }
     }
 
     case 'file/move': {

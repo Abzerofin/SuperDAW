@@ -59,6 +59,8 @@ export function createDemoProject(): ProjectState {
     tracks: Object.fromEntries(tracks.map((t) => [t.id, t])),
     trackOrder: tracks.map((t) => t.id),
     clips: Object.fromEntries(clips.map((c) => [c.id, c])),
-    files: {}
+    files: {},
+    chat: [],
+    comments: {}
   }
 }

@@ -15,7 +15,10 @@ interface Props {
   dimmed: boolean
   pxPerTick: number
   tempo: number
+  /** Open (unresolved) comment threads on this clip. */
+  commentCount: number
   onPointerDown: (e: React.PointerEvent, mode: 'move' | 'resize-l' | 'resize-r') => void
+  onOpenComments: () => void
 }
 
 export function ClipView({
@@ -27,7 +30,9 @@ export function ClipView({
   dimmed,
   pxPerTick,
   tempo,
-  onPointerDown
+  commentCount,
+  onPointerDown,
+  onOpenComments
 }: Props): React.JSX.Element {
   const start = preview?.start ?? clip.start
   const duration = preview?.duration ?? clip.duration
@@ -63,6 +68,18 @@ export function ClipView({
         {clip.name}
         {clip.assetId !== null && !asset && <span className="clip-downloading"> · downloading…</span>}
       </div>
+      {commentCount > 0 && (
+        <button
+          className="clip-comments"
+          title="View comments"
+          onPointerDown={(e) => {
+            e.stopPropagation()
+            onOpenComments()
+          }}
+        >
+          {commentCount}
+        </button>
+      )}
       <div className="clip-handle clip-handle-l" onPointerDown={(e) => onPointerDown(e, 'resize-l')} />
       <div className="clip-handle clip-handle-r" onPointerDown={(e) => onPointerDown(e, 'resize-r')} />
     </div>

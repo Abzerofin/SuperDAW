@@ -5,21 +5,11 @@ import { projectStore } from '@/state/projectStore'
 import { transport } from '@/state/transport'
 import { audioEngine } from '@/state/audioInstance'
 import { useCollab, USER_COLORS } from '@/state/collab'
+import { usePanels } from '@/state/panels'
 import { CollabPanel } from './CollabPanel'
 
-interface Props {
-  activityOpen: boolean
-  onToggleActivity: () => void
-  bayOpen: boolean
-  onToggleBay: () => void
-}
-
-export function TransportBar({
-  activityOpen,
-  onToggleActivity,
-  bayOpen,
-  onToggleBay
-}: Props): React.JSX.Element {
+export function TransportBar(): React.JSX.Element {
+  const panelState = usePanels()
   const state = useProjectState()
   const canUndo = useCanUndo()
   const canRedo = useCanRedo()
@@ -55,16 +45,26 @@ export function TransportBar({
           ↷
         </button>
         <button
-          className={`tbtn ${bayOpen ? 'tbtn-active' : ''}`}
+          className={`tbtn ${panelState.bayOpen ? 'tbtn-active' : ''}`}
           title="Toggle File Bay"
-          onClick={onToggleBay}
+          onClick={() => panelState.toggleBay()}
         >
           Files
         </button>
         <button
-          className={`tbtn ${activityOpen ? 'tbtn-active' : ''}`}
+          className={`tbtn ${panelState.rightPanel === 'chat' ? 'tbtn-active' : ''}`}
+          title="Toggle chat"
+          onClick={() => panelState.toggleRight('chat')}
+        >
+          Chat
+          {panelState.unreadChat > 0 && (
+            <span className="chat-badge">{Math.min(panelState.unreadChat, 99)}</span>
+          )}
+        </button>
+        <button
+          className={`tbtn ${panelState.rightPanel === 'activity' ? 'tbtn-active' : ''}`}
           title="Toggle activity feed"
-          onClick={onToggleActivity}
+          onClick={() => panelState.toggleRight('activity')}
         >
           Activity
         </button>
