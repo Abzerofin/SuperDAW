@@ -25,6 +25,9 @@ export function invert(state: ProjectState, op: Operation): Operation | null {
     case 'project/setTempo':
       return { type: 'project/setTempo', tempo: state.tempo }
 
+    case 'project/setTimeSignature':
+      return { type: 'project/setTimeSignature', timeSignature: state.timeSignature }
+
     case 'track/create':
       return { type: 'track/delete', trackId: op.track.id }
 
@@ -88,6 +91,12 @@ export function invert(state: ProjectState, op: Operation): Operation | null {
       const note = state.notes[op.noteId]
       if (!note) return null
       return { type: 'note/resize', noteId: op.noteId, duration: note.duration }
+    }
+
+    case 'note/setVelocity': {
+      const note = state.notes[op.noteId]
+      if (!note) return null
+      return { type: 'note/setVelocity', noteId: op.noteId, velocity: note.velocity }
     }
 
     case 'note/delete': {
@@ -195,6 +204,34 @@ export function invert(state: ProjectState, op: Operation): Operation | null {
       const clip = state.clips[op.clipId]
       if (!clip) return null
       return { type: 'clip/rename', clipId: op.clipId, name: clip.name }
+    }
+
+    case 'clip/setColor': {
+      const clip = state.clips[op.clipId]
+      if (!clip) return null
+      return { type: 'clip/setColor', clipId: op.clipId, color: clip.color }
+    }
+
+    case 'clip/split': {
+      const clip = state.clips[op.clipId]
+      if (!clip) return null
+      return { type: 'clip/merge', clipId: op.clipId, rightClipId: op.rightClipId }
+    }
+
+    case 'clip/merge': {
+      const left = state.clips[op.clipId]
+      const right = state.clips[op.rightClipId]
+      if (!left || !right) return null
+      // Reconstruct the right clip (and any gap) exactly as it was.
+      return {
+        type: 'clip/split',
+        clipId: op.clipId,
+        at: right.start,
+        rightClipId: right.id,
+        rightName: right.name,
+        rightColor: right.color,
+        leftDuration: left.duration
+      }
     }
 
     case 'file/create':

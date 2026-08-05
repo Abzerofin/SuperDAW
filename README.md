@@ -5,7 +5,15 @@ collaboration — multiplayer from the ground up, no accounts, no cloud
 dependency. Projects are local files; collaboration is an optional
 host-based session joined with a short code.
 
-**Status: milestones 1–9 complete.**
+**Status: milestones 1–10 complete.**
+
+- Complete editing workflow: clip split (Ctrl+E), copy/paste/duplicate,
+  clip colors, drag track reorder, note velocity editing, editable time
+  signature, snap-grid control, follow-playhead — every edit synced and
+  undoable
+- File menu (New/Open/Save/Save As), WAV mixdown export rendered offline
+  through the full mixer/effects/synth graph, unsaved-changes guard on
+  close, and a crash-safe UI (an interface error never loses the project)
 
 - Per-track effects (EQ, compressor, limiter, delay, reverb) and synth
   controls (waveform, cutoff, ADSR) — synced, undoable, saved

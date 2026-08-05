@@ -123,6 +123,7 @@ suite('invert', () => {
   const roundTrips: Operation[] = [
     { type: 'project/rename', name: 'Renamed' },
     { type: 'project/setTempo', tempo: 140 },
+    { type: 'project/setTimeSignature', timeSignature: [7, 8] },
     {
       type: 'track/create',
       track: track('t9'),
@@ -149,6 +150,7 @@ suite('invert', () => {
     ] },
     { type: 'note/move', noteId: 'nA', pitch: 67, start: 960 },
     { type: 'note/resize', noteId: 'nA', duration: 960 },
+    { type: 'note/setVelocity', noteId: 'nA', velocity: 45 },
     { type: 'note/delete', noteIds: ['nA'] },
     { type: 'track/setVolume', trackId: 't1', volume: 0.7 },
     { type: 'track/setPan', trackId: 't2', pan: -0.4 },
@@ -166,6 +168,11 @@ suite('invert', () => {
     { type: 'clip/move', clipId: 'c1', trackId: 't2', start: 4800 },
     { type: 'clip/resize', clipId: 'c2', start: 960, duration: 1920, offset: 480 },
     { type: 'clip/rename', clipId: 'c2', name: 'Renamed Clip' },
+    { type: 'clip/setColor', clipId: 'c1', color: '#e06c75' },
+    { type: 'clip/split', clipId: 'c1', at: 480, rightClipId: 'cs1' },
+    // c1 (0..960) and c2 (1920..2880) are non-adjacent: the merge/split
+    // round-trip must restore the gap via leftDuration.
+    { type: 'clip/merge', clipId: 'c1', rightClipId: 'c2' },
     { type: 'file/create', nodes: [fileNode('f9', null, 'folder'), fileNode('a9', 'f9')] },
     { type: 'file/delete', nodeIds: ['f1'] }, // subtree: f1, f2, a1
     { type: 'file/delete', nodeIds: ['a2', 'f2'] },
@@ -262,6 +269,31 @@ suite('note ops', () => {
       duration: 1,
       velocity: 127
     })
+  })
+
+  test('split reassigns notes past the cut to the right clip; undo restores', () => {
+    const store = new ProjectStore(baseState(), 'tester')
+    store.dispatch(note('n1', 'c1', 0))
+    store.dispatch(note('n2', 'c1', 600))
+    store.dispatch({ type: 'clip/split', clipId: 'c1', at: 480, rightClipId: 'cr1' })
+    expect(store.state.clips['c1'].duration).toBe(480)
+    expect(store.state.clips['cr1']).toMatchObject({ start: 480, duration: 480 })
+    expect(store.state.notes['n1']).toMatchObject({ clipId: 'c1', start: 0 })
+    expect(store.state.notes['n2']).toMatchObject({ clipId: 'cr1', start: 120 })
+    store.undo()
+    expect(store.state.clips['cr1']).toBeUndefined()
+    expect(store.state.clips['c1'].duration).toBe(960)
+    expect(store.state.notes['n2']).toMatchObject({ clipId: 'c1', start: 600 })
+  })
+
+  test('split is dropped when the cut misses the clip body', () => {
+    const s = baseState()
+    expect(apply(s, { type: 'clip/split', clipId: 'c1', at: 0, rightClipId: 'x' })).toBe(s)
+    expect(apply(s, { type: 'clip/split', clipId: 'c1', at: 960, rightClipId: 'x' })).toBe(s)
+    expect(apply(s, { type: 'clip/split', clipId: 'ghost', at: 480, rightClipId: 'x' })).toBe(s)
+    // Idempotency: re-delivered split with an existing right clip is a no-op.
+    const once = apply(s, { type: 'clip/split', clipId: 'c1', at: 480, rightClipId: 'cr1' })
+    expect(apply(once, { type: 'clip/split', clipId: 'c1', at: 480, rightClipId: 'cr1' })).toBe(once)
   })
 
   test('multi-delete restores as one undo step', () => {

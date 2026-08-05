@@ -17,7 +17,7 @@ export interface EffectNodes {
 
 const dbToGain = (db: number): number => Math.pow(10, db / 20)
 
-export function buildEffect(ctx: AudioContext, effect: Effect): EffectNodes {
+export function buildEffect(ctx: BaseAudioContext, effect: Effect): EffectNodes {
   switch (effect.type) {
     case 'eq3': {
       const low = ctx.createBiquadFilter()
@@ -155,7 +155,7 @@ export function buildEffect(ctx: AudioContext, effect: Effect): EffectNodes {
 }
 
 /** Stereo exponentially-decaying noise impulse. */
-function makeImpulse(ctx: AudioContext, decaySeconds: number): AudioBuffer {
+function makeImpulse(ctx: BaseAudioContext, decaySeconds: number): AudioBuffer {
   const length = Math.max(1, Math.round(ctx.sampleRate * decaySeconds))
   const buffer = ctx.createBuffer(2, length, ctx.sampleRate)
   for (let ch = 0; ch < 2; ch++) {

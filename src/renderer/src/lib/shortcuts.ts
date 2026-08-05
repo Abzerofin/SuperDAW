@@ -3,7 +3,14 @@ import { projectStore } from '@/state/projectStore'
 import { transport } from '@/state/transport'
 import { selection } from '@/state/selection'
 import { commentUi } from '@/state/commentUi'
-import { openProject, saveProject } from './projectFile'
+import { newProject, openProject, saveProject } from './projectFile'
+import {
+  copySelectedClip,
+  cutSelectedClip,
+  duplicateSelectedClip,
+  pasteClip,
+  splitSelectedClipAtPlayhead
+} from './clipActions'
 
 /** App-wide keyboard shortcuts. Inactive while a text field has focus. */
 export function useGlobalShortcuts(): void {
@@ -30,6 +37,11 @@ export function useGlobalShortcuts(): void {
         void openProject()
         return
       }
+      if (mod && e.shiftKey && e.key.toLowerCase() === 'n') {
+        e.preventDefault()
+        newProject()
+        return
+      }
       if (mod && e.key.toLowerCase() === 'z') {
         e.preventDefault()
         if (e.shiftKey) projectStore.redo()
@@ -39,6 +51,30 @@ export function useGlobalShortcuts(): void {
       if (mod && e.key.toLowerCase() === 'y') {
         e.preventDefault()
         projectStore.redo()
+        return
+      }
+      if (mod && e.key.toLowerCase() === 'c') {
+        if (copySelectedClip()) e.preventDefault()
+        return
+      }
+      if (mod && e.key.toLowerCase() === 'x') {
+        e.preventDefault()
+        cutSelectedClip()
+        return
+      }
+      if (mod && e.key.toLowerCase() === 'v') {
+        e.preventDefault()
+        pasteClip()
+        return
+      }
+      if (mod && e.key.toLowerCase() === 'd') {
+        e.preventDefault()
+        duplicateSelectedClip()
+        return
+      }
+      if (mod && e.key.toLowerCase() === 'e') {
+        e.preventDefault()
+        splitSelectedClipAtPlayhead()
         return
       }
 

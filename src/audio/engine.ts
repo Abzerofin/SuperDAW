@@ -1,8 +1,8 @@
 import type { EffectId, ProjectState, TrackId } from '@core/model/types'
 import { automationOf, automationValueAt, effectsOfTrack } from '@core/model/types'
-import { synthDefaults, WAVE_TYPES } from '@core/model/effects'
 import type { AssetStore } from './assets'
 import { buildEffect, type EffectNodes } from './effects'
+import { buildSynthVoice } from './synth'
 import {
   beatIndexAt,
   metronomeClicks,
@@ -306,49 +306,16 @@ export class AudioEngine {
   private scheduleAllNotes(): void {
     const ctx = this.ctx
     if (!ctx) return
-    const defaults = synthDefaults()
     for (const s of scheduleNotes(this.store.state, this.anchorTicks, this.anchorSec)) {
       const dest = this.chain(s.trackId).input
-      const sp = { ...defaults, ...this.store.state.tracks[s.trackId]?.synth }
-      const freq = 440 * Math.pow(2, (s.pitch - 69) / 12)
-      const peak = 0.22 * s.velocity
-      const sustain = peak * sp.sustain
-      const attackEnd = s.startSec + sp.attack
-      const decayEnd = Math.min(s.endSec, attackEnd + sp.decay)
-      const releaseEnd = s.endSec + sp.release
-
-      const filter = ctx.createBiquadFilter()
-      filter.type = 'lowpass'
-      filter.frequency.value = Math.min(16000, Math.max(40, freq * sp.cutoff))
-      filter.Q.value = 0.7
-
-      const env = ctx.createGain()
-      env.gain.setValueAtTime(0, s.startSec)
-      env.gain.linearRampToValueAtTime(peak, attackEnd)
-      env.gain.linearRampToValueAtTime(sustain, decayEnd)
-      env.gain.setValueAtTime(sustain, s.endSec)
-      env.gain.linearRampToValueAtTime(0.0001, releaseEnd)
-
-      filter.connect(env)
-      env.connect(dest)
-
-      const waveType = WAVE_TYPES[Math.round(sp.wave)] ?? 'sawtooth'
-      for (const detune of [-sp.detune, sp.detune]) {
-        const osc = ctx.createOscillator()
-        osc.type = waveType
-        osc.frequency.value = freq
-        osc.detune.value = detune
-        osc.connect(filter)
-        osc.onended = () => {
-          this.sources.delete(osc)
-          osc.disconnect()
-          filter.disconnect()
-          env.disconnect()
-        }
-        osc.start(s.startSec)
-        osc.stop(releaseEnd + 0.01)
-        this.sources.add(osc)
-      }
+      const voices = buildSynthVoice(
+        ctx,
+        dest,
+        s,
+        this.store.state.tracks[s.trackId]?.synth ?? {},
+        (osc) => this.sources.delete(osc)
+      )
+      for (const osc of voices) this.sources.add(osc)
     }
   }
 

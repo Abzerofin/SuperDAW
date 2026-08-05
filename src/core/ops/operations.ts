@@ -1,3 +1,4 @@
+import type { TimeSignature } from '../model/timebase'
 import type {
   AutomationPoint,
   AutomationPointId,
@@ -25,6 +26,7 @@ import type {
 export type Operation =
   | { type: 'project/rename'; name: string }
   | { type: 'project/setTempo'; tempo: number }
+  | { type: 'project/setTimeSignature'; timeSignature: TimeSignature }
   /** Content arrays restore a deleted track on undo; all empty for new tracks. */
   | {
       type: 'track/create'
@@ -48,6 +50,7 @@ export type Operation =
   | { type: 'note/add'; note: Note }
   | { type: 'note/move'; noteId: NoteId; pitch: number; start: number }
   | { type: 'note/resize'; noteId: NoteId; duration: number }
+  | { type: 'note/setVelocity'; noteId: NoteId; velocity: number }
   /** Plural: multi-delete and thread restores stay one undoable op. */
   | { type: 'note/delete'; noteIds: NoteId[] }
   | { type: 'note/addMany'; notes: Note[] }
@@ -63,6 +66,24 @@ export type Operation =
   | { type: 'clip/move'; clipId: ClipId; trackId: TrackId; start: number }
   | { type: 'clip/resize'; clipId: ClipId; start: number; duration: number; offset: number }
   | { type: 'clip/rename'; clipId: ClipId; name: string }
+  /** null = revert to the track color. */
+  | { type: 'clip/setColor'; clipId: ClipId; color: string | null }
+  /**
+   * Cut a clip in two at an absolute tick position. `rightName`/`rightColor`/
+   * `leftDuration` exist so that inverting a `clip/merge` reconstructs the
+   * original right clip (and any gap) exactly; interactive splits omit them.
+   */
+  | {
+      type: 'clip/split'
+      clipId: ClipId
+      at: number
+      rightClipId: ClipId
+      rightName?: string
+      rightColor?: string | null
+      leftDuration?: number
+    }
+  /** Extend `clipId` over `rightClipId` and absorb its notes (undo of split). */
+  | { type: 'clip/merge'; clipId: ClipId; rightClipId: ClipId }
   /** Plural so that undoing a subtree delete restores everything in one op. */
   | { type: 'file/create'; nodes: FileNode[] }
   /** Deletes each node AND its descendants. */

@@ -14,6 +14,8 @@ export function describe(state: ProjectState, op: Operation): string | null {
       return `Renamed project to "${op.name}"`
     case 'project/setTempo':
       return `Set tempo to ${op.tempo} BPM`
+    case 'project/setTimeSignature':
+      return `Set time signature to ${op.timeSignature[0]}/${op.timeSignature[1]}`
     case 'track/create':
       return `Created ${op.track.kind} track "${op.track.name}"`
     case 'track/delete':
@@ -57,6 +59,12 @@ export function describe(state: ProjectState, op: Operation): string | null {
     case 'note/resize': {
       const note = state.notes[op.noteId]
       return `Resized a note${note ? ` in "${clipName(state, note.clipId)}"` : ''}`
+    }
+    case 'note/setVelocity': {
+      const note = state.notes[op.noteId]
+      return `Set a note's velocity to ${op.velocity}${
+        note ? ` in "${clipName(state, note.clipId)}"` : ''
+      }`
     }
     case 'note/delete': {
       const first = state.notes[op.noteIds[0]]
@@ -112,6 +120,12 @@ export function describe(state: ProjectState, op: Operation): string | null {
       return `Resized clip "${clipName(state, op.clipId)}"`
     case 'clip/rename':
       return `Renamed clip "${clipName(state, op.clipId)}" to "${op.name}"`
+    case 'clip/setColor':
+      return `Recolored clip "${clipName(state, op.clipId)}"`
+    case 'clip/split':
+      return `Split clip "${clipName(state, op.clipId)}"`
+    case 'clip/merge':
+      return `Merged clip "${clipName(state, op.rightClipId)}" into "${clipName(state, op.clipId)}"`
     case 'file/create':
       return op.nodes.length === 1
         ? `Added ${op.nodes[0].kind === 'folder' ? 'folder' : 'file'} "${op.nodes[0].name}" to the File Bay`

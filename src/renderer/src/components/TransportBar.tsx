@@ -1,13 +1,16 @@
 import { useEffect, useReducer, useRef, useState, useSyncExternalStore } from 'react'
-import { formatPosition } from '@core/model/timebase'
+import { formatPosition, type TimeSignature } from '@core/model/timebase'
 import { useProjectState, useCanUndo, useCanRedo } from '@/state/hooks'
 import { projectStore } from '@/state/projectStore'
 import { transport } from '@/state/transport'
 import { audioEngine } from '@/state/audioInstance'
 import { useCollab, USER_COLORS } from '@/state/collab'
 import { usePanels } from '@/state/panels'
-import { usePianoRollUi } from '@/state/pianoRollUi'
+import { pianoRollUi, usePianoRollUi } from '@/state/pianoRollUi'
 import { useRecording } from '@/state/recording'
+import { useSelectedClipId } from '@/state/selection'
+import { GRID_CHOICES, gridUi, useGridChoice, type GridChoice } from '@/state/gridUi'
+import { exportWav, newProject, openProject, saveProject } from '@/lib/projectFile'
 import { CollabPanel } from './CollabPanel'
 
 export function TransportBar(): React.JSX.Element {
@@ -19,6 +22,7 @@ export function TransportBar(): React.JSX.Element {
   return (
     <div className="transport">
       <div className="transport-brand">SuperDAW</div>
+      <FileMenu />
 
       <div className="transport-center">
         <button
@@ -32,10 +36,9 @@ export function TransportBar(): React.JSX.Element {
         <RecordButton />
         <PositionDisplay />
         <TempoField tempo={state.tempo} />
-        <div className="transport-sig mono">
-          {state.timeSignature[0]}/{state.timeSignature[1]}
-        </div>
+        <TimeSignatureField signature={state.timeSignature} />
         <MetronomeButton />
+        <GridSelect />
         <Meter />
       </div>
 
@@ -117,17 +120,153 @@ function RecordButton(): React.JSX.Element {
   )
 }
 
-function PianoRollTab(): React.JSX.Element | null {
+function PianoRollTab(): React.JSX.Element {
   const rollState = usePianoRollUi()
   const panelState = usePanels()
-  if (rollState.clipId === null) return null
+  const state = useProjectState()
+  const selectedClipId = useSelectedClipId()
+
+  // A MIDI clip is "editable" when it's already open in the roll, or the
+  // current selection can be opened.
+  const selectedClip = selectedClipId ? state.clips[selectedClipId] : undefined
+  const selectedMidiClipId =
+    selectedClip && state.tracks[selectedClip.trackId]?.kind === 'midi'
+      ? selectedClip.id
+      : null
+  const openable = rollState.clipId ?? selectedMidiClipId
+
   return (
     <button
       className={`tbtn ${panelState.bottomPanel === 'pianoroll' ? 'tbtn-active' : ''}`}
-      title="Toggle piano roll"
-      onClick={() => panelState.toggleBottom('pianoroll')}
+      disabled={openable === null}
+      title={
+        openable === null
+          ? 'Piano roll — select or double-click a MIDI clip to edit its notes'
+          : 'Toggle piano roll'
+      }
+      onClick={() => {
+        if (panelState.bottomPanel === 'pianoroll') {
+          panelState.toggleBottom('pianoroll')
+        } else if (selectedMidiClipId && selectedMidiClipId !== rollState.clipId) {
+          pianoRollUi.open(selectedMidiClipId)
+        } else if (rollState.clipId !== null) {
+          panelState.toggleBottom('pianoroll')
+        }
+      }}
     >
       Piano
+    </button>
+  )
+}
+
+function FileMenu(): React.JSX.Element {
+  const [open, setOpen] = useState(false)
+  const ref = useRef<HTMLDivElement>(null)
+
+  // Any click outside the menu closes it.
+  useEffect(() => {
+    if (!open) return
+    const onPointerDown = (e: PointerEvent): void => {
+      if (!ref.current?.contains(e.target as Node)) setOpen(false)
+    }
+    window.addEventListener('pointerdown', onPointerDown)
+    return () => window.removeEventListener('pointerdown', onPointerDown)
+  }, [open])
+
+  const item = (label: string, shortcut: string | null, action: () => void): React.JSX.Element => (
+    <button
+      className="menu-item"
+      onClick={() => {
+        setOpen(false)
+        action()
+      }}
+    >
+      <span>{label}</span>
+      {shortcut && <span className="menu-shortcut mono">{shortcut}</span>}
+    </button>
+  )
+
+  return (
+    <div className="collab-anchor" ref={ref}>
+      <button className={`tbtn ${open ? 'tbtn-active' : ''}`} onClick={() => setOpen((v) => !v)}>
+        File
+      </button>
+      {open && (
+        <div className="menu-panel">
+          {item('New project', 'Ctrl+Shift+N', () => newProject())}
+          {item('Open…', 'Ctrl+O', () => void openProject())}
+          <div className="menu-sep" />
+          {item('Save', 'Ctrl+S', () => void saveProject())}
+          {item('Save as…', 'Ctrl+Shift+S', () => void saveProject(true))}
+          <div className="menu-sep" />
+          {item('Export WAV…', null, () => void exportWav())}
+        </div>
+      )}
+    </div>
+  )
+}
+
+function GridSelect(): React.JSX.Element {
+  const choice = useGridChoice()
+  return (
+    <select
+      className="transport-grid"
+      title="Timeline snap grid"
+      value={choice}
+      onChange={(e) => gridUi.set(e.target.value as GridChoice)}
+    >
+      {GRID_CHOICES.map((c) => (
+        <option key={c.value} value={c.value}>
+          {c.label}
+        </option>
+      ))}
+    </select>
+  )
+}
+
+function TimeSignatureField({ signature }: { signature: TimeSignature }): React.JSX.Element {
+  const [editing, setEditing] = useState(false)
+  const [value, setValue] = useState('')
+
+  const commit = (): void => {
+    setEditing(false)
+    const match = value.trim().match(/^(\d{1,2})\s*\/\s*(\d{1,2})$/)
+    if (!match) return
+    const beats = Number(match[1])
+    const unit = Number(match[2])
+    if (beats === signature[0] && unit === signature[1]) return
+    // The reducer validates (drops unknown denominators, clamps beats).
+    projectStore.dispatch({
+      type: 'project/setTimeSignature',
+      timeSignature: [beats, unit] as const
+    })
+  }
+
+  if (editing) {
+    return (
+      <input
+        className="transport-tempo-input mono"
+        autoFocus
+        value={value}
+        onChange={(e) => setValue(e.target.value)}
+        onBlur={commit}
+        onKeyDown={(e) => {
+          if (e.key === 'Enter') commit()
+          if (e.key === 'Escape') setEditing(false)
+        }}
+      />
+    )
+  }
+  return (
+    <button
+      className="transport-sig mono"
+      title="Click to edit the time signature"
+      onClick={() => {
+        setValue(`${signature[0]}/${signature[1]}`)
+        setEditing(true)
+      }}
+    >
+      {signature[0]}/{signature[1]}
     </button>
   )
 }

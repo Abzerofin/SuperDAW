@@ -12,6 +12,14 @@ interface Window {
       defaultName: string
     }): Promise<string | null>
     openProjectFile(): Promise<{ path: string; name: string; data: Uint8Array } | null>
+    exportFile(args: {
+      data: Uint8Array
+      defaultName: string
+      filterName: string
+      ext: string
+    }): Promise<string | null>
+    setDirty(dirty: boolean): void
+    onSaveRequest(handler: () => Promise<boolean>): () => void
     collabHostStart(): Promise<{ host: string; port: number; token: string } | { error: string }>
     collabHostStop(): Promise<void>
     collabSendToPeer(connId: number, data: string): void

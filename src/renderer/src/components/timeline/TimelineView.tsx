@@ -1,13 +1,14 @@
 ﻿import { useEffect, useLayoutEffect, useReducer, useRef, useState } from 'react'
 import type { ClipId, TrackKind } from '@core/model/types'
-import { PPQ, barsToTicks, snapTicks, ticksPerBar, ticksPerBeat } from '@core/model/timebase'
+import { PPQ, barsToTicks, snapTicks, ticksPerBar } from '@core/model/timebase'
 import { synthDefaults } from '@core/model/effects'
 import { newId } from '@core/model/ids'
 import { projectStore } from '@/state/projectStore'
 import { useProjectState } from '@/state/hooks'
 import { selection, useSelectedClipId } from '@/state/selection'
 import { transport } from '@/state/transport'
-import { nextTrackColor } from '@/lib/colors'
+import { nextTrackColor, TRACK_COLORS } from '@/lib/colors'
+import { gridTicksFor, useGridChoice } from '@/state/gridUi'
 import {
   BAY_DRAG_MIME,
   createClipFromBayAsset,
@@ -26,6 +27,15 @@ import { ClipView } from './ClipView'
 import { AutomationLane } from './AutomationLane'
 import { PingOverlay, RemoteCursors } from './PresenceOverlay'
 import { CommentThread } from '../comments/CommentThread'
+
+interface ReorderState {
+  fromIndex: number
+  /** Insertion slot 0..trackCount (between rows). */
+  slot: number
+  originY: number
+  /** Engages after a small vertical threshold so clicks stay clicks. */
+  active: boolean
+}
 
 interface DragState {
   mode: 'move' | 'resize-l' | 'resize-r'
@@ -66,16 +76,25 @@ export function TimelineView(): React.JSX.Element {
   }
   const [pxPerBeat, setPxPerBeat] = useState(32)
   const [drag, setDrag] = useState<DragState | null>(null)
+  const [reorder, setReorderState] = useState<ReorderState | null>(null)
+  // Authoritative copy: pointermove updates are batched at low priority by
+  // React, so a fast drag could commit after pointerup reads the state.
+  const reorderRef = useRef<ReorderState | null>(null)
+  const setReorder = (value: ReorderState | null): void => {
+    reorderRef.current = value
+    setReorderState(value)
+  }
+  const [colorMenu, setColorMenu] = useState<{ clipId: ClipId; x: number; y: number } | null>(null)
   const scrollRef = useRef<HTMLDivElement>(null)
   const gridRef = useRef<HTMLDivElement>(null)
   const pendingScrollX = useRef<number | null>(null)
   const lastCursorSent = useRef(0)
+  const gridChoice = useGridChoice()
 
   const sig = state.timeSignature
   const pxPerTick = pxPerBeat / PPQ
   const barTicks = ticksPerBar(sig)
-  const beatTicks = ticksPerBeat(sig)
-  const gridTicks = pxPerBeat >= 16 ? beatTicks : barTicks
+  const gridTicks = gridTicksFor(gridChoice, sig, pxPerBeat)
   const pxPerBar = barTicks * pxPerTick
 
   const tracks = state.trackOrder
@@ -161,6 +180,36 @@ export function TimelineView(): React.JSX.Element {
     }
   }, [pxPerBeat])
 
+  // Follow the playhead during playback: when it crosses the right edge of
+  // the view, page forward so it lands near the left. Crossing-detection
+  // (not containment) so manual scrolling is never fought.
+  const followRef = useRef({ pxPerTick, prevRel: 0 })
+  followRef.current.pxPerTick = pxPerTick
+  useEffect(
+    () =>
+      transport.subscribe(() => {
+        const el = scrollRef.current
+        if (!el || !transport.isPlaying) return
+        const x = transport.positionTicks() * followRef.current.pxPerTick
+        const visW = el.clientWidth - HEADER_W
+        const rel = x - el.scrollLeft
+        const prevRel = followRef.current.prevRel
+        followRef.current.prevRel = rel
+        if (prevRel <= visW - 8 && rel > visW - 8) {
+          el.scrollLeft = Math.max(0, x - 32)
+        }
+      }),
+    []
+  )
+
+  // A click anywhere outside the clip color palette closes it.
+  useEffect(() => {
+    if (!colorMenu) return
+    const onPointerDown = (): void => setColorMenu(null)
+    window.addEventListener('pointerdown', onPointerDown)
+    return () => window.removeEventListener('pointerdown', onPointerDown)
+  }, [colorMenu])
+
   const beginDrag = (
     e: React.PointerEvent,
     clipId: ClipId,
@@ -189,6 +238,15 @@ export function TimelineView(): React.JSX.Element {
       trackIndex,
       moved: false
     })
+  }
+
+  /** Drag a track header vertically to reorder tracks (ONE op on release). */
+  const beginReorder = (e: React.PointerEvent, index: number): void => {
+    if (e.button !== 0) return
+    // Buttons, inputs and popovers inside the header keep their own gestures.
+    if ((e.target as HTMLElement).closest('button, input, .comment-layer-anchor')) return
+    capturePointer(e)
+    setReorder({ fromIndex: index, slot: index, originY: e.clientY, active: false })
   }
 
   /** Share the pointer as a presence cursor, throttled to ~20 Hz. */
@@ -237,6 +295,23 @@ export function TimelineView(): React.JSX.Element {
 
   const onPointerMove = (e: React.PointerEvent): void => {
     shareCursor(e)
+    const activeReorder = reorderRef.current
+    if (activeReorder) {
+      const rect = gridRef.current?.getBoundingClientRect()
+      if (!rect) return
+      const y = e.clientY - rect.top - RULER_H
+      const active = activeReorder.active || Math.abs(e.clientY - activeReorder.originY) > 4
+      let slot = rowMeta.length
+      for (let i = 0; i < rowMeta.length; i++) {
+        const mid = trackTops[i] + (LANE_H + (rowMeta[i].auto ? AUTO_H : 0)) / 2
+        if (y < mid) {
+          slot = i
+          break
+        }
+      }
+      setReorder({ ...activeReorder, active, slot })
+      return
+    }
     if (!drag) return
     const dxTicks = (e.clientX - drag.originX) / pxPerTick
     setDrag((prev) => {
@@ -269,6 +344,19 @@ export function TimelineView(): React.JSX.Element {
   }
 
   const onPointerUp = (): void => {
+    const endedReorder = reorderRef.current
+    if (endedReorder) {
+      if (endedReorder.active) {
+        const track = tracks[endedReorder.fromIndex]
+        const index =
+          endedReorder.slot > endedReorder.fromIndex ? endedReorder.slot - 1 : endedReorder.slot
+        if (track && index !== endedReorder.fromIndex) {
+          projectStore.dispatch({ type: 'track/reorder', trackId: track.id, index })
+        }
+      }
+      setReorder(null)
+      return
+    }
     if (!drag) return
     // A drag is many ephemeral previews but exactly ONE operation, dispatched
     // on release. Keeps undo atomic and (later) the network op stream lean â€”
@@ -431,7 +519,10 @@ export function TimelineView(): React.JSX.Element {
               gridRow: `${gridRowOfTrack[i]} / span ${rowMeta[i].auto ? 2 : 1}`,
               gridColumn: 1
             }}
-            className="header-cell"
+            className={`header-cell ${
+              reorder?.active && reorder.fromIndex === i ? 'header-cell-dragging' : ''
+            }`}
+            onPointerDown={(e) => beginReorder(e, i)}
           >
             <TrackHeader track={track} />
           </div>
@@ -496,6 +587,12 @@ export function TimelineView(): React.JSX.Element {
                   notes={notesByClip.get(clip.id) ?? []}
                   onPointerDown={(e, mode) => beginDrag(e, clip.id, mode)}
                   onOpenComments={() => commentUi.open({ kind: 'clip', id: clip.id })}
+                  onContextMenu={(e) => {
+                    e.preventDefault()
+                    e.stopPropagation()
+                    selection.select(clip.id)
+                    setColorMenu({ clipId: clip.id, x: e.clientX, y: e.clientY })
+                  }}
                   onOpenEditor={
                     track.kind === 'midi' ? () => pianoRollUi.open(clip.id) : undefined
                   }
@@ -508,6 +605,25 @@ export function TimelineView(): React.JSX.Element {
         {trackCount > 0 && (
           <div className="playhead-layer" style={{ gridRow: `2 / ${lastGridRow}`, gridColumn: 2 }}>
             <Playhead pxPerTick={pxPerTick} />
+          </div>
+        )}
+
+        {reorder?.active && trackCount > 0 && (
+          <div
+            className="reorder-layer"
+            style={{ gridRow: `2 / ${lastGridRow}`, gridColumn: '1 / 3' }}
+          >
+            <div
+              className="reorder-line"
+              style={{
+                top:
+                  reorder.slot < rowMeta.length
+                    ? trackTops[reorder.slot]
+                    : trackTops[rowMeta.length - 1] +
+                      LANE_H +
+                      (rowMeta[rowMeta.length - 1].auto ? AUTO_H : 0)
+              }}
+            />
           </div>
         )}
 
@@ -552,6 +668,42 @@ export function TimelineView(): React.JSX.Element {
             )
           })()}
       </div>
+
+      {colorMenu &&
+        (() => {
+          const clip = state.clips[colorMenu.clipId]
+          if (!clip) return null
+          const pick = (color: string | null): void => {
+            projectStore.dispatch({ type: 'clip/setColor', clipId: clip.id, color })
+            setColorMenu(null)
+          }
+          return (
+            <div
+              className="color-menu"
+              style={{ left: colorMenu.x, top: colorMenu.y }}
+              onPointerDown={(e) => e.stopPropagation()}
+            >
+              {TRACK_COLORS.map((color) => (
+                <button
+                  key={color}
+                  className={`color-swatch ${clip.color === color ? 'color-swatch-active' : ''}`}
+                  style={{ background: color }}
+                  title={color}
+                  onClick={() => pick(color)}
+                />
+              ))}
+              <button
+                className={`color-swatch color-swatch-reset ${
+                  clip.color === null ? 'color-swatch-active' : ''
+                }`}
+                title="Use the track color"
+                onClick={() => pick(null)}
+              >
+                ×
+              </button>
+            </div>
+          )
+        })()}
     </div>
   )
 }

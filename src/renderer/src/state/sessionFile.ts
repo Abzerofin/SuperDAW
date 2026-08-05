@@ -36,6 +36,8 @@ class SessionFileStore {
   private setDirty(dirty: boolean, force = false): void {
     if (this.unsaved === dirty && !force) return
     this.unsaved = dirty
+    // The main process needs this for the unsaved-changes close guard.
+    window.superdaw?.setDirty(dirty)
     for (const listener of this.listeners) listener()
   }
 

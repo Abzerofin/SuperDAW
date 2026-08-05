@@ -211,8 +211,21 @@ default).
    FX panel from track headers or mixer strips; knobs preview live and
    dispatch one op on release.
 
+10. ✅ **Workflow audit fixes** — piano-roll hook-order crash fixed +
+    app-wide error boundary (a UI crash never loses work); piano roll
+    reachable from the transport tab; project rename, drag track reorder,
+    clip colors (right-click palette), note velocity editing, editable
+    time signature — all as ops with invert tests; clip split/merge ops
+    (Ctrl+E) + copy/cut/paste/duplicate (in-memory clipboard, ephemeral);
+    snap-grid selector + follow-playhead paging; File menu with New/Open/
+    Save/Save As/Export; offline WAV mixdown (`src/audio/render.ts`
+    rebuilds the engine graph in an OfflineAudioContext, reusing the same
+    scheduling math, synth voice and effect builders); unsaved-changes
+    close guard (Electron dialog handshake, browser beforeunload).
+
 Roadmap beyond: autotune/pitch correction (dedicated AudioWorklet DSP
 milestone: pitch detection + PSOLA resynthesis), effect reordering UI,
 per-strip metering, internet rendezvous for join codes, packaging polish
-(icon, signing, auto-update), velocity editing, multi-note selection,
-count-in/punch recording, input monitoring.
+(icon, signing, auto-update), multi-clip/multi-note selection, loop/cycle
+region, master-bus effects, track height adjustment, count-in/punch
+recording, input monitoring.

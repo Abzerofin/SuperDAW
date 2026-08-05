@@ -40,6 +40,7 @@ export function PianoRoll({ clipId }: { clipId: string }): React.JSX.Element | n
   const [pxPerBeat, setPxPerBeat] = useState(48)
   const [selectedId, setSelectedId] = useState<NoteId | null>(null)
   const [drag, setDrag] = useState<NoteDrag | null>(null)
+  const rootRef = useRef<HTMLDivElement>(null)
   const scrollRef = useRef<HTMLDivElement>(null)
 
   const clip = state.clips[clipId]
@@ -50,8 +51,10 @@ export function PianoRoll({ clipId }: { clipId: string }): React.JSX.Element | n
     if (!clip) pianoRollUi.close()
   }, [clip])
 
-  // First open: center the view around C4 / the clip's notes.
+  // On open: take keyboard focus (Delete must edit notes, not the timeline
+  // selection) and center the view around C4 / the clip's notes.
   useEffect(() => {
+    rootRef.current?.focus()
     const el = scrollRef.current
     if (!el) return
     const notes = notesOfClip(projectStore.state, clipId)
@@ -63,6 +66,20 @@ export function PianoRoll({ clipId }: { clipId: string }): React.JSX.Element | n
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [clipId])
 
+  // Ctrl+wheel zoom (native listener — React wheel events are passive).
+  // NOTE: all hooks stay above the early return below (rules of hooks).
+  useEffect(() => {
+    const el = scrollRef.current
+    if (!el) return
+    const onWheel = (e: WheelEvent): void => {
+      if (!e.ctrlKey) return
+      e.preventDefault()
+      setPxPerBeat((prev) => Math.min(160, Math.max(12, prev * (e.deltaY < 0 ? 1.2 : 1 / 1.2))))
+    }
+    el.addEventListener('wheel', onWheel, { passive: false })
+    return () => el.removeEventListener('wheel', onWheel)
+  }, [clip !== undefined])
+
   if (!clip || !track) return null
 
   const pxPerTick = pxPerBeat / PPQ
@@ -72,6 +89,7 @@ export function PianoRoll({ clipId }: { clipId: string }): React.JSX.Element | n
   const lastEnd = notes.reduce((max, n) => Math.max(max, n.start + n.duration), 0)
   const contentTicks = Math.max(clip.duration, lastEnd) + barTicks * 2
   const contentW = Math.ceil(contentTicks * pxPerTick)
+  const selectedNote = selectedId !== null ? state.notes[selectedId] : undefined
 
   const withPreview = (note: Note): Note =>
     drag && drag.noteId === note.id
@@ -147,6 +165,9 @@ export function PianoRoll({ clipId }: { clipId: string }): React.JSX.Element | n
   }
 
   const onKeyDown = (e: React.KeyboardEvent): void => {
+    // Don't steal keys from the velocity slider (or any future input).
+    const target = e.target as HTMLElement
+    if (target.tagName === 'INPUT') return
     if ((e.key === 'Delete' || e.key === 'Backspace') && selectedId) {
       e.stopPropagation()
       projectStore.dispatch({ type: 'note/delete', noteIds: [selectedId] })
@@ -154,19 +175,6 @@ export function PianoRoll({ clipId }: { clipId: string }): React.JSX.Element | n
     }
     if (e.key === 'Escape') pianoRollUi.close()
   }
-
-  // Ctrl+wheel zoom (native listener — React wheel events are passive).
-  useEffect(() => {
-    const el = scrollRef.current
-    if (!el) return
-    const onWheel = (e: WheelEvent): void => {
-      if (!e.ctrlKey) return
-      e.preventDefault()
-      setPxPerBeat((prev) => Math.min(160, Math.max(12, prev * (e.deltaY < 0 ? 1.2 : 1 / 1.2))))
-    }
-    el.addEventListener('wheel', onWheel, { passive: false })
-    return () => el.removeEventListener('wheel', onWheel)
-  }, [])
 
   const rowStripes = {
     backgroundImage:
@@ -176,12 +184,13 @@ export function PianoRoll({ clipId }: { clipId: string }): React.JSX.Element | n
   }
 
   return (
-    <div className="proll" tabIndex={0} onKeyDown={onKeyDown}>
+    <div className="proll" ref={rootRef} tabIndex={0} onKeyDown={onKeyDown}>
       <div className="proll-head">
         <span className="proll-title">
           <span className="proll-dot" style={{ background: track.color }} />
           {clip.name} · {track.name}
         </span>
+        {selectedNote && <VelocityControl key={selectedNote.id} note={selectedNote} />}
         <span className="proll-hint">
           Double-click to add · drag to move · edge to resize · Del to delete
         </span>
@@ -237,6 +246,7 @@ export function PianoRoll({ clipId }: { clipId: string }): React.JSX.Element | n
                     top: pitchToY(note.pitch),
                     width: Math.max(4, note.duration * pxPerTick - 1),
                     height: ROW_H - 1,
+                    opacity: 0.45 + 0.55 * (note.velocity / 127),
                     '--track-color': track.color
                   } as React.CSSProperties}
                   onPointerDown={(e) => beginDrag(e, raw, 'move')}
@@ -257,6 +267,43 @@ export function PianoRoll({ clipId }: { clipId: string }): React.JSX.Element | n
         </div>
       </div>
     </div>
+  )
+}
+
+/** Velocity for the selected note: live slider, ONE op on release. */
+function VelocityControl({ note }: { note: Note }): React.JSX.Element {
+  const [preview, setPreviewState] = useState<number | null>(null)
+  const previewRef = useRef<number | null>(null)
+
+  const setPreview = (value: number): void => {
+    previewRef.current = value
+    setPreviewState(value)
+  }
+
+  const commit = (): void => {
+    const value = previewRef.current
+    previewRef.current = null
+    setPreviewState(null)
+    if (value !== null && value !== note.velocity) {
+      projectStore.dispatch({ type: 'note/setVelocity', noteId: note.id, velocity: value })
+    }
+  }
+
+  return (
+    <span className="proll-vel" title="Velocity of the selected note">
+      <span className="proll-vel-label">Vel</span>
+      <input
+        type="range"
+        min={1}
+        max={127}
+        value={preview ?? note.velocity}
+        onChange={(e) => setPreview(Number(e.target.value))}
+        onPointerUp={commit}
+        onKeyUp={commit}
+        onBlur={commit}
+      />
+      <span className="mono proll-vel-value">{preview ?? note.velocity}</span>
+    </span>
   )
 }
 

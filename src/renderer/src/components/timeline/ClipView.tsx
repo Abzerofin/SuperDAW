@@ -23,6 +23,8 @@ interface Props {
   notes: Note[]
   onPointerDown: (e: React.PointerEvent, mode: 'move' | 'resize-l' | 'resize-r') => void
   onOpenComments: () => void
+  /** Right-click: color palette. */
+  onContextMenu: (e: React.MouseEvent) => void
   /** Double-click action (MIDI: open the piano roll). */
   onOpenEditor?: () => void
 }
@@ -41,6 +43,7 @@ export function ClipView({
   notes,
   onPointerDown,
   onOpenComments,
+  onContextMenu,
   onOpenEditor
 }: Props): React.JSX.Element {
   const start = preview?.start ?? clip.start
@@ -69,6 +72,7 @@ export function ClipView({
         '--clip-color': color
       } as React.CSSProperties}
       onPointerDown={(e) => onPointerDown(e, 'move')}
+      onContextMenu={onContextMenu}
       onDoubleClick={(e) => {
         if (onOpenEditor) {
           e.stopPropagation()

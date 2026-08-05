@@ -19,6 +19,31 @@ const api = {
   openProjectFile: (): Promise<{ path: string; name: string; data: Uint8Array } | null> =>
     ipcRenderer.invoke('project:open'),
 
+  /** Save arbitrary bytes via a dialog (e.g. WAV export). Null = cancelled. */
+  exportFile: (args: {
+    data: Uint8Array
+    defaultName: string
+    filterName: string
+    ext: string
+  }): Promise<string | null> => ipcRenderer.invoke('file:export', args),
+
+  /** Keep the main process informed for the unsaved-changes close guard. */
+  setDirty: (dirty: boolean): void => {
+    ipcRenderer.send('project:set-dirty', dirty)
+  },
+
+  /**
+   * Close-guard handshake: main asks us to save before closing; we report
+   * back whether the save completed (false = user cancelled the dialog).
+   */
+  onSaveRequest: (handler: () => Promise<boolean>): (() => void) => {
+    const listener = (): void => {
+      void handler().then((saved) => ipcRenderer.send('project:save-done', saved))
+    }
+    ipcRenderer.on('project:save-request', listener)
+    return () => ipcRenderer.off('project:save-request', listener)
+  },
+
   // ----- Hosting transport (see src/main/collabServer.ts) -----
 
   collabHostStart: (): Promise<{ host: string; port: number; token: string } | { error: string }> =>

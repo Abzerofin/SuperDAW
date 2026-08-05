@@ -7,11 +7,14 @@ import {
   serializeProjectJson,
   type AssetManifestEntry
 } from '@core/persistence/format'
+import { createEmptyProject } from '@core/model/types'
+import { renderMixdown } from '@audio/render'
 import { projectStore } from '@/state/projectStore'
 import { assetStore, audioEngine } from '@/state/audioInstance'
 import { transport } from '@/state/transport'
 import { selection } from '@/state/selection'
 import { sessionFile } from '@/state/sessionFile'
+import { pianoRollUi } from '@/state/pianoRollUi'
 
 /**
  * Save/open orchestration. The .sdaw container is a ZIP of project.json
@@ -100,6 +103,44 @@ export async function saveProject(forceDialog = false): Promise<void> {
   anchor.click()
   URL.revokeObjectURL(url)
   sessionFile.markSaved(null)
+}
+
+/** Start an empty project. Asks before discarding unsaved changes. */
+export function newProject(): void {
+  if (
+    sessionFile.dirty &&
+    !window.confirm('Discard unsaved changes and start a new project?')
+  ) {
+    return
+  }
+  transport.stop()
+  transport.setPosition(0)
+  selection.select(null)
+  pianoRollUi.close()
+  assetStore.clear()
+  projectStore.loadProject(createEmptyProject('Untitled'))
+  sessionFile.markLoaded(null)
+}
+
+/**
+ * Offline-render the whole project to a stereo 16-bit WAV and save it.
+ * Rendering happens faster than realtime in an OfflineAudioContext.
+ */
+export async function exportWav(): Promise<void> {
+  const data = await renderMixdown(projectStore.state, assetStore)
+  if (!data) return // empty project — nothing to bounce
+  const name = `${projectStore.state.name.trim() || 'Untitled'}.wav`
+  const bridge = window.superdaw
+  if (bridge) {
+    await bridge.exportFile({ data, defaultName: name, filterName: 'WAV audio', ext: 'wav' })
+    return
+  }
+  const url = URL.createObjectURL(new Blob([data.buffer as ArrayBuffer]))
+  const anchor = document.createElement('a')
+  anchor.href = url
+  anchor.download = name
+  anchor.click()
+  URL.revokeObjectURL(url)
 }
 
 export async function openProject(): Promise<void> {

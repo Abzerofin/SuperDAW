@@ -17,5 +17,10 @@ export default defineConfig({
   },
   // host: true exposes the web client on the LAN so another device can open
   // http://<this-pc-ip>:5180 and join a session with zero install.
-  server: { port: 5180, strictPort: true, host: true }
+  // PORT override lets tooling run a second instance beside the default one.
+  server: {
+    port: process.env.PORT ? Number(process.env.PORT) : 5180,
+    strictPort: true,
+    host: true
+  }
 })

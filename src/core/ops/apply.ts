@@ -60,6 +60,14 @@ export function apply(state: ProjectState, op: Operation): ProjectState {
       return { ...state, tempo }
     }
 
+    case 'project/setTimeSignature': {
+      const beats = clampInt(op.timeSignature[0], 1, 32)
+      const unit = op.timeSignature[1]
+      if (![1, 2, 4, 8, 16, 32].includes(unit)) return state
+      if (state.timeSignature[0] === beats && state.timeSignature[1] === unit) return state
+      return { ...state, timeSignature: [beats, unit] as const }
+    }
+
     case 'track/create': {
       if (state.tracks[op.track.id]) return state
       const trackOrder = [...state.trackOrder]
@@ -185,6 +193,14 @@ export function apply(state: ProjectState, op: Operation): ProjectState {
       const duration = Math.max(1, op.duration)
       if (note.duration === duration) return state
       return { ...state, notes: { ...state.notes, [op.noteId]: { ...note, duration } } }
+    }
+
+    case 'note/setVelocity': {
+      const note = state.notes[op.noteId]
+      if (!note) return state
+      const velocity = clampInt(op.velocity, 1, 127)
+      if (note.velocity === velocity) return state
+      return { ...state, notes: { ...state.notes, [op.noteId]: { ...note, velocity } } }
     }
 
     case 'note/delete': {
@@ -317,6 +333,69 @@ export function apply(state: ProjectState, op: Operation): ProjectState {
 
     case 'clip/rename':
       return updateClip(state, op.clipId, (c) => ({ ...c, name: op.name }))
+
+    case 'clip/setColor':
+      return updateClip(state, op.clipId, (c) =>
+        c.color === op.color ? c : { ...c, color: op.color }
+      )
+
+    case 'clip/split': {
+      const clip = state.clips[op.clipId]
+      if (!clip) return state
+      if (state.clips[op.rightClipId]) return state // already split (idempotency)
+      const at = Math.round(op.at)
+      if (at <= clip.start || at >= clip.start + clip.duration) return state
+      const splitOffset = at - clip.start
+      const leftDuration = clamp(op.leftDuration ?? splitOffset, 1, splitOffset)
+      const right: Clip = {
+        id: op.rightClipId,
+        trackId: clip.trackId,
+        name: op.rightName ?? clip.name,
+        start: at,
+        duration: clip.start + clip.duration - at,
+        assetId: clip.assetId,
+        // Audio keeps playing the same source material across the cut.
+        offset: clip.assetId !== null ? clip.offset + splitOffset : 0,
+        color: op.rightColor !== undefined ? op.rightColor : clip.color
+      }
+      const clips = {
+        ...state.clips,
+        [clip.id]: { ...clip, duration: leftDuration },
+        [right.id]: right
+      }
+      // Notes at/after the cut move to the right clip, re-based to its start.
+      let notes = state.notes
+      let notesChanged = false
+      const nextNotes: Record<string, Note> = { ...state.notes }
+      for (const note of Object.values(state.notes)) {
+        if (note.clipId !== clip.id || note.start < splitOffset) continue
+        nextNotes[note.id] = { ...note, clipId: right.id, start: note.start - splitOffset }
+        notesChanged = true
+      }
+      if (notesChanged) notes = nextNotes
+      return { ...state, clips, notes }
+    }
+
+    case 'clip/merge': {
+      const left = state.clips[op.clipId]
+      const right = state.clips[op.rightClipId]
+      if (!left || !right || left.trackId !== right.trackId) return state
+      if (right.start < left.start) return state
+      const duration = Math.max(left.duration, right.start + right.duration - left.start)
+      const clips = { ...state.clips, [left.id]: { ...left, duration } }
+      delete clips[right.id]
+      const shift = right.start - left.start
+      let notes = state.notes
+      let notesChanged = false
+      const nextNotes: Record<string, Note> = { ...state.notes }
+      for (const note of Object.values(state.notes)) {
+        if (note.clipId !== right.id) continue
+        nextNotes[note.id] = { ...note, clipId: left.id, start: note.start + shift }
+        notesChanged = true
+      }
+      if (notesChanged) notes = nextNotes
+      return { ...state, clips, notes }
+    }
 
     case 'file/create': {
       const files = { ...state.files }
