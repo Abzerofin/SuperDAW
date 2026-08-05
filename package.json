@@ -3,6 +3,7 @@
   "productName": "SuperDAW",
   "version": "0.1.0",
   "description": "A collaboration-first professional DAW",
+  "author": "Abzerofin",
   "private": true,
   "main": "./out/main/index.js",
   "scripts": {

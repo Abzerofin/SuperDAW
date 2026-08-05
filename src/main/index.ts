@@ -1,4 +1,4 @@
-import { app, BrowserWindow, dialog, ipcMain, shell } from 'electron'
+import { app, BrowserWindow, dialog, ipcMain, Menu, shell } from 'electron'
 import { readFile, writeFile } from 'node:fs/promises'
 import { basename, join } from 'node:path'
 import { registerCollabIpc } from './collabServer'
@@ -81,6 +81,9 @@ function createWindow(): void {
 }
 
 app.whenReady().then(() => {
+  // No menu bar in production — everything is in-app (dev keeps the
+  // default menu for DevTools/reload).
+  if (!process.env['ELECTRON_RENDERER_URL']) Menu.setApplicationMenu(null)
   registerIpc()
   registerCollabIpc()
   createWindow()
