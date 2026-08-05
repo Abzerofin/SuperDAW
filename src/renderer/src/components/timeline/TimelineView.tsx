@@ -14,10 +14,13 @@ import {
   type BayDragPayload
 } from '@/lib/importAudio'
 import { collab } from '@/state/collab'
+import { capturePointer } from '@/lib/pointer'
 import { commentUi, useCommentUi } from '@/state/commentUi'
-import { HEADER_W, RULER_H, LANE_H, MIN_PX_PER_BEAT, MAX_PX_PER_BEAT } from './geometry'
+import { useAutomationUi } from '@/state/automationUi'
+import { HEADER_W, RULER_H, LANE_H, AUTO_H, MIN_PX_PER_BEAT, MAX_PX_PER_BEAT } from './geometry'
 import { TrackHeader } from './TrackHeader'
 import { ClipView } from './ClipView'
+import { AutomationLane } from './AutomationLane'
 import { PingOverlay, RemoteCursors } from './PresenceOverlay'
 import { CommentThread } from '../comments/CommentThread'
 
@@ -68,6 +71,44 @@ export function TimelineView(): React.JSX.Element {
     .map((id) => state.tracks[id])
     .filter((t) => t !== undefined)
   const trackCount = tracks.length
+  const autoUi = useAutomationUi()
+
+  // Row layout: each track lane, optionally followed by its automation lane.
+  // All overlay layers position by trackTops (content px below the ruler).
+  const rowMeta = tracks.map((track) => ({ track, auto: autoUi.isOpen(track.id) }))
+  const trackTops: number[] = []
+  const gridRowOfTrack: number[] = []
+  {
+    let top = 0
+    let row = 2
+    for (const meta of rowMeta) {
+      trackTops.push(top)
+      gridRowOfTrack.push(row)
+      top += LANE_H
+      row += 1
+      if (meta.auto) {
+        top += AUTO_H
+        row += 1
+      }
+    }
+  }
+  const lastGridRow =
+    2 + rowMeta.reduce((n, m) => n + (m.auto ? 2 : 1), 0)
+  const rowTemplate =
+    trackCount === 0
+      ? `${RULER_H}px ${LANE_H}px`
+      : `${RULER_H}px ${rowMeta
+          .map((m) => (m.auto ? `${LANE_H}px ${AUTO_H}px` : `${LANE_H}px`))
+          .join(' ')}`
+
+  /** Track index for a y position in content coordinates (below the ruler). */
+  const trackIndexAtY = (y: number): number => {
+    for (let i = 0; i < rowMeta.length; i++) {
+      const bottom = trackTops[i] + LANE_H + (rowMeta[i].auto ? AUTO_H : 0)
+      if (y < bottom) return i
+    }
+    return Math.max(0, rowMeta.length - 1)
+  }
 
   // Content extends past the last clip so there is always room to work.
   const lastClipEnd = Object.values(state.clips).reduce(
@@ -120,7 +161,7 @@ export function TimelineView(): React.JSX.Element {
     if (!clip) return
     const trackIndex = state.trackOrder.indexOf(clip.trackId)
     selection.select(clipId)
-    ;(e.currentTarget as HTMLElement).setPointerCapture(e.pointerId)
+    capturePointer(e)
     setDrag({
       mode,
       clipId,
@@ -155,7 +196,7 @@ export function TimelineView(): React.JSX.Element {
     }
     collab.sendCursor({
       ticks: Math.max(0, x / pxPerTick),
-      trackIndex: Math.min(trackCount - 1, Math.floor(y / LANE_H))
+      trackIndex: trackIndexAtY(y)
     })
   }
 
@@ -174,7 +215,7 @@ export function TimelineView(): React.JSX.Element {
       collab.ping(ticks, null, `bar ${bar}`)
       return
     }
-    const trackIndex = Math.min(trackCount - 1, Math.floor((y - RULER_H) / LANE_H))
+    const trackIndex = trackIndexAtY(y - RULER_H)
     const track = tracks[trackIndex]
     if (!track) return
     const clip = Object.values(state.clips).find(
@@ -192,8 +233,9 @@ export function TimelineView(): React.JSX.Element {
       let { start, duration, offset, trackIndex } = prev
       if (prev.mode === 'move') {
         start = Math.max(0, snapTicks(prev.origStart + dxTicks, gridTicks))
-        const laneDelta = Math.round((e.clientY - prev.originY) / LANE_H)
-        trackIndex = Math.min(trackCount - 1, Math.max(0, prev.origTrackIndex + laneDelta))
+        const yCenter =
+          trackTops[prev.origTrackIndex] + LANE_H / 2 + (e.clientY - prev.originY)
+        trackIndex = trackIndexAtY(yCenter)
       } else if (prev.mode === 'resize-l') {
         const maxStart = prev.origStart + prev.origDuration - gridTicks
         // Audio clips can't extend left past the start of their source material.
@@ -308,10 +350,13 @@ export function TimelineView(): React.JSX.Element {
         name: `${kind === 'audio' ? 'Audio' : 'MIDI'} ${count + 1}`,
         color: nextTrackColor(count),
         muted: false,
-        soloed: false
+        soloed: false,
+        volume: 1,
+        pan: 0
       },
       index: count,
-      clips: []
+      clips: [],
+      automation: []
     })
   }
 
@@ -337,7 +382,7 @@ export function TimelineView(): React.JSX.Element {
         ref={gridRef}
         style={{
           gridTemplateColumns: `${HEADER_W}px ${contentW}px`,
-          gridTemplateRows: `${RULER_H}px repeat(${Math.max(1, trackCount)}, ${LANE_H}px)`
+          gridTemplateRows: rowTemplate
         }}
         onPointerMove={onPointerMove}
         onPointerUp={onPointerUp}
@@ -366,7 +411,14 @@ export function TimelineView(): React.JSX.Element {
         </div>
 
         {tracks.map((track, i) => (
-          <div key={track.id} style={{ gridRow: i + 2, gridColumn: 1 }} className="header-cell">
+          <div
+            key={track.id}
+            style={{
+              gridRow: `${gridRowOfTrack[i]} / span ${rowMeta[i].auto ? 2 : 1}`,
+              gridColumn: 1
+            }}
+            className="header-cell"
+          >
             <TrackHeader track={track} />
           </div>
         ))}
@@ -375,7 +427,7 @@ export function TimelineView(): React.JSX.Element {
           <div
             key={track.id}
             className={`lane ${track.muted || (anySoloed && !track.soloed) ? 'lane-muted' : ''}`}
-            style={{ gridRow: i + 2, gridColumn: 2, ...laneBackground }}
+            style={{ gridRow: gridRowOfTrack[i], gridColumn: 2, ...laneBackground }}
             onPointerDown={() => selection.select(null)}
             onDoubleClick={(e) => onLaneDoubleClick(e, i)}
             onDragOver={(e) => onLaneDragOver(e, i)}
@@ -383,10 +435,23 @@ export function TimelineView(): React.JSX.Element {
           />
         ))}
 
+        {tracks.map(
+          (track, i) =>
+            rowMeta[i].auto && (
+              <div
+                key={`auto-${track.id}`}
+                className="auto-row"
+                style={{ gridRow: gridRowOfTrack[i] + 1, gridColumn: 2, ...laneBackground }}
+              >
+                <AutomationLane track={track} pxPerTick={pxPerTick} contentW={contentW} />
+              </div>
+            )
+        )}
+
         {trackCount > 0 && (
           <div
             className="clip-layer"
-            style={{ gridRow: `2 / ${trackCount + 2}`, gridColumn: 2 }}
+            style={{ gridRow: `2 / ${lastGridRow}`, gridColumn: 2 }}
           >
             {Object.values(state.clips).map((clip) => {
               const trackIndex = state.trackOrder.indexOf(clip.trackId)
@@ -412,6 +477,7 @@ export function TimelineView(): React.JSX.Element {
                   dimmed={track.muted || (anySoloed && !track.soloed)}
                   pxPerTick={pxPerTick}
                   tempo={state.tempo}
+                  laneTops={trackTops}
                   commentCount={clipCommentCounts.get(clip.id) ?? 0}
                   onPointerDown={(e, mode) => beginDrag(e, clip.id, mode)}
                   onOpenComments={() => commentUi.open({ kind: 'clip', id: clip.id })}
@@ -422,15 +488,15 @@ export function TimelineView(): React.JSX.Element {
         )}
 
         {trackCount > 0 && (
-          <div className="playhead-layer" style={{ gridRow: `2 / ${trackCount + 2}`, gridColumn: 2 }}>
+          <div className="playhead-layer" style={{ gridRow: `2 / ${lastGridRow}`, gridColumn: 2 }}>
             <Playhead pxPerTick={pxPerTick} />
           </div>
         )}
 
         {trackCount > 0 && (
-          <div className="presence-layer" style={{ gridRow: `2 / ${trackCount + 2}`, gridColumn: 2 }}>
-            <RemoteCursors pxPerTick={pxPerTick} />
-            <PingOverlay pxPerTick={pxPerTick} />
+          <div className="presence-layer" style={{ gridRow: `2 / ${lastGridRow}`, gridColumn: 2 }}>
+            <RemoteCursors pxPerTick={pxPerTick} trackTops={trackTops} />
+            <PingOverlay pxPerTick={pxPerTick} trackTops={trackTops} />
           </div>
         )}
 
@@ -443,11 +509,14 @@ export function TimelineView(): React.JSX.Element {
             return (
               <div
                 className="comment-layer"
-                style={{ gridRow: `2 / ${trackCount + 2}`, gridColumn: 2 }}
+                style={{ gridRow: `2 / ${lastGridRow}`, gridColumn: 2 }}
               >
                 <div
                   className="comment-layer-anchor"
-                  style={{ left: clip.start * pxPerTick + 8, top: laneIndex * LANE_H + LANE_H - 8 }}
+                  style={{
+                    left: clip.start * pxPerTick + 8,
+                    top: trackTops[laneIndex] + LANE_H - 8
+                  }}
                 >
                   <CommentThread anchor={openCommentAnchor} />
                 </div>

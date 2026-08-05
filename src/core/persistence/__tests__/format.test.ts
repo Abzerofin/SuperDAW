@@ -13,9 +13,19 @@ function sampleState() {
   s = { ...s, tempo: 133 }
   s = apply(s, {
     type: 'track/create',
-    track: { id: 't1', kind: 'audio', name: 'T', color: '#fff', muted: false, soloed: true },
+    track: {
+      id: 't1',
+      kind: 'audio',
+      name: 'T',
+      color: '#fff',
+      muted: false,
+      soloed: true,
+      volume: 0.9,
+      pan: 0.25
+    },
     index: 0,
-    clips: []
+    clips: [],
+    automation: [{ id: 'ap1', trackId: 't1', param: 'volume', ticks: 480, value: 0.6 }]
   })
   s = apply(s, {
     type: 'clip/create',
@@ -63,6 +73,23 @@ suite('project file format', () => {
     expect(() =>
       parseProjectJson(JSON.stringify({ formatVersion: 999, state: {}, assets: [] }))
     ).toThrow(/newer version/)
+  })
+
+  test('pre-mixer files load with default volume/pan on tracks', () => {
+    const state = sampleState()
+    const legacyTracks = Object.fromEntries(
+      Object.entries(state.tracks).map(([id, t]) => {
+        const { volume: _v, pan: _p, ...legacy } = t
+        return [id, legacy]
+      })
+    )
+    const { masterVolume: _m, automation: _a, ...rest } = state
+    const legacyState = { ...rest, tracks: legacyTracks }
+    const parsed = parseProjectJson(JSON.stringify({ formatVersion: 1, state: legacyState, assets: [] }))
+    expect(parsed.state.tracks['t1'].volume).toBe(1)
+    expect(parsed.state.tracks['t1'].pan).toBe(0)
+    expect(parsed.state.masterVolume).toBe(1)
+    expect(parsed.state.automation).toEqual({})
   })
 
   test('a v1 file missing a required section is rejected, not half-loaded', () => {

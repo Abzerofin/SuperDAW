@@ -1,5 +1,14 @@
-import type { ProjectState, Track, Clip, TrackId, ClipId, Comment, FileNode } from '../model/types'
-import { clipsOfTrack, isSelfOrDescendant, subtreeOf } from '../model/types'
+import type {
+  ProjectState,
+  Track,
+  Clip,
+  TrackId,
+  ClipId,
+  Comment,
+  FileNode,
+  AutomationPoint
+} from '../model/types'
+import { clipsOfTrack, isSelfOrDescendant, subtreeOf, MAX_GAIN } from '../model/types'
 import type { Operation } from './operations'
 
 /**
@@ -28,11 +37,14 @@ export function apply(state: ProjectState, op: Operation): ProjectState {
       trackOrder.splice(clamp(op.index, 0, trackOrder.length), 0, op.track.id)
       const clips = { ...state.clips }
       for (const clip of op.clips) clips[clip.id] = clip
+      const automation = { ...state.automation }
+      for (const point of op.automation) automation[point.id] = point
       return {
         ...state,
         tracks: { ...state.tracks, [op.track.id]: op.track },
         trackOrder,
-        clips
+        clips,
+        automation
       }
     }
 
@@ -44,12 +56,62 @@ export function apply(state: ProjectState, op: Operation): ProjectState {
       for (const clip of Object.values(state.clips)) {
         if (clip.trackId !== op.trackId) clips[clip.id] = clip
       }
+      const automation: Record<string, AutomationPoint> = {}
+      for (const point of Object.values(state.automation)) {
+        if (point.trackId !== op.trackId) automation[point.id] = point
+      }
       return {
         ...state,
         tracks,
         trackOrder: state.trackOrder.filter((id) => id !== op.trackId),
-        clips
+        clips,
+        automation
       }
+    }
+
+    case 'track/setVolume':
+      return updateTrack(state, op.trackId, (t) => ({
+        ...t,
+        volume: clamp(op.volume, 0, MAX_GAIN)
+      }))
+
+    case 'track/setPan':
+      return updateTrack(state, op.trackId, (t) => ({ ...t, pan: clamp(op.pan, -1, 1) }))
+
+    case 'project/setMasterVolume': {
+      const volume = clamp(op.volume, 0, MAX_GAIN)
+      if (state.masterVolume === volume) return state
+      return { ...state, masterVolume: volume }
+    }
+
+    case 'automation/add': {
+      if (state.automation[op.point.id]) return state
+      if (!state.tracks[op.point.trackId]) return state
+      const point = {
+        ...op.point,
+        ticks: Math.max(0, op.point.ticks),
+        value: clamp(op.point.value, 0, 1)
+      }
+      return { ...state, automation: { ...state.automation, [point.id]: point } }
+    }
+
+    case 'automation/move': {
+      const point = state.automation[op.pointId]
+      if (!point) return state
+      const ticks = Math.max(0, op.ticks)
+      const value = clamp(op.value, 0, 1)
+      if (point.ticks === ticks && point.value === value) return state
+      return {
+        ...state,
+        automation: { ...state.automation, [op.pointId]: { ...point, ticks, value } }
+      }
+    }
+
+    case 'automation/delete': {
+      if (!state.automation[op.pointId]) return state
+      const automation = { ...state.automation }
+      delete automation[op.pointId]
+      return { ...state, automation }
     }
 
     case 'track/rename':

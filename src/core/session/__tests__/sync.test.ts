@@ -33,7 +33,16 @@ interface TestClient {
 }
 
 function makeTrack(id: string, kind: Track['kind'] = 'audio'): Track {
-  return { id, kind, name: id, color: '#5b8def', muted: false, soloed: false }
+  return {
+    id,
+    kind,
+    name: id,
+    color: '#5b8def',
+    muted: false,
+    soloed: false,
+    volume: 1,
+    pan: 0
+  }
 }
 
 function makeClip(id: string, trackId: string, start = 0, duration = PPQ * 4): Clip {
@@ -56,8 +65,20 @@ class TestNetwork {
     this.hostStore = new ProjectStore(seedProject(), 'host')
     this.host = new HostSession(this.hostStore, { hostName: 'Host' })
     // Baseline content, created through the normal pipeline.
-    this.hostStore.dispatch({ type: 'track/create', track: makeTrack('t1'), index: 0, clips: [] })
-    this.hostStore.dispatch({ type: 'track/create', track: makeTrack('t2'), index: 1, clips: [] })
+    this.hostStore.dispatch({
+      type: 'track/create',
+      track: makeTrack('t1'),
+      index: 0,
+      clips: [],
+      automation: []
+    })
+    this.hostStore.dispatch({
+      type: 'track/create',
+      track: makeTrack('t2'),
+      index: 1,
+      clips: [],
+      automation: []
+    })
     this.hostStore.dispatch({ type: 'clip/create', clip: makeClip('c1', 't1') })
   }
 
@@ -306,7 +327,13 @@ suite('session sync', () => {
     const net = new TestNetwork()
     const a = net.addClient('alice')
     net.flush()
-    a.store.dispatch({ type: 'track/create', track: makeTrack('t3', 'midi'), index: 2, clips: [] })
+    a.store.dispatch({
+      type: 'track/create',
+      track: makeTrack('t3', 'midi'),
+      index: 2,
+      clips: [],
+      automation: []
+    })
     net.flush()
 
     const c = net.addClient('carol')
@@ -362,7 +389,8 @@ suite('session fuzz', () => {
             type: 'track/create',
             track: makeTrack(`t-${seed}-${idCounter++}`),
             index: Math.floor(rng() * (trackIds.length + 1)),
-            clips: []
+            clips: [],
+            automation: []
           })
         }
         if (roll < 0.3 && trackIds.length > 0) {

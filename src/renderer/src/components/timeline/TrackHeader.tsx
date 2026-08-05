@@ -3,6 +3,7 @@ import type { Track } from '@core/model/types'
 import { projectStore } from '@/state/projectStore'
 import { useProjectState } from '@/state/hooks'
 import { commentUi, useCommentUi } from '@/state/commentUi'
+import { automationUi, useAutomationUi } from '@/state/automationUi'
 import { CommentThread } from '../comments/CommentThread'
 
 export function TrackHeader({ track }: { track: Track }): React.JSX.Element {
@@ -73,6 +74,7 @@ export function TrackHeader({ track }: { track: Track }): React.JSX.Element {
       <div className="track-header-bottom">
         <span className="track-kind">{track.kind === 'audio' ? 'AUDIO' : 'MIDI'}</span>
         <div className="track-toggles">
+          <AutomationToggle trackId={track.id} />
           <button
             className={`track-toggle ${track.muted ? 'track-toggle-mute' : ''}`}
             title="Mute"
@@ -94,5 +96,18 @@ export function TrackHeader({ track }: { track: Track }): React.JSX.Element {
         </div>
       </div>
     </div>
+  )
+}
+
+function AutomationToggle({ trackId }: { trackId: string }): React.JSX.Element {
+  const autoUi = useAutomationUi()
+  return (
+    <button
+      className={`track-toggle ${autoUi.isOpen(trackId) ? 'track-toggle-auto' : ''}`}
+      title="Volume automation"
+      onClick={() => automationUi.toggle(trackId)}
+    >
+      A
+    </button>
   )
 }

@@ -49,6 +49,28 @@ export interface Track {
   readonly color: string
   readonly muted: boolean
   readonly soloed: boolean
+  /** Fader gain, linear (1 = unity/0 dB). */
+  readonly volume: number
+  /** Stereo pan, -1 (L) .. 1 (R). */
+  readonly pan: number
+}
+
+export const MAX_GAIN = 1.4 // ≈ +3 dB of headroom above unity
+
+export type AutomationParam = 'volume'
+export type AutomationPointId = string
+
+/**
+ * One point on a track's automation curve. `value` is normalized 0..1 and
+ * MULTIPLIES the fader (modulation semantics): 1 = fader level, 0 = silence.
+ * Points between are linearly interpolated.
+ */
+export interface AutomationPoint {
+  readonly id: AutomationPointId
+  readonly trackId: TrackId
+  readonly param: AutomationParam
+  readonly ticks: number
+  readonly value: number
 }
 
 export type CommentId = string
@@ -96,6 +118,8 @@ export interface ProjectState {
   readonly files: Readonly<Record<FileNodeId, FileNode>>
   readonly chat: readonly ChatMessage[]
   readonly comments: Readonly<Record<CommentId, Comment>>
+  readonly masterVolume: number
+  readonly automation: Readonly<Record<AutomationPointId, AutomationPoint>>
 }
 
 export function createEmptyProject(name: string): ProjectState {
@@ -108,8 +132,39 @@ export function createEmptyProject(name: string): ProjectState {
     clips: {},
     files: {},
     chat: [],
-    comments: {}
+    comments: {},
+    masterVolume: 1,
+    automation: {}
   }
+}
+
+/** A track's points for one parameter, in timeline order. */
+export function automationOf(
+  state: ProjectState,
+  trackId: TrackId,
+  param: AutomationParam
+): AutomationPoint[] {
+  return Object.values(state.automation)
+    .filter((p) => p.trackId === trackId && p.param === param)
+    .sort((a, b) => a.ticks - b.ticks)
+}
+
+/** Linear interpolation of a curve at a position; 1 (no modulation) if empty. */
+export function automationValueAt(points: readonly AutomationPoint[], ticks: number): number {
+  if (points.length === 0) return 1
+  if (ticks <= points[0].ticks) return points[0].value
+  const last = points[points.length - 1]
+  if (ticks >= last.ticks) return last.value
+  for (let i = 0; i < points.length - 1; i++) {
+    const a = points[i]
+    const b = points[i + 1]
+    if (ticks >= a.ticks && ticks <= b.ticks) {
+      const span = b.ticks - a.ticks
+      const t = span === 0 ? 0 : (ticks - a.ticks) / span
+      return a.value + (b.value - a.value) * t
+    }
+  }
+  return last.value
 }
 
 /** Root comments (threads) attached to an anchor, oldest first. */

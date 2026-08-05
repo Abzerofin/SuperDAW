@@ -1,5 +1,9 @@
 import type { FileNode, ProjectState } from '../model/types'
 import { clipsOfTrack, subtreeOf } from '../model/types'
+
+function automationOfTrack(state: ProjectState, trackId: string) {
+  return Object.values(state.automation).filter((p) => p.trackId === trackId)
+}
 import type { Operation } from './operations'
 
 /**
@@ -25,8 +29,39 @@ export function invert(state: ProjectState, op: Operation): Operation | null {
         type: 'track/create',
         track,
         index: state.trackOrder.indexOf(op.trackId),
-        clips: clipsOfTrack(state, op.trackId)
+        clips: clipsOfTrack(state, op.trackId),
+        automation: automationOfTrack(state, op.trackId)
       }
+    }
+
+    case 'track/setVolume': {
+      const track = state.tracks[op.trackId]
+      if (!track) return null
+      return { type: 'track/setVolume', trackId: op.trackId, volume: track.volume }
+    }
+
+    case 'track/setPan': {
+      const track = state.tracks[op.trackId]
+      if (!track) return null
+      return { type: 'track/setPan', trackId: op.trackId, pan: track.pan }
+    }
+
+    case 'project/setMasterVolume':
+      return { type: 'project/setMasterVolume', volume: state.masterVolume }
+
+    case 'automation/add':
+      return { type: 'automation/delete', pointId: op.point.id }
+
+    case 'automation/move': {
+      const point = state.automation[op.pointId]
+      if (!point) return null
+      return { type: 'automation/move', pointId: op.pointId, ticks: point.ticks, value: point.value }
+    }
+
+    case 'automation/delete': {
+      const point = state.automation[op.pointId]
+      if (!point) return null
+      return { type: 'automation/add', point }
     }
 
     case 'track/rename': {

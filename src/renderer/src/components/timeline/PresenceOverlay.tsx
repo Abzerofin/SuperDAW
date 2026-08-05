@@ -10,7 +10,13 @@ import { LANE_H } from './geometry'
  * layers, never the timeline itself.
  */
 
-export function RemoteCursors({ pxPerTick }: { pxPerTick: number }): React.JSX.Element {
+interface OverlayProps {
+  pxPerTick: number
+  /** Content-space y of each track lane (automation lanes shift these). */
+  trackTops: number[]
+}
+
+export function RemoteCursors({ pxPerTick, trackTops }: OverlayProps): React.JSX.Element {
   const collab = useCollab()
   const [, force] = useReducer((c: number) => c + 1, 0)
   // Sweep stale cursors even when no new presence arrives.
@@ -27,7 +33,7 @@ export function RemoteCursors({ pxPerTick }: { pxPerTick: number }): React.JSX.E
           className="remote-cursor"
           style={{
             left: cursor.ticks * pxPerTick,
-            top: cursor.trackIndex * LANE_H,
+            top: trackTops[Math.min(cursor.trackIndex, trackTops.length - 1)] ?? 0,
             '--user-color': collab.colorFor(cursor.userId)
           } as React.CSSProperties}
         >
@@ -39,7 +45,7 @@ export function RemoteCursors({ pxPerTick }: { pxPerTick: number }): React.JSX.E
   )
 }
 
-export function PingOverlay({ pxPerTick }: { pxPerTick: number }): React.JSX.Element {
+export function PingOverlay({ pxPerTick, trackTops }: OverlayProps): React.JSX.Element {
   const collab = useCollab()
   const [, force] = useReducer((c: number) => c + 1, 0)
   useEffect(() => {
@@ -55,7 +61,10 @@ export function PingOverlay({ pxPerTick }: { pxPerTick: number }): React.JSX.Ele
           className="ping"
           style={{
             left: ping.ticks * pxPerTick,
-            top: ping.trackIndex === null ? 8 : ping.trackIndex * LANE_H + LANE_H / 2,
+            top:
+              ping.trackIndex === null
+                ? 8
+                : (trackTops[Math.min(ping.trackIndex, trackTops.length - 1)] ?? 0) + LANE_H / 2,
             '--user-color': collab.colorFor(ping.userId)
           } as React.CSSProperties}
         >

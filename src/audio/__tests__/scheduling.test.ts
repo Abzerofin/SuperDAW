@@ -17,11 +17,13 @@ function stateWith(clips: Partial<Clip>[]): ProjectState {
     name: 'T',
     color: '#fff',
     muted: false,
-    soloed: false
+    soloed: false,
+    volume: 1,
+    pan: 0
   }
   let s = createEmptyProject('Test')
   s = { ...s, tempo: TEMPO }
-  s = apply(s, { type: 'track/create', track, index: 0, clips: [] })
+  s = apply(s, { type: 'track/create', track, index: 0, clips: [], automation: [] })
   for (const [i, partial] of clips.entries()) {
     const clip: Clip = {
       id: `c${i}`,

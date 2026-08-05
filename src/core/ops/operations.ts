@@ -1,4 +1,6 @@
 import type {
+  AutomationPoint,
+  AutomationPointId,
   ChatMessage,
   Clip,
   ClipId,
@@ -19,12 +21,18 @@ import type {
 export type Operation =
   | { type: 'project/rename'; name: string }
   | { type: 'project/setTempo'; tempo: number }
-  /** `clips` restores a deleted track's clips on undo; empty for new tracks. */
-  | { type: 'track/create'; track: Track; index: number; clips: Clip[] }
+  /** `clips`/`automation` restore a deleted track's content on undo; empty for new tracks. */
+  | { type: 'track/create'; track: Track; index: number; clips: Clip[]; automation: AutomationPoint[] }
   | { type: 'track/delete'; trackId: TrackId }
   | { type: 'track/rename'; trackId: TrackId; name: string }
   | { type: 'track/setMute'; trackId: TrackId; muted: boolean }
   | { type: 'track/setSolo'; trackId: TrackId; soloed: boolean }
+  | { type: 'track/setVolume'; trackId: TrackId; volume: number }
+  | { type: 'track/setPan'; trackId: TrackId; pan: number }
+  | { type: 'project/setMasterVolume'; volume: number }
+  | { type: 'automation/add'; point: AutomationPoint }
+  | { type: 'automation/move'; pointId: AutomationPointId; ticks: number; value: number }
+  | { type: 'automation/delete'; pointId: AutomationPointId }
   | { type: 'track/reorder'; trackId: TrackId; index: number }
   | { type: 'clip/create'; clip: Clip }
   | { type: 'clip/delete'; clipId: ClipId }

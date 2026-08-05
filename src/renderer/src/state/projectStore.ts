@@ -8,3 +8,9 @@ import { createDemoProject } from './demoProject'
  * unique within a collaboration session.
  */
 export const projectStore = new ProjectStore(createDemoProject(), newId('usr'))
+
+// Dev-only handle for debugging/tests: always the live instance, immune to
+// module-graph duplication from dynamically imported copies.
+if (import.meta.env.DEV) {
+  ;(window as unknown as Record<string, unknown>).__superdaw = { projectStore }
+}

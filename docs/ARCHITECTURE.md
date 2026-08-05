@@ -178,4 +178,14 @@ default).
    undoable and absent from the activity feed. Comments: threads anchored
    to clips/tracks (model supports files) with replies and resolve;
    undoable (thread deletes restore atomically) and surfaced in activity.
-6. Mixer, automation.
+6. ✅ **Mixer + automation** — per-track volume/pan and master volume as
+   ops; audio graph per track: source → autoGain → fader(mute/solo) →
+   panner → master. Volume automation points (normalized, MULTIPLY the
+   fader) compile to sample-accurate Web Audio linear ramps. Fader/knob/
+   point drags preview live through the engine and dispatch ONE op on
+   release. Mixer is a bottom-dock tab beside Files; automation lanes
+   expand under tracks (per-user ephemeral visibility).
+
+Roadmap beyond the original six: piano roll/MIDI editing, per-strip
+metering (AudioWorklet), internet rendezvous for join codes, packaging
+polish (icon, signing, auto-update).

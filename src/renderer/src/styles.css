@@ -901,6 +901,195 @@ input {
   text-align: center;
 }
 
+/* ---------- Automation ---------- */
+.track-toggle-auto {
+  background: var(--accent);
+  border-color: var(--accent);
+  color: #fff;
+}
+
+.auto-row {
+  background-color: var(--bg-0);
+  border-bottom: 1px solid var(--border);
+  position: relative;
+}
+
+.auto-lane {
+  position: absolute;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.25);
+}
+
+.auto-lane-label {
+  position: sticky;
+  left: 4px;
+  top: 2px;
+  float: left;
+  font-size: 9px;
+  letter-spacing: 0.8px;
+  color: var(--text-dim);
+  pointer-events: none;
+  z-index: 1;
+  padding: 2px 4px;
+}
+
+.auto-svg {
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+}
+
+.auto-curve {
+  fill: none;
+  stroke: var(--track-color);
+  stroke-width: 1.5;
+  opacity: 0.9;
+}
+
+.auto-point {
+  position: absolute;
+  width: 10px;
+  height: 10px;
+  border-radius: 50%;
+  background: var(--track-color);
+  border: 1.5px solid var(--bg-0);
+  cursor: grab;
+}
+
+.auto-point:hover {
+  transform: scale(1.25);
+}
+
+/* ---------- Mixer ---------- */
+.mixer {
+  height: 220px;
+  flex-shrink: 0;
+  background: var(--bg-1);
+  border-top: 1px solid var(--border);
+  display: flex;
+  overflow-x: auto;
+  padding: 8px;
+  gap: 6px;
+}
+
+.strip {
+  width: 84px;
+  flex-shrink: 0;
+  background: var(--bg-2);
+  border: 1px solid var(--border);
+  border-top: 3px solid var(--track-color);
+  border-radius: 5px;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  padding: 6px 4px;
+  gap: 6px;
+}
+
+.strip-master {
+  margin-left: auto;
+  background: var(--bg-3);
+}
+
+.strip-name {
+  font-size: 11px;
+  font-weight: 600;
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.strip-buttons {
+  display: flex;
+  gap: 4px;
+  min-height: 20px;
+}
+
+.fader-wrap {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 4px;
+}
+
+.fader {
+  position: relative;
+  width: 22px;
+  height: 110px;
+  background: var(--bg-0);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  cursor: ns-resize;
+  touch-action: none;
+}
+
+.fader-fill {
+  position: absolute;
+  bottom: 0;
+  left: 0;
+  right: 0;
+  background: color-mix(in srgb, var(--track-color) 40%, transparent);
+  border-radius: 0 0 3px 3px;
+}
+
+.fader-thumb {
+  position: absolute;
+  left: -3px;
+  right: -3px;
+  height: 8px;
+  margin-bottom: -4px;
+  background: var(--text);
+  border-radius: 2px;
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.6);
+}
+
+.fader-db {
+  font-size: 10px;
+  color: var(--text-dim);
+  min-width: 34px;
+  text-align: center;
+}
+
+.pan {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 2px;
+  cursor: ew-resize;
+  touch-action: none;
+  width: 100%;
+}
+
+.pan-track {
+  position: relative;
+  width: 56px;
+  height: 6px;
+  background: var(--bg-0);
+  border: 1px solid var(--border);
+  border-radius: 3px;
+}
+
+.pan-thumb {
+  position: absolute;
+  top: -3px;
+  width: 4px;
+  height: 10px;
+  margin-left: -2px;
+  background: var(--text);
+  border-radius: 1px;
+}
+
+.pan-label {
+  font-size: 9px;
+  color: var(--text-dim);
+}
+
+.strip-pan-spacer {
+  height: 20px;
+}
+
 /* ---------- Chat ---------- */
 .chat-badge {
   display: inline-block;

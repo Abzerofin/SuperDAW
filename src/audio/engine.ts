@@ -1,21 +1,26 @@
 import type { ProjectState, TrackId } from '@core/model/types'
+import { automationOf, automationValueAt } from '@core/model/types'
 import type { AssetStore } from './assets'
-import { beatIndexAt, metronomeClicks, scheduleClips } from './scheduling'
+import { beatIndexAt, metronomeClicks, scheduleClips, ticksPerSecond } from './scheduling'
 
 /**
  * The audio engine: owns the AudioContext and all routing.
  *
- *   clip sources ─▶ per-track GainNode ─▶ master GainNode ─▶ analyser ─▶ out
+ *   clip sources ─▶ autoGain ─▶ fader ─▶ panner ─▶ master ─▶ analyser ─▶ out
+ *                  (automation)  (volume ×        (masterVolume)
+ *                                 mute/solo)
  *
- * Deliberately independent of React and of the (future) collaboration
- * layer: it consumes the project store, transport, and asset store through
- * the narrow structural interfaces below. Mute/solo are gain-level (not
- * schedule-level), so toggling them mid-playback is seamless.
+ * Deliberately independent of React and of the collaboration layer: it
+ * consumes the project store, transport, and asset store through the
+ * narrow structural interfaces below. Mixer changes are gain-level (not
+ * schedule-level), so they are seamless mid-playback; volume automation
+ * is compiled to Web Audio linear ramps on the autoGain node, so curves
+ * are sample-accurate regardless of UI frame rate.
  *
  * Scheduling strategy: on play/seek/edit, all upcoming clip sources are
  * (re)scheduled in one pass against the audio clock — exact and simple at
  * project scale. The metronome uses a small lookahead loop since it is
- * unbounded. AudioWorklet DSP comes later with mixing/metering needs;
+ * unbounded. AudioWorklet DSP comes later with per-strip metering needs;
  * native nodes are the right tool for clip playback.
  */
 
@@ -35,12 +40,18 @@ const METRO_LOOKAHEAD_SEC = 0.15
 const METRO_INTERVAL_MS = 40
 const GAIN_SMOOTHING_SEC = 0.015
 
+interface TrackChain {
+  auto: GainNode
+  fader: GainNode
+  panner: StereoPannerNode
+}
+
 export class AudioEngine {
   private ctx: AudioContext | null = null
   private master: GainNode | null = null
   private analyser: AnalyserNode | null = null
   private meterBuf: Float32Array<ArrayBuffer> | null = null
-  private trackGains = new Map<TrackId, GainNode>()
+  private chains = new Map<TrackId, TrackChain>()
   private sources = new Set<AudioBufferSourceNode>()
 
   private anchorTicks = 0
@@ -54,6 +65,8 @@ export class AudioEngine {
   private prevTracks: ProjectState['tracks']
   private prevClips: ProjectState['clips']
   private prevTempo: number
+  private prevAutomation: ProjectState['automation']
+  private prevMasterVolume: number
 
   constructor(
     private store: StoreLike,
@@ -63,6 +76,8 @@ export class AudioEngine {
     this.prevTracks = store.state.tracks
     this.prevClips = store.state.clips
     this.prevTempo = store.state.tempo
+    this.prevAutomation = store.state.automation
+    this.prevMasterVolume = store.state.masterVolume
     store.subscribe(this.onStateChanged)
     assets.subscribe(this.onAssetsChanged)
     transport.onEvent(this.onTransportEvent)
@@ -74,6 +89,7 @@ export class AudioEngine {
     const ctx = new AudioContext({ latencyHint: 'interactive' })
     this.ctx = ctx
     this.master = ctx.createGain()
+    this.master.gain.value = this.store.state.masterVolume
     this.analyser = ctx.createAnalyser()
     this.analyser.fftSize = 2048
     this.meterBuf = new Float32Array(this.analyser.fftSize)
@@ -82,8 +98,32 @@ export class AudioEngine {
     // From here on the playhead runs on the audio clock — no drift between
     // what the user sees and what they hear.
     this.transport.setTimeSource({ now: () => ctx.currentTime })
-    this.syncTrackGains()
+    this.syncMixer()
     return ctx
+  }
+
+  // ---------- Ephemeral previews (fader/knob drags before the op lands) ----------
+
+  previewTrackVolume(trackId: TrackId, volume: number): void {
+    const chain = this.ctx ? this.chain(trackId) : null
+    if (chain && this.ctx) {
+      chain.fader.gain.setTargetAtTime(
+        this.isAudible(trackId) ? volume : 0,
+        this.ctx.currentTime,
+        GAIN_SMOOTHING_SEC
+      )
+    }
+  }
+
+  previewTrackPan(trackId: TrackId, pan: number): void {
+    const chain = this.ctx ? this.chain(trackId) : null
+    if (chain && this.ctx) chain.panner.pan.setTargetAtTime(pan, this.ctx.currentTime, GAIN_SMOOTHING_SEC)
+  }
+
+  previewMasterVolume(volume: number): void {
+    if (this.ctx && this.master) {
+      this.master.gain.setTargetAtTime(volume, this.ctx.currentTime, GAIN_SMOOTHING_SEC)
+    }
   }
 
   async decode(data: ArrayBuffer): Promise<AudioBuffer> {
@@ -137,6 +177,7 @@ export class AudioEngine {
       this.stopAllSources()
       this.reanchor()
       this.scheduleAllClips()
+      this.scheduleAutomation()
       this.startMetronome()
     }
     if (ctx.state === 'suspended') void ctx.resume().then(go)
@@ -145,9 +186,15 @@ export class AudioEngine {
 
   private onStateChanged = (): void => {
     const state = this.store.state
-    if (state.tracks !== this.prevTracks) {
+    if (state.tracks !== this.prevTracks || state.masterVolume !== this.prevMasterVolume) {
       this.prevTracks = state.tracks
-      if (this.ctx) this.syncTrackGains()
+      this.prevMasterVolume = state.masterVolume
+      if (this.ctx) this.syncMixer()
+    }
+    const automationEdited = state.automation !== this.prevAutomation
+    this.prevAutomation = state.automation
+    if (automationEdited && this.transport.isPlaying && this.ctx) {
+      this.scheduleAutomation()
     }
     const editedAudio = state.clips !== this.prevClips || state.tempo !== this.prevTempo
     this.prevClips = state.clips
@@ -193,10 +240,34 @@ export class AudioEngine {
       if (!asset?.buffer) continue
       const source = ctx.createBufferSource()
       source.buffer = asset.buffer
-      source.connect(this.trackGain(s.trackId))
+      source.connect(this.chain(s.trackId).auto)
       source.onended = () => this.sources.delete(source)
       source.start(s.when, s.offsetSec, s.durationSec)
       this.sources.add(source)
+    }
+  }
+
+  /** Compile volume automation to linear ramps from the current position. */
+  private scheduleAutomation(): void {
+    const ctx = this.ctx
+    if (!ctx) return
+    const state = this.store.state
+    const tps = ticksPerSecond(state.tempo)
+    const now = ctx.currentTime
+    const nowTicks = this.anchorTicks + (now - this.anchorSec) * tps
+
+    for (const trackId of Object.keys(state.tracks)) {
+      const auto = this.chain(trackId).auto
+      auto.gain.cancelScheduledValues(now)
+      const points = automationOf(state, trackId, 'volume')
+      auto.gain.setValueAtTime(automationValueAt(points, nowTicks), now)
+      for (const point of points) {
+        if (point.ticks <= nowTicks) continue
+        auto.gain.linearRampToValueAtTime(
+          point.value,
+          this.anchorSec + (point.ticks - this.anchorTicks) / tps
+        )
+      }
     }
   }
 
@@ -213,38 +284,57 @@ export class AudioEngine {
     this.sources.clear()
   }
 
-  private trackGain(trackId: TrackId): GainNode {
-    const existing = this.trackGains.get(trackId)
+  private chain(trackId: TrackId): TrackChain {
+    const existing = this.chains.get(trackId)
     if (existing) return existing
     const ctx = this.ensureContext()
-    const gain = ctx.createGain()
-    gain.gain.value = this.effectiveGain(trackId)
-    gain.connect(this.master!)
-    this.trackGains.set(trackId, gain)
-    return gain
+    const auto = ctx.createGain()
+    const fader = ctx.createGain()
+    const panner = ctx.createStereoPanner()
+    fader.gain.value = this.effectiveGain(trackId)
+    panner.pan.value = this.store.state.tracks[trackId]?.pan ?? 0
+    auto.connect(fader)
+    fader.connect(panner)
+    panner.connect(this.master!)
+    const chain: TrackChain = { auto, fader, panner }
+    this.chains.set(trackId, chain)
+    return chain
   }
 
-  private effectiveGain(trackId: TrackId): number {
+  private isAudible(trackId: TrackId): boolean {
     const state = this.store.state
     const track = state.tracks[trackId]
-    if (!track) return 0
+    if (!track) return false
     const anySolo = Object.values(state.tracks).some((t) => t.soloed)
-    return track.muted || (anySolo && !track.soloed) ? 0 : 1
+    return !(track.muted || (anySolo && !track.soloed))
   }
 
-  private syncTrackGains(): void {
+  /** Fader gain: track volume, or 0 when muted / not soloed while solo is on. */
+  private effectiveGain(trackId: TrackId): number {
+    const track = this.store.state.tracks[trackId]
+    if (!track) return 0
+    return this.isAudible(trackId) ? track.volume : 0
+  }
+
+  private syncMixer(): void {
     const ctx = this.ctx
     if (!ctx) return
-    for (const [trackId, gain] of this.trackGains) {
-      if (!this.store.state.tracks[trackId]) {
-        gain.disconnect()
-        this.trackGains.delete(trackId)
+    const now = ctx.currentTime
+    this.master!.gain.setTargetAtTime(this.store.state.masterVolume, now, GAIN_SMOOTHING_SEC)
+    for (const [trackId, chain] of this.chains) {
+      const track = this.store.state.tracks[trackId]
+      if (!track) {
+        chain.auto.disconnect()
+        chain.fader.disconnect()
+        chain.panner.disconnect()
+        this.chains.delete(trackId)
         continue
       }
-      gain.gain.setTargetAtTime(this.effectiveGain(trackId), ctx.currentTime, GAIN_SMOOTHING_SEC)
+      chain.fader.gain.setTargetAtTime(this.effectiveGain(trackId), now, GAIN_SMOOTHING_SEC)
+      chain.panner.pan.setTargetAtTime(track.pan, now, GAIN_SMOOTHING_SEC)
     }
     for (const trackId of Object.keys(this.store.state.tracks)) {
-      if (!this.trackGains.has(trackId)) this.trackGain(trackId)
+      if (!this.chains.has(trackId)) this.chain(trackId)
     }
   }
 

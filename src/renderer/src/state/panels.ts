@@ -7,10 +7,11 @@ import { projectStore } from './projectStore'
  * is hidden accumulate; opening the tab clears them.
  */
 export type RightPanel = 'activity' | 'chat' | null
+export type BottomPanel = 'files' | 'mixer' | null
 
 class PanelStore {
   rightPanel: RightPanel = 'activity'
-  bayOpen = true
+  bottomPanel: BottomPanel = 'files'
   unreadChat = 0
 
   private version = 0
@@ -35,8 +36,8 @@ class PanelStore {
     this.emit()
   }
 
-  toggleBay(): void {
-    this.bayOpen = !this.bayOpen
+  toggleBottom(panel: Exclude<BottomPanel, null>): void {
+    this.bottomPanel = this.bottomPanel === panel ? null : panel
     this.emit()
   }
 

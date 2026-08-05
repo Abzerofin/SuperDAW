@@ -15,6 +15,8 @@ interface Props {
   dimmed: boolean
   pxPerTick: number
   tempo: number
+  /** Content-space y of each track lane (automation lanes shift these). */
+  laneTops: number[]
   /** Open (unresolved) comment threads on this clip. */
   commentCount: number
   onPointerDown: (e: React.PointerEvent, mode: 'move' | 'resize-l' | 'resize-r') => void
@@ -30,6 +32,7 @@ export function ClipView({
   dimmed,
   pxPerTick,
   tempo,
+  laneTops,
   commentCount,
   onPointerDown,
   onOpenComments
@@ -54,7 +57,7 @@ export function ClipView({
       }`}
       style={{
         left: start * pxPerTick,
-        top: lane * LANE_H + 4,
+        top: (laneTops[lane] ?? 0) + 4,
         width,
         height,
         '--clip-color': color

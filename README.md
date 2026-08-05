@@ -5,7 +5,10 @@ collaboration — multiplayer from the ground up, no accounts, no cloud
 dependency. Projects are local files; collaboration is an optional
 host-based session joined with a short code.
 
-**Status: Milestone 5 (chat + comments) complete.**
+**Status: all six roadmap milestones complete.**
+
+- Mixer (per-track fader/pan, mute/solo, master) and volume automation
+  lanes with sample-accurate playback — all synced and undoable
 
 - Project chat (dockable tab, unread badge) and comment threads on clips
   and tracks (reply, resolve) — both sync live in sessions and persist

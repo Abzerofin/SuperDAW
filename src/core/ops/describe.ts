@@ -25,6 +25,22 @@ export function describe(state: ProjectState, op: Operation): string | null {
       return `${op.soloed ? 'Soloed' : 'Unsoloed'} "${trackName(state, op.trackId)}"`
     case 'track/reorder':
       return `Reordered track "${trackName(state, op.trackId)}"`
+    case 'track/setVolume':
+      return `Set "${trackName(state, op.trackId)}" volume to ${gainToDb(op.volume)}`
+    case 'track/setPan':
+      return `Panned "${trackName(state, op.trackId)}" ${panLabel(op.pan)}`
+    case 'project/setMasterVolume':
+      return `Set master volume to ${gainToDb(op.volume)}`
+    case 'automation/add':
+      return `Added automation point on "${trackName(state, op.point.trackId)}"`
+    case 'automation/move': {
+      const point = state.automation[op.pointId]
+      return `Moved automation point${point ? ` on "${trackName(state, point.trackId)}"` : ''}`
+    }
+    case 'automation/delete': {
+      const point = state.automation[op.pointId]
+      return `Deleted automation point${point ? ` on "${trackName(state, point.trackId)}"` : ''}`
+    }
     case 'clip/create':
       return `Added clip "${op.clip.name}" to "${trackName(state, op.clip.trackId)}"`
     case 'clip/delete':
@@ -88,6 +104,18 @@ function anchorName(state: ProjectState, kind: 'clip' | 'track' | 'file', id: st
 
 function fileName(state: ProjectState, nodeId: string): string {
   return state.files[nodeId]?.name ?? 'unknown item'
+}
+
+function gainToDb(gain: number): string {
+  if (gain <= 0.0001) return '-∞ dB'
+  const db = 20 * Math.log10(gain)
+  return `${db >= 0 ? '+' : ''}${db.toFixed(1)} dB`
+}
+
+function panLabel(pan: number): string {
+  if (Math.abs(pan) < 0.01) return 'center'
+  const pct = Math.round(Math.abs(pan) * 100)
+  return pan < 0 ? `${pct}% left` : `${pct}% right`
 }
 
 function trackName(state: ProjectState, trackId: string): string {

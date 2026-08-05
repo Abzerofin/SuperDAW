@@ -1,4 +1,4 @@
-import type { ProjectState } from '../model/types'
+import type { ProjectState, Track } from '../model/types'
 import { createEmptyProject } from '../model/types'
 
 /**
@@ -98,7 +98,15 @@ export function parseProjectJson(text: string): ProjectFileJson {
     }
   }
 
-  // Merge over an empty project so missing optional fields get defaults.
-  const full: ProjectState = { ...createEmptyProject(''), ...(state as unknown as ProjectState) }
+  // Merge over an empty project so top-level fields added in later app
+  // versions get defaults, then normalize per-track fields the same way
+  // (a v1 file from before the mixer has no volume/pan on its tracks).
+  const merged: ProjectState = { ...createEmptyProject(''), ...(state as unknown as ProjectState) }
+  const tracks: Record<string, Track> = {}
+  for (const [id, track] of Object.entries(merged.tracks)) {
+    const legacy = track as Omit<Track, 'volume' | 'pan'> & Partial<Track>
+    tracks[id] = { ...legacy, volume: legacy.volume ?? 1, pan: legacy.pan ?? 0 }
+  }
+  const full: ProjectState = { ...merged, tracks }
   return { formatVersion: candidate.formatVersion, state: full, assets }
 }

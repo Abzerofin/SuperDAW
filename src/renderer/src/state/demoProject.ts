@@ -21,7 +21,9 @@ export function createDemoProject(): ProjectState {
       name,
       color: nextTrackColor(tracks.length),
       muted: false,
-      soloed: false
+      soloed: false,
+      volume: 1,
+      pan: 0
     }
     tracks.push(track)
     return track
@@ -61,6 +63,8 @@ export function createDemoProject(): ProjectState {
     clips: Object.fromEntries(clips.map((c) => [c.id, c])),
     files: {},
     chat: [],
-    comments: {}
+    comments: {},
+    masterVolume: 1,
+    automation: {}
   }
 }

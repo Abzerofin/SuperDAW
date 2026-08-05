@@ -45,11 +45,18 @@ export function TransportBar(): React.JSX.Element {
           ↷
         </button>
         <button
-          className={`tbtn ${panelState.bayOpen ? 'tbtn-active' : ''}`}
+          className={`tbtn ${panelState.bottomPanel === 'files' ? 'tbtn-active' : ''}`}
           title="Toggle File Bay"
-          onClick={() => panelState.toggleBay()}
+          onClick={() => panelState.toggleBottom('files')}
         >
           Files
+        </button>
+        <button
+          className={`tbtn ${panelState.bottomPanel === 'mixer' ? 'tbtn-active' : ''}`}
+          title="Toggle mixer"
+          onClick={() => panelState.toggleBottom('mixer')}
+        >
+          Mixer
         </button>
         <button
           className={`tbtn ${panelState.rightPanel === 'chat' ? 'tbtn-active' : ''}`}

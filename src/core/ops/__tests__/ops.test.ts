@@ -8,7 +8,16 @@ import { invert } from '../invert'
 import { ProjectStore } from '../../state/store'
 
 function track(id: string, name = id): Track {
-  return { id, kind: 'audio', name, color: '#5b8def', muted: false, soloed: false }
+  return {
+    id,
+    kind: 'audio',
+    name,
+    color: '#5b8def',
+    muted: false,
+    soloed: false,
+    volume: 1,
+    pan: 0
+  }
 }
 
 function clip(id: string, trackId: string, start = 0, duration = 960): Clip {
@@ -34,8 +43,8 @@ function comment(id: string, anchorId: string, parentId: string | null = null): 
 
 function baseState(): ProjectState {
   let s = createEmptyProject('Test')
-  s = apply(s, { type: 'track/create', track: track('t1'), index: 0, clips: [] })
-  s = apply(s, { type: 'track/create', track: track('t2'), index: 1, clips: [] })
+  s = apply(s, { type: 'track/create', track: track('t1'), index: 0, clips: [], automation: [] })
+  s = apply(s, { type: 'track/create', track: track('t2'), index: 1, clips: [], automation: [] })
   s = apply(s, { type: 'clip/create', clip: clip('c1', 't1', 0, 960) })
   s = apply(s, { type: 'clip/create', clip: clip('c2', 't1', 1920, 960) })
   // File bay: root folder f1 containing f2 (folder) and a1; a2 at root
@@ -51,6 +60,11 @@ function baseState(): ProjectState {
   // A comment thread on c1: root cm1 with reply cm2
   s = apply(s, { type: 'comment/add', comments: [comment('cm1', 'c1')] })
   s = apply(s, { type: 'comment/add', comments: [comment('cm2', 'c1', 'cm1')] })
+  // Volume automation on t1
+  s = apply(s, {
+    type: 'automation/add',
+    point: { id: 'apA', trackId: 't1', param: 'volume', ticks: 0, value: 1 }
+  })
   return s
 }
 
@@ -88,7 +102,19 @@ suite('invert', () => {
   const roundTrips: Operation[] = [
     { type: 'project/rename', name: 'Renamed' },
     { type: 'project/setTempo', tempo: 140 },
-    { type: 'track/create', track: track('t9'), index: 1, clips: [clip('c9', 't9')] },
+    {
+      type: 'track/create',
+      track: track('t9'),
+      index: 1,
+      clips: [clip('c9', 't9')],
+      automation: [{ id: 'ap9', trackId: 't9', param: 'volume', ticks: 0, value: 0.5 }]
+    },
+    { type: 'track/setVolume', trackId: 't1', volume: 0.7 },
+    { type: 'track/setPan', trackId: 't2', pan: -0.4 },
+    { type: 'project/setMasterVolume', volume: 1.2 },
+    { type: 'automation/add', point: { id: 'ap1', trackId: 't1', param: 'volume', ticks: 960, value: 0.8 } },
+    { type: 'automation/move', pointId: 'apA', ticks: 1920, value: 0.25 },
+    { type: 'automation/delete', pointId: 'apA' },
     { type: 'track/delete', trackId: 't1' },
     { type: 'track/rename', trackId: 't2', name: 'Renamed Track' },
     { type: 'track/setMute', trackId: 't1', muted: true },
