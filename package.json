@@ -10,7 +10,23 @@
     "dev:web": "vite --config vite.web.config.ts",
     "build": "electron-vite build",
     "typecheck": "tsc --noEmit -p tsconfig.json && tsc --noEmit -p tsconfig.node.json",
-    "test": "vitest run"
+    "test": "vitest run",
+    "dist": "electron-vite build && electron-builder --win --dir"
+  },
+  "build": {
+    "appId": "app.superdaw",
+    "productName": "SuperDAW",
+    "directories": {
+      "output": "release"
+    },
+    "files": [
+      "out/**",
+      "package.json"
+    ],
+    "win": {
+      "target": "dir",
+      "signAndEditExecutable": false
+    }
   },
   "dependencies": {
     "fflate": "^0.8.3",
@@ -25,6 +41,7 @@
     "@types/ws": "^8.18.1",
     "@vitejs/plugin-react": "^5.2.0",
     "electron": "^43.3.0",
+    "electron-builder": "^26.15.3",
     "electron-vite": "^5.0.0",
     "typescript": "^7.0.2",
     "vite": "^7.3.6",

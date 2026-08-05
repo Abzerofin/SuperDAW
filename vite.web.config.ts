@@ -15,5 +15,7 @@ export default defineConfig({
       '@': resolve('src/renderer/src')
     }
   },
-  server: { port: 5180, strictPort: true }
+  // host: true exposes the web client on the LAN so another device can open
+  // http://<this-pc-ip>:5180 and join a session with zero install.
+  server: { port: 5180, strictPort: true, host: true }
 })
