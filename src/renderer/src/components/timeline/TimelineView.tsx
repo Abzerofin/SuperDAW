@@ -4,7 +4,9 @@ import {
   childTracksOf,
   isTrackEffectivelyAudible,
   isTrackSelfOrDescendant,
-  trackSubtreeOf
+  trackSubtreeOf,
+  MAX_STRETCH,
+  MIN_STRETCH
 } from '@core/model/types'
 import { PPQ, barsToTicks, snapTicks, ticksPerBar } from '@core/model/timebase'
 import { newId } from '@core/model/ids'
@@ -78,7 +80,7 @@ interface LoopDrag {
 }
 
 interface DragState {
-  mode: 'move' | 'resize-l' | 'resize-r'
+  mode: 'move' | 'resize-l' | 'resize-r' | 'loop-r' | 'stretch-r'
   clipId: ClipId
   hasAsset: boolean
   originX: number
@@ -86,10 +88,16 @@ interface DragState {
   origStart: number
   origDuration: number
   origOffset: number
+  origLoop: number
+  origStretch: number
   origTrackIndex: number
   start: number
   duration: number
   offset: number
+  /** Loop period preview during a loop-handle drag (0 = no loop). */
+  loopLength: number
+  /** Time-factor preview during a stretch-handle drag. */
+  stretch: number
   trackIndex: number
   moved: boolean
 }
@@ -308,10 +316,14 @@ export function TimelineView(): React.JSX.Element {
       origStart: clip.start,
       origDuration: clip.duration,
       origOffset: clip.offset,
+      origLoop: clip.loopLength,
+      origStretch: clip.stretch,
       origTrackIndex: trackIndex,
       start: clip.start,
       duration: clip.duration,
       offset: clip.offset,
+      loopLength: clip.loopLength,
+      stretch: clip.stretch,
       trackIndex,
       moved: false
     })
@@ -421,8 +433,28 @@ export function TimelineView(): React.JSX.Element {
     const dxTicks = (e.clientX - drag.originX) / pxPerTick
     setDrag((prev) => {
       if (!prev) return prev
-      let { start, duration, offset, trackIndex } = prev
-      if (prev.mode === 'move') {
+      let { start, duration, offset, loopLength, stretch, trackIndex } = prev
+      if (prev.mode === 'loop-r') {
+        // The loop handle: dragging out repeats the clip's material. The
+        // period is the clip's length when the drag began (or its existing
+        // period); pulling back to one repeat or less turns looping off.
+        const base = prev.origLoop > 0 ? prev.origLoop : prev.origDuration
+        duration = Math.max(gridTicks, snapTicks(prev.origDuration + dxTicks, gridTicks))
+        loopLength = duration > base ? base : 0
+      } else if (prev.mode === 'stretch-r') {
+        // The stretch handle: the same material fills the new length, so
+        // longer = slower and lower, shorter = faster and higher (tape).
+        // Duration re-derives from the clamped factor so the visual edge
+        // never overshoots what playback will actually do.
+        const wanted = Math.max(gridTicks, snapTicks(prev.origDuration + dxTicks, gridTicks))
+        const factor = (prev.origStretch * wanted) / prev.origDuration
+        stretch = Math.min(MAX_STRETCH, Math.max(MIN_STRETCH, factor))
+        duration = Math.max(1, Math.round((prev.origDuration * stretch) / prev.origStretch))
+        // A looped clip's repeats stretch with the material, so the repeat
+        // count is preserved rather than retiled.
+        loopLength =
+          prev.origLoop > 0 ? Math.round((prev.origLoop * stretch) / prev.origStretch) : 0
+      } else if (prev.mode === 'move') {
         start = Math.max(0, snapTicks(prev.origStart + dxTicks, gridTicks))
         const yCenter =
           trackTops[prev.origTrackIndex] + laneH / 2 + (e.clientY - prev.originY)
@@ -444,8 +476,10 @@ export function TimelineView(): React.JSX.Element {
       const moved =
         start !== prev.origStart ||
         duration !== prev.origDuration ||
+        loopLength !== prev.origLoop ||
+        stretch !== prev.origStretch ||
         trackIndex !== prev.origTrackIndex
-      return { ...prev, start, duration, offset, trackIndex, moved }
+      return { ...prev, start, duration, offset, loopLength, stretch, trackIndex, moved }
     })
   }
 
@@ -552,7 +586,18 @@ export function TimelineView(): React.JSX.Element {
           clipId: drag.clipId,
           start: drag.start,
           duration: drag.duration,
-          offset: drag.offset
+          offset: drag.offset,
+          // The loop handle sets the period and the stretch handle sets the
+          // time factor with the same gesture; a plain trim leaves both
+          // untouched (fields absent). Stretching a looped clip scales its
+          // period so the repeat count is preserved.
+          ...(drag.mode === 'loop-r' ? { loopLength: drag.loopLength } : {}),
+          ...(drag.mode === 'stretch-r'
+            ? {
+                stretch: drag.stretch,
+                ...(drag.origLoop > 0 ? { loopLength: drag.loopLength } : {})
+              }
+            : {})
         })
       }
     }
@@ -578,7 +623,8 @@ export function TimelineView(): React.JSX.Element {
       fadeOut: 0,
       reverse: false,
       pitch: 0,
-      stretch: 1
+      stretch: 1,
+      loopLength: 0
     }
     projectStore.dispatch({ type: 'clip/create', clip, notes: [] })
     selection.select(clip.id)
@@ -852,6 +898,8 @@ export function TimelineView(): React.JSX.Element {
                           start: drag.start,
                           duration: drag.duration,
                           offset: drag.offset,
+                          loopLength: drag.loopLength,
+                          stretch: drag.stretch,
                           trackIndex: drag.trackIndex
                         }
                       : null

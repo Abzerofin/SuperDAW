@@ -440,8 +440,62 @@ input {
   left: 0;
 }
 
+/* Right edge is three stacked handles on audio clips — loop (repeat the
+   material), stretch (slower/faster) and trim — or two (loop/trim) on
+   MIDI and empty clips, where stretch has nothing to resample. */
 .clip-handle-r {
   right: 0;
+  top: 66.6%;
+}
+
+.clip-handle-r.clip-handle-half {
+  top: 50%;
+}
+
+.clip-handle-loop,
+.clip-handle-stretch {
+  right: 0;
+  width: 14px;
+  cursor: e-resize;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 10px;
+  line-height: 1;
+  color: rgba(255, 255, 255, 0.45);
+}
+
+.clip-handle-loop {
+  top: 0;
+  bottom: 66.6%;
+  border-bottom-left-radius: 4px;
+}
+
+.clip-handle-loop.clip-handle-half {
+  bottom: 50%;
+}
+
+.clip-handle-stretch {
+  top: 33.3%;
+  bottom: 33.3%;
+  border-bottom-left-radius: 4px;
+}
+
+.clip:hover .clip-handle-loop,
+.clip-selected .clip-handle-loop,
+.clip:hover .clip-handle-stretch,
+.clip-selected .clip-handle-stretch {
+  background: rgba(0, 0, 0, 0.35);
+  color: rgba(255, 255, 255, 0.85);
+}
+
+.clip-loop-divider {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  width: 0;
+  border-left: 1px dashed rgba(255, 255, 255, 0.4);
+  pointer-events: none;
 }
 
 /* ---------- Playhead ---------- */
@@ -751,6 +805,42 @@ input {
 }
 
 /* ---------- File Bay ---------- */
+/* ---------- Bottom dock tabs ---------- */
+/* Sits at the foot of the timeline, directly above the panel it opens. */
+.dock-tabs {
+  display: flex;
+  align-items: flex-end;
+  gap: 2px;
+  flex-shrink: 0;
+  padding: 0 6px;
+  background: var(--bg-0);
+  border-top: 1px solid var(--border);
+}
+
+.dock-tab {
+  padding: 3px 12px 4px;
+  font-size: 11px;
+  color: var(--text-dim);
+  border: 1px solid transparent;
+  border-bottom: none;
+  border-radius: 4px 4px 0 0;
+}
+
+.dock-tab:hover:not(:disabled) {
+  color: var(--text);
+  background: var(--bg-1);
+}
+
+.dock-tab:disabled {
+  opacity: 0.4;
+}
+
+.dock-tab-active {
+  color: var(--text);
+  background: var(--bg-1);
+  border-color: var(--border);
+}
+
 .bay {
   height: 220px;
   flex-shrink: 0;

@@ -429,6 +429,20 @@ default).
     share lineage and can merge later (File → Merge from copy…, disabled
     during a live session).
 
+17. ✅ **Per-clip looping, second take** — `Clip.loopLength` (period in
+    ticks, 0 = off; `clipSegments()` in audio/scheduling is the single
+    definition of tiling shared by engine, offline render and previews).
+    The gesture is a stack of right-edge handles: ↻ (top) drags out
+    repeats — one `clip/resize` carrying `loopLength`, pulling back to one
+    repeat unloops; ↔ (middle, audio only) time-stretches — the same op
+    carrying `stretch` (longer = slower/lower, tape-style; stretching a
+    looped clip scales the period so the repeat count is preserved); trim
+    (bottom) keeps plain resize, loop and stretch untouched. Waveforms/
+    note previews tile per repeat with dashed dividers and ↻×N / ×S
+    badges; audio and MIDI both repeat. Legacy boolean-loop files migrate
+    (enabled keeps its period). Splitting a looped clip keeps the period;
+    the right half re-anchors within the pattern.
+
 Roadmap beyond: VST3 hosting (native module; first consumer of the
 provider/`stateBlob` contracts), collaborator audio streaming + proxy
 renders for remote/missing plugins, autotune/pitch correction (dedicated AudioWorklet DSP

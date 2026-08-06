@@ -236,7 +236,11 @@ export function invert(state: ProjectState, op: Operation): Operation | null {
         clipId: op.clipId,
         start: clip.start,
         duration: clip.duration,
-        offset: clip.offset
+        offset: clip.offset,
+        // Always carried, so undoing a loop- or stretch-handle drag restores
+        // that state exactly whatever the forward op set.
+        loopLength: clip.loopLength,
+        stretch: clip.stretch
       }
     }
 

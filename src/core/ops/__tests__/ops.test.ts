@@ -27,7 +27,7 @@ function track(id: string, name = id): Track {
 }
 
 function clip(id: string, trackId: string, start = 0, duration = 960): Clip {
-  return { id, trackId, name: id, start, duration, assetId: null, offset: 0, color: null, fadeIn: 0, fadeOut: 0, reverse: false, pitch: 0, stretch: 1 }
+  return { id, trackId, name: id, start, duration, assetId: null, offset: 0, color: null, fadeIn: 0, fadeOut: 0, reverse: false, pitch: 0, stretch: 1, loopLength: 0 }
 }
 
 function fileNode(id: string, parentId: string | null, kind: FileNode['kind'] = 'audio'): FileNode {
@@ -582,6 +582,126 @@ suite('clip fades', () => {
     expect(s.clips['cs1'].fadeOut).toBe(240)
     const merged = apply(s, { type: 'clip/merge', clipId: 'c1', rightClipId: 'cs1' })
     expect(merged.clips['c1']).toEqual(withFades.clips['c1'])
+  })
+})
+
+suite('clip looping', () => {
+  test('loop-handle resize sets the period and invert restores the old loop state', () => {
+    const before = baseState() // c1: start 0, duration 960, loopLength 0
+    const op: Operation = {
+      type: 'clip/resize',
+      clipId: 'c1',
+      start: 0,
+      duration: 2880,
+      offset: 0,
+      loopLength: 960
+    }
+    const after = apply(before, op)
+    expect(after.clips.c1.duration).toBe(2880)
+    expect(after.clips.c1.loopLength).toBe(960)
+    const inverse = invert(before, op)
+    expect(inverse).not.toBeNull()
+    expect(apply(after, inverse!)).toEqual(before)
+
+    // Dragging back to one repeat clears the loop; invert restores it.
+    const unloop: Operation = {
+      type: 'clip/resize',
+      clipId: 'c1',
+      start: 0,
+      duration: 960,
+      offset: 0,
+      loopLength: 0
+    }
+    const cleared = apply(after, unloop)
+    expect(cleared.clips.c1.loopLength).toBe(0)
+    const uninvert = invert(after, unloop)
+    expect(apply(cleared, uninvert!)).toEqual(after)
+  })
+
+  test('plain trims never touch the loop; the reducer clamps absurd periods', () => {
+    let s = apply(baseState(), {
+      type: 'clip/resize',
+      clipId: 'c1',
+      start: 0,
+      duration: 2880,
+      offset: 0,
+      loopLength: 960
+    })
+    // A trim without loop fields keeps the period.
+    s = apply(s, { type: 'clip/resize', clipId: 'c1', start: 0, duration: 2400, offset: 0 })
+    expect(s.clips.c1.loopLength).toBe(960)
+    // Tiny/negative periods clamp to the minimum / off.
+    s = apply(s, { type: 'clip/resize', clipId: 'c1', start: 0, duration: 2400, offset: 0, loopLength: 5 })
+    expect(s.clips.c1.loopLength).toBe(60)
+    s = apply(s, { type: 'clip/resize', clipId: 'c1', start: 0, duration: 2400, offset: 0, loopLength: -3 })
+    expect(s.clips.c1.loopLength).toBe(0)
+  })
+
+  test('stretch-handle resize scales time in one op; invert restores exactly', () => {
+    const before = baseState() // c1: duration 960, stretch 1
+    const op: Operation = {
+      type: 'clip/resize',
+      clipId: 'c1',
+      start: 0,
+      duration: 1920,
+      offset: 0,
+      stretch: 2
+    }
+    const after = apply(before, op)
+    expect(after.clips.c1.duration).toBe(1920)
+    expect(after.clips.c1.stretch).toBe(2)
+    const inverse = invert(before, op)
+    expect(apply(after, inverse!)).toEqual(before)
+    // Reducer clamps the factor exactly like clip/setPlayback.
+    const wild = apply(before, { ...op, stretch: 99 })
+    expect(wild.clips.c1.stretch).toBe(4)
+    // A plain trim never touches the factor.
+    const trimmed = apply(after, { type: 'clip/resize', clipId: 'c1', start: 0, duration: 960, offset: 0 })
+    expect(trimmed.clips.c1.stretch).toBe(2)
+  })
+
+  test('stretching a looped clip scales the period with it (same repeat count)', () => {
+    let s = apply(baseState(), {
+      type: 'clip/resize',
+      clipId: 'c1',
+      start: 0,
+      duration: 2880, // 3 repeats of 960
+      offset: 0,
+      loopLength: 960
+    })
+    s = apply(s, {
+      type: 'clip/resize',
+      clipId: 'c1',
+      start: 0,
+      duration: 5760, // stretched ×2
+      offset: 0,
+      stretch: 2,
+      loopLength: 1920
+    })
+    expect(s.clips.c1.stretch).toBe(2)
+    expect(s.clips.c1.loopLength).toBe(1920)
+    expect(s.clips.c1.duration / s.clips.c1.loopLength).toBe(3) // still 3 repeats
+  })
+
+  test('splitting a looped clip keeps the period and re-anchors the right half in-pattern', () => {
+    let s = apply(baseState(), {
+      type: 'clip/create',
+      clip: { ...clip('ca', 't2'), assetId: 'ast_1' },
+      notes: []
+    })
+    s = apply(s, {
+      type: 'clip/resize',
+      clipId: 'ca',
+      start: 0,
+      duration: 2880,
+      offset: 120,
+      loopLength: 960
+    })
+    // Cut mid-second-repeat (tick 1440 = 480 into the pattern).
+    s = apply(s, { type: 'clip/split', clipId: 'ca', at: 1440, rightClipId: 'cr' })
+    expect(s.clips.ca.loopLength).toBe(960)
+    expect(s.clips.cr.loopLength).toBe(960)
+    expect(s.clips.cr.offset).toBe(120 + 480) // offset within the pattern, not from clip start
   })
 })
 

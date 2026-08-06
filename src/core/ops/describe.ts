@@ -125,8 +125,13 @@ export function describe(state: ProjectState, op: Operation): string | null {
       }
       return moved
     }
-    case 'clip/resize':
-      return `Resized clip "${clipName(state, op.clipId)}"`
+    case 'clip/resize': {
+      if (op.stretch !== undefined) return `Stretched clip "${clipName(state, op.clipId)}"`
+      if (op.loopLength === undefined) return `Resized clip "${clipName(state, op.clipId)}"`
+      return op.loopLength > 0
+        ? `Looped clip "${clipName(state, op.clipId)}"`
+        : `Unlooped clip "${clipName(state, op.clipId)}"`
+    }
     case 'clip/rename':
       return `Renamed clip "${clipName(state, op.clipId)}" to "${op.name}"`
     case 'clip/setColor':

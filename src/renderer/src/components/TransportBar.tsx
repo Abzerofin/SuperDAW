@@ -6,9 +6,7 @@ import { transport } from '@/state/transport'
 import { audioEngine } from '@/state/audioInstance'
 import { useCollab, USER_COLORS } from '@/state/collab'
 import { usePanels } from '@/state/panels'
-import { pianoRollUi, usePianoRollUi } from '@/state/pianoRollUi'
 import { useRecording } from '@/state/recording'
-import { useSelectedClipId } from '@/state/selection'
 import { GRID_CHOICES, gridUi, useGridChoice, type GridChoice } from '@/state/gridUi'
 import { RULER_MODES, rulerUi, useRulerMode, type RulerMode } from '@/state/rulerUi'
 import {
@@ -65,21 +63,6 @@ export function TransportBar(): React.JSX.Element {
           ↷
         </button>
         <button
-          className={`tbtn ${panelState.bottomPanel === 'files' ? 'tbtn-active' : ''}`}
-          title="Toggle File Bay"
-          onClick={() => panelState.toggleBottom('files')}
-        >
-          Files
-        </button>
-        <button
-          className={`tbtn ${panelState.bottomPanel === 'mixer' ? 'tbtn-active' : ''}`}
-          title="Toggle mixer"
-          onClick={() => panelState.toggleBottom('mixer')}
-        >
-          Mixer
-        </button>
-        <PianoRollTab />
-        <button
           className={`tbtn ${panelState.rightPanel === 'chat' ? 'tbtn-active' : ''}`}
           title="Toggle chat"
           onClick={() => panelState.toggleRight('chat')}
@@ -133,45 +116,6 @@ function RecordButton(): React.JSX.Element {
       onClick={() => void rec.toggle()}
     >
       ●
-    </button>
-  )
-}
-
-function PianoRollTab(): React.JSX.Element {
-  const rollState = usePianoRollUi()
-  const panelState = usePanels()
-  const state = useProjectState()
-  const selectedClipId = useSelectedClipId()
-
-  // A MIDI clip is "editable" when it's already open in the roll, or the
-  // current selection can be opened.
-  const selectedClip = selectedClipId ? state.clips[selectedClipId] : undefined
-  const selectedMidiClipId =
-    selectedClip && state.tracks[selectedClip.trackId]?.kind === 'midi'
-      ? selectedClip.id
-      : null
-  const openable = rollState.clipId ?? selectedMidiClipId
-
-  return (
-    <button
-      className={`tbtn ${panelState.bottomPanel === 'pianoroll' ? 'tbtn-active' : ''}`}
-      disabled={openable === null}
-      title={
-        openable === null
-          ? 'Piano roll — select or double-click a MIDI clip to edit its notes'
-          : 'Toggle piano roll'
-      }
-      onClick={() => {
-        if (panelState.bottomPanel === 'pianoroll') {
-          panelState.toggleBottom('pianoroll')
-        } else if (selectedMidiClipId && selectedMidiClipId !== rollState.clipId) {
-          pianoRollUi.open(selectedMidiClipId)
-        } else if (rollState.clipId !== null) {
-          panelState.toggleBottom('pianoroll')
-        }
-      }}
-    >
-      Piano
     </button>
   )
 }

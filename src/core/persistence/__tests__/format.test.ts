@@ -49,7 +49,8 @@ function sampleState() {
 
       pitch: 0,
 
-      stretch: 1
+      stretch: 1,
+      loopLength: 0
     },
     notes: [{ id: 'n1', clipId: 'c1', pitch: 60, start: 0, duration: 960, velocity: 100 }]
   })
@@ -150,19 +151,36 @@ suite('project file format', () => {
     expect(parsed.state.clips['c1'].stretch).toBe(1)
   })
 
-  test('per-clip loop fields from older files are dropped, not carried forward', () => {
+  test('legacy boolean-loop clips migrate: enabled keeps its period, disabled becomes 0', () => {
     const state = sampleState()
     const withLoop = {
       ...state,
       clips: Object.fromEntries(
-        Object.entries(state.clips).map(([id, c]) => [id, { ...c, loop: true, loopLength: 480 }])
+        Object.entries(state.clips).map(([id, c], i) => [
+          id,
+          { ...c, loop: i === 0, loopLength: 480 }
+        ])
       )
     }
     const parsed = parseProjectJson(
       JSON.stringify({ formatVersion: 2, state: withLoop, assets: [] })
     )
     expect('loop' in parsed.state.clips['c1']).toBe(false)
-    expect('loopLength' in parsed.state.clips['c1']).toBe(false)
+    expect(parsed.state.clips['c1'].loopLength).toBe(480) // loop: true → period survives
+
+    // loop: false drops the stored period; files from before looping → 0.
+    const withLoopOff = {
+      ...state,
+      clips: Object.fromEntries(
+        Object.entries(state.clips).map(([id, c]) => [id, { ...c, loop: false, loopLength: 480 }])
+      )
+    }
+    const off = parseProjectJson(
+      JSON.stringify({ formatVersion: 2, state: withLoopOff, assets: [] })
+    )
+    expect(off.state.clips['c1'].loopLength).toBe(0)
+    const plain = parseProjectJson(JSON.stringify({ formatVersion: 2, state, assets: [] }))
+    expect(plain.state.clips['c1'].loopLength).toBe(0)
   })
 
   test('v1 files with legacy effects load as builtin plugin instances', () => {

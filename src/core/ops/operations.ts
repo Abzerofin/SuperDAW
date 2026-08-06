@@ -80,7 +80,22 @@ export type Operation =
   | { type: 'clip/create'; clip: Clip; notes: Note[] }
   | { type: 'clip/delete'; clipId: ClipId }
   | { type: 'clip/move'; clipId: ClipId; trackId: TrackId; start: number }
-  | { type: 'clip/resize'; clipId: ClipId; start: number; duration: number; offset: number }
+  /**
+   * `loopLength` present = the gesture also set the loop period (the loop
+   * handle extends duration and establishes the period in ONE op; 0 turns
+   * looping off). `stretch` present = the gesture time-scaled the material
+   * to fill the new duration (the stretch handle: longer = slower). Absent
+   * fields = plain trim, that state untouched.
+   */
+  | {
+      type: 'clip/resize'
+      clipId: ClipId
+      start: number
+      duration: number
+      offset: number
+      loopLength?: number
+      stretch?: number
+    }
   | { type: 'clip/rename'; clipId: ClipId; name: string }
   /** null = revert to the track color. */
   | { type: 'clip/setColor'; clipId: ClipId; color: string | null }

@@ -36,7 +36,8 @@ function clip(id: string, trackId: string, start = 0, duration = 960): Clip {
     fadeOut: 0,
     reverse: false,
     pitch: 0,
-    stretch: 1
+    stretch: 1,
+    loopLength: 0
   }
 }
 

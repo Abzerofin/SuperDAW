@@ -157,16 +157,16 @@ function normalizeState(state: ProjectState): ProjectState {
       frozenAssetId: legacy.frozenAssetId ?? null
     }
   }
-  // Clips from before fades/playback settings lack those fields. Per-clip
-  // looping was replaced by the transport's loop region, so `loop`/
-  // `loopLength` from those files are dropped rather than carried forward.
+  // Clips from before fades/playback settings lack those fields. Files from
+  // the era of the boolean `loop` flag carry the same period semantics in
+  // `loopLength`, so an enabled loop survives; a disabled one becomes 0.
   const clips: Record<string, Clip> = {}
   for (const [id, clip] of Object.entries(merged.clips)) {
-    const { loop: _loop, loopLength: _loopLength, ...rest } = clip as Clip & {
-      loop?: boolean
-      loopLength?: number
-    }
-    const legacy = rest as Omit<Clip, 'fadeIn' | 'fadeOut' | 'reverse' | 'pitch' | 'stretch'> &
+    const { loop: legacyLoopFlag, ...rest } = clip as Clip & { loop?: boolean }
+    const legacy = rest as Omit<
+      Clip,
+      'fadeIn' | 'fadeOut' | 'reverse' | 'pitch' | 'stretch' | 'loopLength'
+    > &
       Partial<Clip>
     clips[id] = {
       ...legacy,
@@ -174,7 +174,8 @@ function normalizeState(state: ProjectState): ProjectState {
       fadeOut: legacy.fadeOut ?? 0,
       reverse: legacy.reverse ?? false,
       pitch: legacy.pitch ?? 0,
-      stretch: legacy.stretch ?? 1
+      stretch: legacy.stretch ?? 1,
+      loopLength: legacyLoopFlag === false ? 0 : (legacy.loopLength ?? 0)
     }
   }
   const full: ProjectState = { ...merged, tracks, clips, plugins: migratePlugins(merged) }

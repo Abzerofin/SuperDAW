@@ -3,7 +3,7 @@ import type { Clip, ProjectState, Track } from '@core/model/types'
 import { createEmptyProject } from '@core/model/types'
 import { PPQ } from '@core/model/timebase'
 import { apply } from '@core/ops/apply'
-import { beatIndexAt, clipFadeRamps, effectiveFades, fadeCurve, metronomeClicks, scheduleClips, scheduleNotes, ticksPerSecond } from '../scheduling'
+import { beatIndexAt, clipFadeRamps, clipSegments, effectiveFades, fadeCurve, metronomeClicks, scheduleClips, scheduleNotes, ticksPerSecond } from '../scheduling'
 import { computePeaks, type AudioBufferLike } from '../assets'
 
 // 120 BPM => 2 beats/sec => 1920 ticks/sec; 1 beat = 960 ticks = 0.5 s
@@ -36,7 +36,7 @@ function stateWith(clips: Partial<Clip>[]): ProjectState {
       duration: PPQ * 4,
       assetId: 'a1',
       offset: 0,
-      color: null,
+      color: null,
       fadeIn: 0,
 
       fadeOut: 0,
@@ -46,6 +46,7 @@ function stateWith(clips: Partial<Clip>[]): ProjectState {
       pitch: 0,
 
       stretch: 1,
+      loopLength: 0,
       ...partial
     }
     s = apply(s, { type: 'clip/create', clip, notes: [] })
@@ -196,7 +197,8 @@ suite('scheduleNotes', () => {
         fadeOut: 0,
         reverse: false,
         pitch: 0,
-        stretch: 1
+        stretch: 1,
+        loopLength: 0
       },
       notes: notes.map((n) => ({
         id: n.id,
@@ -245,6 +247,124 @@ suite('scheduleNotes', () => {
     const scheds = scheduleNotes(s, 0, 100, PPQ * 2)
     expect(scheds).toHaveLength(1)
     expect(scheds[0].endSec).toBeCloseTo(101) // cut at the region end (2 beats = 1 s)
+  })
+})
+
+suite('clip looping', () => {
+  test('clipSegments tiles the clip; final repeat is partial; non-looped is one window', () => {
+    const base = {
+      id: 'c',
+      trackId: 't1',
+      name: 'c',
+      start: 960,
+      duration: PPQ * 4, // 3840
+      assetId: 'a1',
+      offset: 0,
+      color: null,
+      fadeIn: 0,
+      fadeOut: 0,
+      reverse: false,
+      pitch: 0,
+      stretch: 1,
+      loopLength: 0
+    }
+    expect(clipSegments(base)).toEqual([{ start: 960, duration: 3840 }])
+    // 3840 over a 1500-tick period: 1500 + 1500 + 840
+    expect(clipSegments({ ...base, loopLength: 1500 })).toEqual([
+      { start: 960, duration: 1500 },
+      { start: 2460, duration: 1500 },
+      { start: 3960, duration: 840 }
+    ])
+    // Period >= duration behaves like no loop.
+    expect(clipSegments({ ...base, loopLength: 4000 })).toEqual([{ start: 960, duration: 3840 }])
+  })
+
+  test('a looped audio clip schedules one source per repeat, all from the same offset', () => {
+    // 2-beat material looped across 4 beats: two full repeats.
+    const s = stateWith([{ start: 0, duration: PPQ * 4, loopLength: PPQ * 2, offset: PPQ }])
+    const scheds = scheduleClips(s, tenSecondAsset, 0, 100)
+    expect(scheds).toHaveLength(2)
+    expect(scheds[0].when).toBeCloseTo(100)
+    expect(scheds[1].when).toBeCloseTo(101) // 2 beats = 1 s later
+    // Every repeat replays from the clip's material offset (1 beat = 0.5 s).
+    expect(scheds[0].offsetSec).toBeCloseTo(0.5)
+    expect(scheds[1].offsetSec).toBeCloseTo(0.5)
+    expect(scheds[0].durationSec).toBeCloseTo(1)
+    expect(scheds[1].durationSec).toBeCloseTo(1)
+  })
+
+  test('starting mid-repeat plays the tail of that repeat, then full repeats', () => {
+    const s = stateWith([{ start: 0, duration: PPQ * 4, loopLength: PPQ * 2 }])
+    // Anchor 1 beat in: half of repeat 1 remains, then repeat 2 in full.
+    const scheds = scheduleClips(s, tenSecondAsset, PPQ, 100)
+    expect(scheds).toHaveLength(2)
+    expect(scheds[0].when).toBeCloseTo(100)
+    expect(scheds[0].offsetSec).toBeCloseTo(0.5) // skipped 1 beat of material
+    expect(scheds[0].durationSec).toBeCloseTo(0.5)
+    expect(scheds[1].when).toBeCloseTo(100.5)
+    expect(scheds[1].offsetSec).toBeCloseTo(0)
+    expect(scheds[1].durationSec).toBeCloseTo(1)
+  })
+
+  test('looped MIDI clip repeats its notes each iteration and cuts them at the period', () => {
+    let s = createEmptyProject('Test')
+    s = { ...s, tempo: TEMPO }
+    s = apply(s, {
+      type: 'track/create',
+      track: {
+        id: 'm1',
+        kind: 'midi',
+        name: 'M',
+        color: '#fff',
+        muted: false,
+        soloed: false,
+        parentId: null,
+        frozenAssetId: null,
+        volume: 1,
+        pan: 0,
+        synth: {}
+      },
+      index: 0,
+      clips: [],
+      automation: [],
+      notes: [],
+      plugins: []
+    })
+    s = apply(s, {
+      type: 'clip/create',
+      clip: {
+        id: 'mc1',
+        trackId: 'm1',
+        name: 'MC',
+        start: 0,
+        duration: PPQ * 4,
+        assetId: null,
+        offset: 0,
+        color: null,
+        fadeIn: 0,
+        fadeOut: 0,
+        reverse: false,
+        pitch: 0,
+        stretch: 1,
+        loopLength: PPQ * 2
+      },
+      notes: [
+        // At the loop start, and one crossing the period boundary (gets cut).
+        { id: 'n1', clipId: 'mc1', pitch: 60, start: 0, duration: PPQ, velocity: 100 },
+        { id: 'n2', clipId: 'mc1', pitch: 64, start: PPQ * 1.5, duration: PPQ, velocity: 100 }
+      ]
+    })
+    const notes = scheduleNotes(s, 0, 100)
+    // Each of the 2 notes plays twice (2 repeats over 4 beats).
+    expect(notes).toHaveLength(4)
+    const starts = notes.map((n) => n.startSec)
+    expect(starts[0]).toBeCloseTo(100) // n1, repeat 1
+    expect(starts[1]).toBeCloseTo(100.75) // n2, repeat 1
+    expect(starts[2]).toBeCloseTo(101) // n1, repeat 2
+    expect(starts[3]).toBeCloseTo(101.75) // n2, repeat 2
+    // n2 is cut at its repeat's end (period boundary), not the clip end.
+    const n2First = notes[1]
+    expect(n2First.endSec).toBeCloseTo(101) // cut at 2-beat boundary
   })
 })
 
@@ -311,6 +431,7 @@ suite('clip fades', () => {
     reverse: false,
     pitch: 0,
     stretch: 1,
+    loopLength: 0,
     fadeIn: PPQ, // 0.5 s
     fadeOut: PPQ * 2 // 1 s
   })

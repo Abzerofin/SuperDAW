@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState, useSyncExternalStore } from 'react'
 import type { Clip, Note } from '@core/model/types'
-import { clipRate } from '@core/model/types'
+import { clipRate, MIN_LOOP_TICKS } from '@core/model/types'
 import { effectiveFades, ticksPerSecond } from '@audio/scheduling'
 import type { ProjectAsset } from '@audio/assets'
 import { assetStore } from '@/state/audioInstance'
@@ -12,7 +12,14 @@ interface Props {
   trackColor: string
   trackIndex: number
   /** Preview overrides while this clip is being dragged. */
-  preview: { start: number; duration: number; offset: number; trackIndex: number } | null
+  preview: {
+    start: number
+    duration: number
+    offset: number
+    loopLength: number
+    stretch: number
+    trackIndex: number
+  } | null
   selected: boolean
   dimmed: boolean
   pxPerTick: number
@@ -27,7 +34,10 @@ interface Props {
   notes: Note[]
   /** Fade handles are shown and draggable (audio clip on an unfrozen track). */
   fadesEditable: boolean
-  onPointerDown: (e: React.PointerEvent, mode: 'move' | 'resize-l' | 'resize-r') => void
+  onPointerDown: (
+    e: React.PointerEvent,
+    mode: 'move' | 'resize-l' | 'resize-r' | 'loop-r' | 'stretch-r'
+  ) => void
   onOpenComments: () => void
   /** Right-click: the clip menu (slice, reverse, pitch, length, colour). */
   onContextMenu: (e: React.MouseEvent) => void
@@ -57,8 +67,12 @@ export function ClipView({
   const start = preview?.start ?? clip.start
   const duration = preview?.duration ?? clip.duration
   const offset = preview?.offset ?? clip.offset
+  const loopLength = preview?.loopLength ?? clip.loopLength
+  const stretch = preview?.stretch ?? clip.stretch
   const lane = preview?.trackIndex ?? trackIndex
   const color = clip.color ?? trackColor
+  const looped = loopLength >= MIN_LOOP_TICKS && loopLength < duration
+  const repeats = looped ? duration / loopLength : 1
 
   const asset = useSyncExternalStore(assetStore.subscribe, () =>
     clip.assetId ? assetStore.get(clip.assetId) : undefined
@@ -144,12 +158,26 @@ export function ClipView({
           offset={offset}
           duration={duration}
           tempo={tempo}
-          rate={clipRate(clip)}
+          rate={clipRate({ ...clip, stretch })}
           reverse={clip.reverse}
+          loopTicks={looped ? loopLength : 0}
         />
       )}
-      {(clip.reverse || clip.pitch !== 0 || clip.stretch !== 1) && (
+      {looped &&
+        Array.from({ length: Math.ceil(repeats) - 1 }, (_, i) => (
+          <div
+            key={i}
+            className="clip-loop-divider"
+            style={{ left: (i + 1) * loopLength * pxPerTick }}
+          />
+        ))}
+      {(looped || clip.reverse || clip.pitch !== 0 || stretch !== 1) && (
         <div className="clip-badges mono">
+          {looped && (
+            <span title="Looped — repeats of the original material">
+              ↻×{repeats % 1 === 0 ? repeats : repeats.toFixed(2)}
+            </span>
+          )}
           {clip.reverse && <span title="Reversed">◀</span>}
           {clip.pitch !== 0 && (
             <span title="Transposed">
@@ -157,11 +185,17 @@ export function ClipView({
               {clip.pitch}st
             </span>
           )}
-          {clip.stretch !== 1 && <span title="Time-scaled">×{clip.stretch.toFixed(2)}</span>}
+          {stretch !== 1 && <span title="Time-scaled">×{stretch.toFixed(2)}</span>}
         </div>
       )}
       {notes.length > 0 && (
-        <NotePreview notes={notes} duration={duration} width={width} height={height} />
+        <NotePreview
+          notes={notes}
+          duration={duration}
+          loopTicks={looped ? loopLength : 0}
+          width={width}
+          height={height}
+        />
       )}
       {(fadeInTicks > 0 || fadeOutTicks > 0) && (
         <FadeShade
@@ -208,7 +242,28 @@ export function ClipView({
         </button>
       )}
       <div className="clip-handle clip-handle-l" onPointerDown={(e) => onPointerDown(e, 'resize-l')} />
-      <div className="clip-handle clip-handle-r" onPointerDown={(e) => onPointerDown(e, 'resize-r')} />
+      {/* Right edge, stacked: loop (repeat), stretch (slower/faster), trim. */}
+      <div
+        className={`clip-handle clip-handle-loop ${clip.assetId === null ? 'clip-handle-half' : ''}`}
+        title="Loop — drag right to repeat the clip"
+        onPointerDown={(e) => onPointerDown(e, 'loop-r')}
+      >
+        ↻
+      </div>
+      {clip.assetId !== null && (
+        <div
+          className="clip-handle clip-handle-stretch"
+          title="Stretch — drag to make the audio play slower (longer) or faster (shorter)"
+          onPointerDown={(e) => onPointerDown(e, 'stretch-r')}
+        >
+          ↔
+        </div>
+      )}
+      <div
+        className={`clip-handle clip-handle-r ${clip.assetId === null ? 'clip-handle-half' : ''}`}
+        title="Trim — lengthen or shorten the clip"
+        onPointerDown={(e) => onPointerDown(e, 'resize-r')}
+      />
     </div>
   )
 }
@@ -258,11 +313,14 @@ function FadeShade({
 function NotePreview({
   notes,
   duration,
+  loopTicks,
   width,
   height
 }: {
   notes: Note[]
   duration: number
+  /** Loop period in ticks (0 = not looped) — notes tile once per repeat. */
+  loopTicks: number
   width: number
   height: number
 }): React.JSX.Element {
@@ -276,18 +334,32 @@ function NotePreview({
   const pad = 16 // clear of the name row
   const usable = Math.max(4, height - pad - 4)
 
-  return (
-    <svg className="clip-notes" width={width} height={height}>
-      {notes.map((note) => (
+  // One pass per repeat, mirroring scheduleNotes: each repeat replays the
+  // pattern from its own start, cut at the period (and the clip end).
+  const period = loopTicks > 0 ? loopTicks : duration
+  const rects: React.JSX.Element[] = []
+  for (let repeat = 0, into = 0; into < duration; repeat++, into += period) {
+    const windowTicks = Math.min(period, duration - into)
+    for (const note of notes) {
+      if (note.start >= windowTicks) continue
+      rects.push(
         <rect
-          key={note.id}
-          x={(note.start / duration) * width}
+          key={`${note.id}:${repeat}`}
+          x={((into + note.start) / duration) * width}
           y={pad + ((max - note.pitch) / span) * usable}
-          width={Math.max(2, (Math.min(note.duration, duration - note.start) / duration) * width)}
+          width={Math.max(
+            2,
+            (Math.min(note.duration, windowTicks - note.start) / duration) * width
+          )}
           height={Math.max(2, usable / span)}
           rx={1}
         />
-      ))}
+      )
+    }
+  }
+  return (
+    <svg className="clip-notes" width={width} height={height}>
+      {rects}
     </svg>
   )
 }
@@ -303,6 +375,8 @@ interface WaveformProps {
   rate: number
   /** Draw the region mirrored, as it will play. */
   reverse: boolean
+  /** Loop period in ticks (0 = not looped) — the drawn region tiles per repeat. */
+  loopTicks: number
 }
 
 function Waveform({
@@ -313,7 +387,8 @@ function Waveform({
   duration,
   tempo,
   rate,
-  reverse
+  reverse,
+  loopTicks
 }: WaveformProps): React.JSX.Element {
   const canvasRef = useRef<HTMLCanvasElement>(null)
 
@@ -338,10 +413,13 @@ function Waveform({
     // The drawn region must match what scheduling will read: resampling
     // scales timeline position into buffer position, and a reversed clip
     // reads its region back-to-front.
+    // A looped clip re-reads the same material every repeat: fold the
+    // timeline position into the loop period before mapping to the buffer.
+    const periodTicks = loopTicks > 0 ? loopTicks : duration
     const regionStartSec = (offset / tps) * rate
-    const regionLenSec = (duration / tps) * rate
+    const regionLenSec = (periodTicks / tps) * rate
     for (let x = 0; x < w; x++) {
-      const posTicks = (x / w) * duration
+      const posTicks = ((x / w) * duration) % periodTicks
       const intoRegionSec = (posTicks / tps) * rate
       const sec = reverse
         ? regionStartSec + regionLenSec - intoRegionSec
@@ -352,7 +430,7 @@ function Waveform({
       const max = peaks[bucket * 2 + 1]
       g.fillRect(x, mid - max * amp, 1, Math.max(1, (max - min) * amp))
     }
-  }, [asset, width, height, offset, duration, tempo, rate, reverse])
+  }, [asset, width, height, offset, duration, tempo, rate, reverse, loopTicks])
 
   return <canvas ref={canvasRef} className="clip-wave" />
 }

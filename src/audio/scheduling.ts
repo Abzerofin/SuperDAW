@@ -1,6 +1,6 @@
 import { PPQ, ticksPerBeat } from '@core/model/timebase'
 import type { Clip, ProjectState } from '@core/model/types'
-import { clipRate } from '@core/model/types'
+import { clipRate, isClipLooped } from '@core/model/types'
 
 /**
  * Pure scheduling math: project state + a time anchor -> what to play when.
@@ -35,6 +35,32 @@ export interface ClipSchedule {
   readonly rate: number
   /** Play from the reversed copy of the asset. */
   readonly reverse: boolean
+}
+
+/** One repeat of a looped clip, as its own timeline window. */
+export interface ClipSegment {
+  /** Absolute timeline start, in ticks. */
+  readonly start: number
+  /** Ticks of this repeat (the final one may be cut short by the clip end). */
+  readonly duration: number
+}
+
+/**
+ * A clip as the list of timeline windows it actually plays: one window for
+ * an ordinary clip, one per repeat for a looped clip. Every window replays
+ * the SAME material from the clip's offset — this is the single definition
+ * of looping shared by the engine, the offline render and the UI preview.
+ */
+export function clipSegments(clip: Clip): ClipSegment[] {
+  if (!isClipLooped(clip)) return [{ start: clip.start, duration: clip.duration }]
+  const out: ClipSegment[] = []
+  for (let into = 0; into < clip.duration; into += clip.loopLength) {
+    out.push({
+      start: clip.start + into,
+      duration: Math.min(clip.loopLength, clip.duration - into)
+    })
+  }
+  return out
 }
 
 /**
@@ -93,38 +119,42 @@ export function scheduleClips(
     // by `rate`: covering T seconds of timeline consumes T * rate of buffer.
     const rate = clipRate(clip)
 
-    const clipStartSec = anchorSec + (clip.start - anchorTicks) / tps
-    const clipEndSec = anchorSec + (clip.start + clip.duration - anchorTicks) / tps
-    if (clipEndSec <= anchorSec) continue // entirely in the past
-    if (clipStartSec >= limitSec) continue // beyond this pass's window
+    // A looped clip is scheduled as one source per repeat; each replays the
+    // same material from the clip's offset in its own timeline window.
+    for (const segment of clipSegments(clip)) {
+      const segStartSec = anchorSec + (segment.start - anchorTicks) / tps
+      const segEndSec = anchorSec + (segment.start + segment.duration - anchorTicks) / tps
+      if (segEndSec <= anchorSec) continue // entirely in the past
+      if (segStartSec >= limitSec) continue // beyond this pass's window
 
-    // The clip's whole region in the buffer, before any lateness.
-    const regionOffsetSec = (clip.offset / tps) * rate
-    const wantedSec = (Math.min(clipEndSec, limitSec) - clipStartSec) * rate
-    const regionLengthSec = Math.min(wantedSec, bufferSec - regionOffsetSec)
-    if (regionLengthSec <= 0) continue // trimmed past the end of the source material
+      // The segment's whole region in the buffer, before any lateness.
+      const regionOffsetSec = (clip.offset / tps) * rate
+      const wantedSec = (Math.min(segEndSec, limitSec) - segStartSec) * rate
+      const regionLengthSec = Math.min(wantedSec, bufferSec - regionOffsetSec)
+      if (regionLengthSec <= 0) continue // trimmed past the end of the source material
 
-    // Starting mid-clip skips proportionally more buffer material.
-    const lateBufferSec = Math.max(0, anchorSec - clipStartSec) * rate
-    const playableSec = regionLengthSec - lateBufferSec
-    if (playableSec <= 0) continue
+      // Starting mid-segment skips proportionally more buffer material.
+      const lateBufferSec = Math.max(0, anchorSec - segStartSec) * rate
+      const playableSec = regionLengthSec - lateBufferSec
+      if (playableSec <= 0) continue
 
-    // Reversed clips read the same region out of the mirrored copy, so the
-    // region's start counts back from the end of the buffer.
-    const offsetSec = clip.reverse
-      ? bufferSec - regionOffsetSec - regionLengthSec + lateBufferSec
-      : regionOffsetSec + lateBufferSec
+      // Reversed clips read the same region out of the mirrored copy, so the
+      // region's start counts back from the end of the buffer.
+      const offsetSec = clip.reverse
+        ? bufferSec - regionOffsetSec - regionLengthSec + lateBufferSec
+        : regionOffsetSec + lateBufferSec
 
-    out.push({
-      clipId: clip.id,
-      assetId: clip.assetId,
-      trackId: clip.trackId,
-      when: Math.max(clipStartSec, anchorSec),
-      offsetSec: Math.max(0, offsetSec),
-      durationSec: playableSec,
-      rate,
-      reverse: clip.reverse
-    })
+      out.push({
+        clipId: clip.id,
+        assetId: clip.assetId,
+        trackId: clip.trackId,
+        when: Math.max(segStartSec, anchorSec),
+        offsetSec: Math.max(0, offsetSec),
+        durationSec: playableSec,
+        rate,
+        reverse: clip.reverse
+      })
+    }
   }
   return out
 }
@@ -164,20 +194,25 @@ export function scheduleNotes(
     if (!track || track.kind !== 'midi') continue
     if (track.frozenAssetId !== null) continue // frozen: the render replaces the synth
 
-    const absStart = clip.start + note.start
-    const absEnd = Math.min(absStart + note.duration, clip.start + clip.duration, untilTicks)
-    if (absEnd <= absStart) continue // entirely past the clip end / window
-    if (absEnd <= anchorTicks) continue // in the past
-    if (absStart >= untilTicks) continue // starts beyond this pass's window
+    // A looped clip plays its notes once per repeat; a note is cut at its
+    // segment's end just as it is cut at an ordinary clip's end.
+    for (const segment of clipSegments(clip)) {
+      if (note.start >= segment.duration) continue // past this repeat's window
+      const absStart = segment.start + note.start
+      const absEnd = Math.min(absStart + note.duration, segment.start + segment.duration, untilTicks)
+      if (absEnd <= absStart) continue // entirely past the segment end / window
+      if (absEnd <= anchorTicks) continue // in the past
+      if (absStart >= untilTicks) continue // starts beyond this pass's window
 
-    out.push({
-      trackId: track.id,
-      clipId: clip.id,
-      pitch: note.pitch,
-      velocity: note.velocity / 127,
-      startSec: anchorSec + (Math.max(absStart, anchorTicks) - anchorTicks) / tps,
-      endSec: anchorSec + (absEnd - anchorTicks) / tps
-    })
+      out.push({
+        trackId: track.id,
+        clipId: clip.id,
+        pitch: note.pitch,
+        velocity: note.velocity / 127,
+        startSec: anchorSec + (Math.max(absStart, anchorTicks) - anchorTicks) / tps,
+        endSec: anchorSec + (absEnd - anchorTicks) / tps
+      })
+    }
   }
   return out.sort((a, b) => a.startSec - b.startSec)
 }

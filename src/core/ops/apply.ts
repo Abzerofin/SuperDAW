@@ -19,7 +19,9 @@ import {
   MAX_PITCH,
   MAX_STRETCH,
   MIN_PITCH,
-  MIN_STRETCH
+  MIN_STRETCH,
+  isClipLooped,
+  normalizeLoop
 } from '../model/types'
 import { SYNTH_DEFS, clampParam, type ParamDef } from '../model/effects'
 import { paramDefsOf } from '../plugins/builtin'
@@ -419,7 +421,13 @@ export function apply(state: ProjectState, op: Operation): ProjectState {
         ...c,
         start: Math.max(0, op.start),
         duration: Math.max(1, op.duration),
-        offset: Math.max(0, op.offset)
+        offset: Math.max(0, op.offset),
+        loopLength: op.loopLength !== undefined ? normalizeLoop(op.loopLength) : c.loopLength,
+        // Same clamp/rounding as clip/setPlayback, so the two ops agree.
+        stretch:
+          op.stretch !== undefined && Number.isFinite(op.stretch)
+            ? Math.min(MAX_STRETCH, Math.max(MIN_STRETCH, Math.round(op.stretch * 1000) / 1000))
+            : c.stretch
       }))
 
     case 'clip/rename':
@@ -467,8 +475,13 @@ export function apply(state: ProjectState, op: Operation): ProjectState {
         start: at,
         duration: clip.start + clip.duration - at,
         assetId: clip.assetId,
-        // Audio keeps playing the same source material across the cut.
-        offset: clip.assetId !== null ? clip.offset + splitOffset : 0,
+        // Audio keeps playing the same source material across the cut; in a
+        // looped clip the cut may land mid-repeat, so take the offset within
+        // the pattern rather than from the clip's start.
+        offset:
+          clip.assetId !== null
+            ? clip.offset + (isClipLooped(clip) ? splitOffset % clip.loopLength : splitOffset)
+            : 0,
         color: op.rightColor !== undefined ? op.rightColor : clip.color,
         // The original fade-out travels with the clip's end (the right half).
         fadeIn: op.rightFades ? op.rightFades[0] : 0,
@@ -476,7 +489,12 @@ export function apply(state: ProjectState, op: Operation): ProjectState {
         // Both halves keep playing the same way (reversed/transposed/scaled).
         reverse: clip.reverse,
         pitch: clip.pitch,
-        stretch: clip.stretch
+        stretch: clip.stretch,
+        // A looped clip's halves keep the period; the right half starts at
+        // its position WITHIN the pattern so audio is continuous at the cut
+        // (its later repeats then cycle from that point, not the original
+        // phase — the price of not storing a separate loop-phase field).
+        loopLength: clip.loopLength
       }
       const clips = {
         ...state.clips,

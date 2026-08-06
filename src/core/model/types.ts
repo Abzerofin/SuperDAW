@@ -61,6 +61,13 @@ export interface Clip {
    * resampling, so it transposes with the same tape behaviour.
    */
   readonly stretch: number
+  /**
+   * Loop period in ticks: 0 = no looping; otherwise the clip's material
+   * repeats from its offset every `loopLength` ticks for the clip's whole
+   * duration (the last repeat may be partial). Set by dragging the clip's
+   * loop handle; a period >= the clip's duration plays like no loop.
+   */
+  readonly loopLength: number
 }
 
 /** Clamp bounds shared by the reducer and the UI controls. */
@@ -68,6 +75,19 @@ export const MIN_PITCH = -24
 export const MAX_PITCH = 24
 export const MIN_STRETCH = 0.25
 export const MAX_STRETCH = 4
+/** Shortest allowed loop period (guards div-by-zero and absurd tiling). */
+export const MIN_LOOP_TICKS = 60
+
+/** Clamp a loop period: 0 stays "off", anything else is floored at the minimum. */
+export function normalizeLoop(loopLength: number): number {
+  if (!Number.isFinite(loopLength) || loopLength <= 0) return 0
+  return Math.max(MIN_LOOP_TICKS, Math.round(loopLength))
+}
+
+/** Whether a clip actually repeats (an over-long period plays straight through). */
+export function isClipLooped(clip: Clip): boolean {
+  return clip.loopLength >= MIN_LOOP_TICKS && clip.loopLength < clip.duration
+}
 
 /**
  * How fast a clip's buffer is read: semitone transposition and time factor

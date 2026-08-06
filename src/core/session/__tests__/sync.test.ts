@@ -49,7 +49,7 @@ function makeTrack(id: string, kind: Track['kind'] = 'audio'): Track {
 }
 
 function makeClip(id: string, trackId: string, start = 0, duration = PPQ * 4): Clip {
-  return { id, trackId, name: id, start, duration, assetId: null, offset: 0, color: null, fadeIn: 0, fadeOut: 0, reverse: false, pitch: 0, stretch: 1 }
+  return { id, trackId, name: id, start, duration, assetId: null, offset: 0, color: null, fadeIn: 0, fadeOut: 0, reverse: false, pitch: 0, stretch: 1, loopLength: 0 }
 }
 
 function seedProject(): ProjectState {

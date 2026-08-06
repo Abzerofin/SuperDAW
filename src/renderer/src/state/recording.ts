@@ -173,7 +173,8 @@ class RecordingStore {
           fadeOut: 0,
           reverse: false,
           pitch: 0,
-          stretch: 1
+          stretch: 1,
+          loopLength: 0
         },
         notes: []
       })
