@@ -54,7 +54,14 @@ export interface ActivePing {
 }
 
 const PING_LIFETIME_MS = 4000
-const CURSOR_STALE_MS = 6000
+/**
+ * How long a collaborator's last-known cursor stays visible. Departures
+ * already clear cursors (user-left), so this only sweeps up ghosts from a
+ * peer that vanished without saying goodbye — it must NOT be so short that
+ * a peer who simply stopped moving disappears, which is what makes cursors
+ * feel absent.
+ */
+const CURSOR_STALE_MS = 30000
 const DEFAULT_RELAY_URL = 'ws://localhost:8787'
 
 function metaOf(asset: ProjectAsset): TransferMeta {

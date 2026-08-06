@@ -1,6 +1,7 @@
 export const HEADER_W = 200
 export const RULER_H = 28
-export const LANE_H = 72
+/** Tall enough for the header's three rows: name, pan+volume, toggles. */
+export const LANE_H = 92
 export const AUTO_H = 44
 
 export const MIN_PX_PER_BEAT = 4

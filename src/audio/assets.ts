@@ -49,7 +49,31 @@ export interface AssetEvent {
 
 export class AssetStore {
   private assets = new Map<string, ProjectAsset>()
+  private reversed = new Map<string, AudioBuffer>()
   private listeners = new Set<(event?: AssetEvent) => void>()
+
+  /**
+   * A mirrored copy of an asset's buffer, for clips playing in reverse.
+   * Web Audio cannot read a buffer backwards, so one flipped copy per
+   * ASSET is built on demand and shared by every reversed clip using it —
+   * clip-level data is still never duplicated.
+   */
+  reversedBuffer(id: string, create: (channels: Float32Array[], sampleRate: number) => AudioBuffer): AudioBuffer | null {
+    const cached = this.reversed.get(id)
+    if (cached) return cached
+    const buffer = this.assets.get(id)?.buffer
+    if (!buffer) return null
+    const channels: Float32Array[] = []
+    for (let ch = 0; ch < buffer.numberOfChannels; ch++) {
+      const source = buffer.getChannelData(ch)
+      const flipped = new Float32Array(source.length)
+      for (let i = 0, j = source.length - 1; i < source.length; i++, j--) flipped[i] = source[j]
+      channels.push(flipped)
+    }
+    const mirrored = create(channels, buffer.sampleRate)
+    this.reversed.set(id, mirrored)
+    return mirrored
+  }
 
   addAudio(name: string, ext: string, encoded: Uint8Array, buffer: AudioBuffer): ProjectAsset {
     return this.register(newId('ast'), name, 'audio', ext, encoded, buffer, 'local')
@@ -112,6 +136,7 @@ export class AssetStore {
   /** Drop everything (loading a different project). */
   clear(): void {
     this.assets.clear()
+    this.reversed.clear()
     for (const listener of this.listeners) listener()
   }
 

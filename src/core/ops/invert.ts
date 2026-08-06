@@ -1,5 +1,11 @@
 import type { FileNode, Note, ProjectState } from '../model/types'
-import { clipsOfTrack, pluginsOfTrack, notesOfClip, subtreeOf } from '../model/types'
+import {
+  clipsOfTrack,
+  pluginsOfTrack,
+  notesOfClip,
+  subtreeOf,
+  trackSubtreeOf
+} from '../model/types'
 
 function automationOfTrack(state: ProjectState, trackId: string) {
   return Object.values(state.automation).filter((p) => p.trackId === trackId)
@@ -34,15 +40,42 @@ export function invert(state: ProjectState, op: Operation): Operation | null {
     case 'track/delete': {
       const track = state.tracks[op.trackId]
       if (!track) return null
+      // The delete cascades over the subtree; restore every member (each
+      // at its original trackOrder index) plus all their content.
+      const subtree = trackSubtreeOf(state, op.trackId)
+      const rest = subtree.filter((t) => t.id !== op.trackId)
       return {
         type: 'track/create',
         track,
         index: state.trackOrder.indexOf(op.trackId),
-        clips: clipsOfTrack(state, op.trackId),
-        automation: automationOfTrack(state, op.trackId),
-        notes: notesOfTrack(state, op.trackId),
-        plugins: pluginsOfTrack(state, op.trackId)
+        clips: subtree.flatMap((t) => clipsOfTrack(state, t.id)),
+        automation: subtree.flatMap((t) => automationOfTrack(state, t.id)),
+        notes: subtree.flatMap((t) => notesOfTrack(state, t.id)),
+        plugins: subtree.flatMap((t) => pluginsOfTrack(state, t.id)),
+        ...(rest.length > 0
+          ? { descendants: rest.map((t) => ({ track: t, index: state.trackOrder.indexOf(t.id) })) }
+          : {})
       }
+    }
+
+    case 'track/setParent': {
+      const track = state.tracks[op.trackId]
+      if (!track) return null
+      return { type: 'track/setParent', trackId: op.trackId, parentId: track.parentId }
+    }
+
+    case 'track/freeze': {
+      const track = state.tracks[op.trackId]
+      if (!track) return null
+      return track.frozenAssetId === null
+        ? { type: 'track/unfreeze', trackId: op.trackId }
+        : { type: 'track/freeze', trackId: op.trackId, assetId: track.frozenAssetId }
+    }
+
+    case 'track/unfreeze': {
+      const track = state.tracks[op.trackId]
+      if (!track || track.frozenAssetId === null) return null
+      return { type: 'track/freeze', trackId: op.trackId, assetId: track.frozenAssetId }
     }
 
     case 'track/setVolume': {
@@ -165,7 +198,14 @@ export function invert(state: ProjectState, op: Operation): Operation | null {
     case 'track/reorder': {
       const index = state.trackOrder.indexOf(op.trackId)
       if (index === -1) return null
-      return { type: 'track/reorder', trackId: op.trackId, index }
+      return {
+        type: 'track/reorder',
+        trackId: op.trackId,
+        index,
+        ...(op.parentId !== undefined
+          ? { parentId: state.tracks[op.trackId]?.parentId ?? null }
+          : {})
+      }
     }
 
     case 'clip/create':
@@ -212,6 +252,24 @@ export function invert(state: ProjectState, op: Operation): Operation | null {
       return { type: 'clip/setColor', clipId: op.clipId, color: clip.color }
     }
 
+    case 'clip/setFades': {
+      const clip = state.clips[op.clipId]
+      if (!clip) return null
+      return { type: 'clip/setFades', clipId: op.clipId, fadeIn: clip.fadeIn, fadeOut: clip.fadeOut }
+    }
+
+    case 'clip/setPlayback': {
+      const clip = state.clips[op.clipId]
+      if (!clip) return null
+      return {
+        type: 'clip/setPlayback',
+        clipId: op.clipId,
+        reverse: clip.reverse,
+        pitch: clip.pitch,
+        stretch: clip.stretch
+      }
+    }
+
     case 'clip/split': {
       const clip = state.clips[op.clipId]
       if (!clip) return null
@@ -222,7 +280,7 @@ export function invert(state: ProjectState, op: Operation): Operation | null {
       const left = state.clips[op.clipId]
       const right = state.clips[op.rightClipId]
       if (!left || !right) return null
-      // Reconstruct the right clip (and any gap) exactly as it was.
+      // Reconstruct the right clip (and any gap/fades) exactly as it was.
       return {
         type: 'clip/split',
         clipId: op.clipId,
@@ -230,7 +288,9 @@ export function invert(state: ProjectState, op: Operation): Operation | null {
         rightClipId: right.id,
         rightName: right.name,
         rightColor: right.color,
-        leftDuration: left.duration
+        leftDuration: left.duration,
+        rightFades: [right.fadeIn, right.fadeOut],
+        leftFadeOut: left.fadeOut
       }
     }
 

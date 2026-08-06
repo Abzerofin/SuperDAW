@@ -99,7 +99,12 @@ function dispatchImported(
       duration: durationTicks,
       assetId: asset.id,
       offset: 0,
-      color: null
+      color: null,
+      fadeIn: 0,
+      fadeOut: 0,
+      reverse: false,
+      pitch: 0,
+      stretch: 1
     },
     notes
   })
@@ -185,7 +190,12 @@ export function createClipFromBayAsset(
       duration: clipDurationTicks(asset, totalTicks),
       assetId: asset.id,
       offset: 0,
-      color: null
+      color: null,
+      fadeIn: 0,
+      fadeOut: 0,
+      reverse: false,
+      pitch: 0,
+      stretch: 1
     },
     notes
   })

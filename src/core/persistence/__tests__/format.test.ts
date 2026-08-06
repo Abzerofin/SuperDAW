@@ -20,6 +20,8 @@ function sampleState() {
       color: '#fff',
       muted: false,
       soloed: true,
+      parentId: null,
+      frozenAssetId: null,
       volume: 0.9,
       pan: 0.25,
       synth: {}
@@ -40,7 +42,14 @@ function sampleState() {
       duration: 3840,
       assetId: 'ast_1',
       offset: 480,
-      color: null
+      color: null,      fadeIn: 120,
+      fadeOut: 240,
+
+      reverse: false,
+
+      pitch: 0,
+
+      stretch: 1
     },
     notes: [{ id: 'n1', clipId: 'c1', pitch: 60, start: 0, duration: 960, velocity: 100 }]
   })
@@ -94,6 +103,36 @@ suite('project file format', () => {
     expect(parsed.state.tracks['t1'].pan).toBe(0)
     expect(parsed.state.masterVolume).toBe(1)
     expect(parsed.state.automation).toEqual({})
+  })
+
+  test('pre-playback files load with reverse/pitch/stretch defaulted on clips', () => {
+    const state = sampleState()
+    const legacyClips = Object.fromEntries(
+      Object.entries(state.clips).map(([id, c]) => {
+        const { reverse: _r, pitch: _p, stretch: _s, ...legacy } = c
+        return [id, legacy]
+      })
+    )
+    const legacyState = { ...state, clips: legacyClips }
+    const parsed = parseProjectJson(JSON.stringify({ formatVersion: 2, state: legacyState, assets: [] }))
+    expect(parsed.state.clips['c1'].reverse).toBe(false)
+    expect(parsed.state.clips['c1'].pitch).toBe(0)
+    expect(parsed.state.clips['c1'].stretch).toBe(1)
+  })
+
+  test('per-clip loop fields from older files are dropped, not carried forward', () => {
+    const state = sampleState()
+    const withLoop = {
+      ...state,
+      clips: Object.fromEntries(
+        Object.entries(state.clips).map(([id, c]) => [id, { ...c, loop: true, loopLength: 480 }])
+      )
+    }
+    const parsed = parseProjectJson(
+      JSON.stringify({ formatVersion: 2, state: withLoop, assets: [] })
+    )
+    expect('loop' in parsed.state.clips['c1']).toBe(false)
+    expect('loopLength' in parsed.state.clips['c1']).toBe(false)
   })
 
   test('v1 files with legacy effects load as builtin plugin instances', () => {

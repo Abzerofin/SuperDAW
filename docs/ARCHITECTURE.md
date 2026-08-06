@@ -83,10 +83,14 @@ and the network invisible.
 
 ## Audio engine (`src/audio`)
 
-Routing: clip sources → per-track `GainNode` → master `GainNode` → analyser
-→ output. The engine (`engine.ts`) is independent of React and of the
-future collaboration layer; it consumes the project store, transport, and
-asset store through narrow structural interfaces.
+Routing per track: sources (clips/synth, through per-clip fade gains) →
+inserts → autoGain (automation) → fader (mute/solo) → panner → the track's
+folder bus (folders ARE buses — children physically route through their
+folder's chain) or master → analyser → output. Frozen tracks swap their
+sources for the pre-rendered freeze asset and bypass inserts + volume
+automation (both baked). The engine (`engine.ts`) is independent of React
+and of the collaboration layer; it consumes the project store, transport,
+and asset store through narrow structural interfaces.
 
 - **Clock authority.** Once an `AudioContext` exists, the engine installs it
   as the transport's `TimeSource`, so the playhead and scheduled audio share
@@ -163,6 +167,84 @@ build falls back to download/file-picker. Loading is NOT an operation —
 `ProjectStore.loadProject` swaps the document and resets history; the
 future network layer will move snapshots through its own join path.
 
+## App-level state (settings, recents, shell)
+
+Everything that describes the APP rather than a project — audio device
+selection, the recent-projects index, the home/editor shell state — lives
+outside the document and outside `.sdaw` files. Persistence goes through
+one seam (`renderer/state/appStorage.ts`): Electron stores a JSON file in
+`userData` via `appdata:get/set` IPC; the browser build falls back to
+localStorage. A future account system is one new backend behind that seam.
+
+- **Recent projects** (`state/recentProjects.ts`) power the home screen.
+  Metadata (name, tempo, signature, duration, track count) is captured
+  from the already-loaded `ProjectState` on every save/open — the index
+  never parses project files.
+- **Audio devices** (`state/audioDevices.ts`): output switches live via
+  `AudioContext.setSinkId`; the recorder passes the chosen input as an
+  `ideal` deviceId so the platform falls back gracefully. On
+  `devicechange` a vanished selection reverts to the default with a
+  one-shot status-bar notice (never a popup).
+- **Per-track input** (`state/trackInputs.ts`): each track's capture
+  device, hardware channel selection (mono channel N / stereo pair) and
+  monitoring. Machine-specific by nature — a device id means nothing on a
+  collaborator's machine, the same reason descriptors never carry
+  filesystem paths — so it stays out of the document and syncs nothing.
+  Streams are shared and reference-counted per device; `audio/input.ts`
+  builds the splitter/merger tap that selects channels, and the SAME tap
+  feeds monitoring (into the track chain, so you hear your own inserts)
+  and recording, so what you hear is what gets captured. Monitoring never
+  persists across launches and is dropped when a project closes.
+- **Shell** (`state/appShell.ts`): home vs. editor view. The home screen
+  is the primary launcher; "Return to Home" keeps the project loaded.
+
+## Looping (the cycle region)
+
+Looping is a TRANSPORT feature, not a clip property: a region on the ruler
+that playback cycles through, repeating everything inside it. Like the
+playhead it is per-user ephemeral state (`state/transport.ts`) — one
+collaborator auditioning a chorus must not hijack anyone else's playback —
+so it is neither an operation nor part of the document.
+
+Two pieces make it exact:
+
+- **Position** wraps with pure modulo math off the audio clock inside
+  `positionTicks()`. Nothing polls, and the drawn playhead can never
+  disagree with what is heard. Starting before the region plays the run-up
+  once, then cycles.
+- **Audio** is pre-scheduled per iteration. `scheduleClips`/`scheduleNotes`
+  take an `untilTicks` bound, so the engine queues one pass per iteration
+  anchored at that iteration's exact wrap time (`AudioEngine.scheduleAll`
+  + a lookahead top-up). Because every source already has its precise
+  `when`, a late timer tick cannot dent the loop's timing — the seam is
+  sample-accurate, not frame-accurate.
+
+The metronome keeps its own anchor and re-syncs when the playhead jumps
+back, since it counts beats linearly and only queues ~150 ms ahead.
+
+An earlier per-clip `loop`/`loopLength` model was removed: enabling it set
+the period to the clip's own length, so it produced exactly one iteration
+and appeared to do nothing. Loading an older project simply drops those
+fields.
+
+## Clip playback (reverse / pitch / stretch)
+
+`Clip.reverse`, `Clip.pitch` (semitones) and `Clip.stretch` (time factor)
+are document state driven by one `clip/setPlayback` op, so clip editing is
+undoable, saved and synced like any other edit. `clipRate(clip)` — pure, in
+`core/model/types` — folds pitch and stretch into the single resampling
+rate the buffer-source primitives expose, and `scheduleClips` works in
+BUFFER seconds (`durationSec * rate` = the clip's timeline window), so
+looping, trimming and mid-clip resume all stay correct under resampling.
+Reversed clips read a mirrored copy of the ASSET, cached once per asset by
+`AssetStore.reversedBuffer` and shared by every clip using it.
+
+**These are resampling, i.e. tape/sampler behaviour**: transposing also
+changes how fast the material is consumed, and time-scaling transposes.
+Formant-preserving independent stretch needs the PSOLA/phase-vocoder
+worklet the roadmap defers to its own DSP milestone; the UI says so rather
+than implying otherwise. Slicing is the existing `clip/split`.
+
 ## Time
 
 Musical time is integer ticks at `PPQ = 960` (`src/core/model/timebase.ts`).
@@ -174,6 +256,14 @@ audio engine milestone.
 
 - Dark, dense, professional. All colors come from CSS variables in
   `styles.css`.
+- Track headers show only what is used constantly — name, pan knob, volume
+  slider (whose bar doubles as a live per-track meter, painted straight to
+  the DOM from one rAF loop so metering never re-renders React),
+  mute/solo, plus arm and monitor on audio tracks. Everything else lives
+  behind the ⋯ menu, which is the same menu right-click opens: one
+  definition, two entry points.
+- Right-clicking a clip opens its editing menu: slice, reverse, pitch,
+  length, fit-to-material and colour.
 - Timeline is a CSS grid with sticky ruler/headers and absolutely positioned
   clip + playhead overlay layers; geometry constants in
   `components/timeline/geometry.ts`.
@@ -233,7 +323,8 @@ default).
    sources into the same track chains. Piano-roll bottom-dock editor
    (double-click a MIDI clip), mini note previews on clips.
 
-8. ✅ **Recording** — arm audio tracks (ephemeral, per-user), transport
+8. ✅ **Recording** — per-track input/channels (see App-level state); arm
+   audio tracks (ephemeral, per-user), transport
    record button captures the input device via an AudioWorklet (raw PCM,
    no monitoring path). Stopping encodes a PCM16 WAV, registers it as a
    normal asset + File Bay entry, and creates clips at the record start
@@ -282,6 +373,44 @@ default).
     `CollabNetworking` interface (`src/net`) with relay and LAN
     implementations — the UI never sees a WebSocket. LAN sessions remain
     (code length picks the transport in one Join box).
+
+13. ✅ **Professional workflow** — (clip looping shipped here was later
+    replaced by the transport cycle region, see above). Pan
+    became a rotary knob, and automation gained `param: 'pan'` (0..1 ↦
+    −1..+1 linear ramps own the panner while points exist). Duplicate
+    track (⧉ / Ctrl+Shift+D) is a fully-materialized `track/create` with
+    fresh ids built in core — deliberately NOT a `track/duplicate` op,
+    which would mint divergent ids per peer. Home-screen launcher with a
+    searchable local recent-projects index; app-level storage seam
+    (userData JSON over IPC, localStorage in the browser); audio device
+    settings (live `setSinkId` output switch, `ideal` input constraint,
+    devicechange fallback + one-shot notice); in-app settings window
+    (General + Audio live, other sections stubbed); File menu grew Open
+    Recent, Close Project and Return to Home.
+
+14. ✅ **Professional workflow II** — track freeze (`Track.frozenAssetId`
+    + `track/freeze`/`unfreeze` ops; the render is an ordinary asset made
+    pre-fader by `renderTrackFreeze`, so fader/pan/mute/solo stay live,
+    peers receive it via normal asset transfer, and machines missing
+    plugins hear the identical audio — the plugin-compat foundation).
+    Folder tracks (`kind: 'folder'` + `parentId` on every track; the tree
+    derives from flat `trackOrder`, folders are real buses in the graph,
+    `track/delete` cascades with a subtree-restoring invert via
+    `track/create.descendants`, `track/reorder` re-parents atomically;
+    collapse is ephemeral). Track presets (`core/persistence/trackPreset`
+    — portable validated JSON of mixer/synth/insert chain by descriptor,
+    loaded as a plain `track/create`). Clip fade handles
+    (`Clip.fadeIn/fadeOut` + `clip/setFades`; raised-cosine envelopes,
+    pure math shared by engine and mixdown; split/merge carry fades so
+    inverts reconstruct exactly). Ruler modes (bars · min:sec · samples,
+    ephemeral). Project metadata (`createdAt` in the document; recents
+    index derives duration/plugin count/missing assets/compat at
+    save/open). Command palette (Ctrl+P; entries derived from the
+    document, actions reuse the same functions as menus). Health panel
+    (status-bar popover of read-only observers: loop lag, heap, engine
+    latency, collab transfers, missing assets, plugin compat). Routing
+    visualizer (read-only derivation of a track's actual signal path
+    through inserts and folder buses to master).
 
 Roadmap beyond: VST3 hosting (native module; first consumer of the
 provider/`stateBlob` contracts), collaborator audio streaming + proxy

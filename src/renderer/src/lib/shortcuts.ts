@@ -1,8 +1,11 @@
 import { useEffect } from 'react'
+import { buildDuplicateTrackOp } from '@core/ops/duplicateTrack'
 import { projectStore } from '@/state/projectStore'
 import { transport } from '@/state/transport'
 import { selection } from '@/state/selection'
 import { commentUi } from '@/state/commentUi'
+import { appShell } from '@/state/appShell'
+import { paletteUi } from '@/state/paletteUi'
 import { newProject, openProject, saveProject } from './projectFile'
 import {
   copySelectedClip,
@@ -20,13 +23,31 @@ export function useGlobalShortcuts(): void {
       if (target.tagName === 'INPUT' || target.tagName === 'TEXTAREA' || target.isContentEditable)
         return
 
+      const mod = e.ctrlKey || e.metaKey
+
+      if (mod && e.key.toLowerCase() === 'p' && appShell.view === 'project') {
+        e.preventDefault() // overrides the browser's print dialog
+        paletteUi.toggle()
+        return
+      }
+
+      // On the home screen only the launcher shortcuts apply.
+      if (appShell.view === 'home') {
+        if (mod && e.key.toLowerCase() === 'o') {
+          e.preventDefault()
+          void openProject()
+        } else if (mod && e.shiftKey && e.key.toLowerCase() === 'n') {
+          e.preventDefault()
+          newProject()
+        }
+        return
+      }
+
       if (e.code === 'Space') {
         e.preventDefault()
         transport.toggle()
         return
       }
-
-      const mod = e.ctrlKey || e.metaKey
       if (mod && e.key.toLowerCase() === 's') {
         e.preventDefault()
         void saveProject(e.shiftKey) // Ctrl+Shift+S = Save As
@@ -69,7 +90,18 @@ export function useGlobalShortcuts(): void {
       }
       if (mod && e.key.toLowerCase() === 'd') {
         e.preventDefault()
-        duplicateSelectedClip()
+        if (e.shiftKey) {
+          // Ctrl+Shift+D duplicates the selected clip's track.
+          const clip = selection.selectedClipId
+            ? projectStore.state.clips[selection.selectedClipId]
+            : undefined
+          if (clip) {
+            const op = buildDuplicateTrackOp(projectStore.state, clip.trackId)
+            if (op) projectStore.dispatch(op)
+          }
+        } else {
+          duplicateSelectedClip()
+        }
         return
       }
       if (mod && e.key.toLowerCase() === 'e') {

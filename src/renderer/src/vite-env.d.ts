@@ -12,6 +12,13 @@ interface Window {
       defaultName: string
     }): Promise<string | null>
     openProjectFile(): Promise<{ path: string; name: string; data: Uint8Array } | null>
+    openProjectPath(path: string): Promise<{ path: string; name: string; data: Uint8Array } | null>
+    appDataGet(key: string): Promise<unknown>
+    appDataSet(key: string, value: unknown): Promise<void>
+    openFile(args: {
+      filterName: string
+      ext: string
+    }): Promise<{ path: string; name: string; data: Uint8Array } | null>
     exportFile(args: {
       data: Uint8Array
       defaultName: string

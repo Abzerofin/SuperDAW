@@ -1,4 +1,4 @@
-import type { PluginInstance, ProjectState, Track } from '../model/types'
+import type { Clip, PluginInstance, ProjectState, Track } from '../model/types'
 import { createEmptyProject } from '../model/types'
 import { synthDefaults, EFFECT_DEFS, type EffectType } from '../model/effects'
 import { builtinEffectDescriptor } from '../plugins/builtin'
@@ -40,7 +40,7 @@ export function assetPathInArchive(entry: AssetManifestEntry): string {
   return `assets/${entry.id}.${entry.ext}`
 }
 
-/** Asset ids referenced by the document (clips or bay entries). */
+/** Asset ids referenced by the document (clips, bay entries, frozen tracks). */
 export function referencedAssetIds(state: ProjectState): Set<string> {
   const ids = new Set<string>()
   for (const clip of Object.values(state.clips)) {
@@ -48,6 +48,9 @@ export function referencedAssetIds(state: ProjectState): Set<string> {
   }
   for (const node of Object.values(state.files)) {
     if (node.assetId) ids.add(node.assetId)
+  }
+  for (const track of Object.values(state.tracks)) {
+    if (track.frozenAssetId) ids.add(track.frozenAssetId)
   }
   return ids
 }
@@ -112,10 +115,33 @@ export function parseProjectJson(text: string): ProjectFileJson {
       ...legacy,
       volume: legacy.volume ?? 1,
       pan: legacy.pan ?? 0,
-      synth: legacy.synth ?? (legacy.kind === 'midi' ? synthDefaults() : {})
+      synth: legacy.synth ?? (legacy.kind === 'midi' ? synthDefaults() : {}),
+      // Pre-folder/freeze files: root-level, unfrozen.
+      parentId: legacy.parentId ?? null,
+      frozenAssetId: legacy.frozenAssetId ?? null
     }
   }
-  const full: ProjectState = { ...merged, tracks, plugins: migratePlugins(merged) }
+  // Clips from before fades/playback settings lack those fields. Per-clip
+  // looping was replaced by the transport's loop region, so `loop`/
+  // `loopLength` from those files are dropped rather than carried forward.
+  const clips: Record<string, Clip> = {}
+  for (const [id, clip] of Object.entries(merged.clips)) {
+    const { loop: _loop, loopLength: _loopLength, ...rest } = clip as Clip & {
+      loop?: boolean
+      loopLength?: number
+    }
+    const legacy = rest as Omit<Clip, 'fadeIn' | 'fadeOut' | 'reverse' | 'pitch' | 'stretch'> &
+      Partial<Clip>
+    clips[id] = {
+      ...legacy,
+      fadeIn: legacy.fadeIn ?? 0,
+      fadeOut: legacy.fadeOut ?? 0,
+      reverse: legacy.reverse ?? false,
+      pitch: legacy.pitch ?? 0,
+      stretch: legacy.stretch ?? 1
+    }
+  }
+  const full: ProjectState = { ...merged, tracks, clips, plugins: migratePlugins(merged) }
   // v1 stored inserts under `effects`; migratePlugins consumed it.
   delete (full as { effects?: unknown }).effects
   return { formatVersion: candidate.formatVersion, state: full, assets }

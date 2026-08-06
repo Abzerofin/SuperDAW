@@ -4,7 +4,8 @@ import type { PluginDescriptor } from '../plugins/descriptor'
 export type TrackId = string
 export type ClipId = string
 export type FileNodeId = string
-export type TrackKind = 'audio' | 'midi'
+/** 'folder' tracks are grouping buses: no clips, children route through them. */
+export type TrackKind = 'audio' | 'midi' | 'folder'
 export type FileNodeKind = 'folder' | 'audio' | 'midi'
 
 /**
@@ -41,6 +42,41 @@ export interface Clip {
   readonly offset: number
   /** null = inherit the track color. */
   readonly color: string | null
+  /** Fade-in length in ticks from the clip start (0 = none). Audio clips only. */
+  readonly fadeIn: number
+  /** Fade-out length in ticks before the clip end (0 = none). Audio clips only. */
+  readonly fadeOut: number
+  /** Play the source material backwards. Audio clips only. */
+  readonly reverse: boolean
+  /**
+   * Transposition in semitones (may be fractional). Implemented by
+   * RESAMPLING, i.e. tape/sampler behaviour: pitching up also consumes the
+   * source faster. Formant-preserving pitch shifting arrives with the
+   * dedicated DSP milestone.
+   */
+  readonly pitch: number
+  /**
+   * Time factor for the source: 1 = original speed, 2 = plays half speed
+   * (so the material covers twice the timeline), 0.5 = double speed. Also
+   * resampling, so it transposes with the same tape behaviour.
+   */
+  readonly stretch: number
+}
+
+/** Clamp bounds shared by the reducer and the UI controls. */
+export const MIN_PITCH = -24
+export const MAX_PITCH = 24
+export const MIN_STRETCH = 0.25
+export const MAX_STRETCH = 4
+
+/**
+ * How fast a clip's buffer is read: semitone transposition and time factor
+ * both land on the one resampling rate the audio primitives give us.
+ * 1 = untouched. Pure so scheduling, rendering and the UI agree exactly.
+ */
+export function clipRate(clip: Clip): number {
+  const stretch = clip.stretch > 0 ? clip.stretch : 1
+  return Math.pow(2, clip.pitch / 12) / stretch
 }
 
 export interface Track {
@@ -56,6 +92,19 @@ export interface Track {
   readonly pan: number
   /** Built-in synth parameters (MIDI tracks; empty for audio). See SYNTH_DEFS. */
   readonly synth: Readonly<Record<string, number>>
+  /**
+   * Enclosing folder track, or null at root. Sibling order derives from
+   * `trackOrder`; the audio graph routes a child through its folder's
+   * chain (folders are buses).
+   */
+  readonly parentId: TrackId | null
+  /**
+   * When set, the track is FROZEN: playback uses this rendered asset
+   * (from tick 0, pre-fader: inserts + volume automation baked) and the
+   * live clip/note/insert processing is skipped. The original content
+   * stays fully intact in the document — unfreezing just clears this.
+   */
+  readonly frozenAssetId: string | null
 }
 
 export type PluginInstanceId = string
@@ -99,12 +148,15 @@ export interface Note {
   readonly velocity: number
 }
 
-export type AutomationParam = 'volume'
+export type AutomationParam = 'volume' | 'pan'
 export type AutomationPointId = string
 
 /**
- * One point on a track's automation curve. `value` is normalized 0..1 and
- * MULTIPLIES the fader (modulation semantics): 1 = fader level, 0 = silence.
+ * One point on a track's automation curve. `value` is normalized 0..1.
+ * For 'volume' it MULTIPLIES the fader (modulation semantics): 1 = fader
+ * level, 0 = silence. For 'pan' it maps linearly to stereo position:
+ * 0 = hard left, 0.5 = center, 1 = hard right — and while pan automation
+ * points exist they OWN the panner (the knob is overridden).
  * Points between are linearly interpolated.
  */
 export interface AutomationPoint {
@@ -152,6 +204,8 @@ export interface Comment {
 
 export interface ProjectState {
   readonly name: string
+  /** ms epoch when the project was created; 0 = unknown (pre-metadata files). */
+  readonly createdAt: number
   readonly tempo: number
   readonly timeSignature: TimeSignature
   readonly tracks: Readonly<Record<TrackId, Track>>
@@ -166,9 +220,10 @@ export interface ProjectState {
   readonly plugins: Readonly<Record<PluginInstanceId, PluginInstance>>
 }
 
-export function createEmptyProject(name: string): ProjectState {
+export function createEmptyProject(name: string, createdAt = 0): ProjectState {
   return {
     name,
+    createdAt,
     tempo: 120,
     timeSignature: [4, 4],
     tracks: {},
@@ -182,6 +237,37 @@ export function createEmptyProject(name: string): ProjectState {
     notes: {},
     plugins: {}
   }
+}
+
+/**
+ * Whether a track's own fader should be open. Ancestor mutes are enforced
+ * physically by folder-bus routing (the folder's fader closes), so this
+ * answers only the per-track question: not muted, and — when any solo is
+ * active anywhere — itself, an ancestor, or a descendant is soloed
+ * (a folder bus must stay open for a soloed child inside it).
+ */
+export function isTrackAudible(state: ProjectState, trackId: TrackId): boolean {
+  const track = state.tracks[trackId]
+  if (!track || track.muted) return false
+  const all = Object.values(state.tracks)
+  if (!all.some((t) => t.soloed)) return true
+  return all.some(
+    (t) =>
+      t.soloed &&
+      (isTrackSelfOrDescendant(state, trackId, t.id) || isTrackSelfOrDescendant(state, t.id, trackId))
+  )
+}
+
+/** True when the track actually sounds: its own fader AND every ancestor bus is open. */
+export function isTrackEffectivelyAudible(state: ProjectState, trackId: TrackId): boolean {
+  let current: TrackId | null = trackId
+  const seen = new Set<TrackId>()
+  while (current !== null && !seen.has(current)) {
+    if (!isTrackAudible(state, current)) return false
+    seen.add(current)
+    current = state.tracks[current]?.parentId ?? null
+  }
+  return true
 }
 
 /** A track's insert chain in processing order. */
@@ -242,6 +328,41 @@ export function repliesTo(state: ProjectState, commentId: CommentId): Comment[] 
 
 export function clipsOfTrack(state: ProjectState, trackId: TrackId): Clip[] {
   return Object.values(state.clips).filter((c) => c.trackId === trackId)
+}
+
+/** Direct child tracks of a folder (or roots for null), in trackOrder order. */
+export function childTracksOf(state: ProjectState, parentId: TrackId | null): Track[] {
+  const out: Track[] = []
+  for (const id of state.trackOrder) {
+    const track = state.tracks[id]
+    if (track && track.parentId === parentId) out.push(track)
+  }
+  return out
+}
+
+/** True if `trackId` is `ancestorId` or lies anywhere under it. */
+export function isTrackSelfOrDescendant(
+  state: ProjectState,
+  trackId: TrackId,
+  ancestorId: TrackId
+): boolean {
+  let current: TrackId | null = trackId
+  const seen = new Set<TrackId>() // tolerate corrupt cycles
+  while (current !== null && !seen.has(current)) {
+    if (current === ancestorId) return true
+    seen.add(current)
+    current = state.tracks[current]?.parentId ?? null
+  }
+  return false
+}
+
+/** The track and every track under it, in trackOrder order (root first). */
+export function trackSubtreeOf(state: ProjectState, trackId: TrackId): Track[] {
+  const root = state.tracks[trackId]
+  if (!root) return []
+  return state.trackOrder
+    .map((id) => state.tracks[id])
+    .filter((t): t is Track => t !== undefined && isTrackSelfOrDescendant(state, t.id, trackId))
 }
 
 export function childrenOf(state: ProjectState, parentId: FileNodeId | null): FileNode[] {

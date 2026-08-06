@@ -1,0 +1,121 @@
+import { useEffect, useRef, useState } from 'react'
+import type { Track } from '@core/model/types'
+import { MAX_GAIN } from '@core/model/types'
+import { projectStore } from '@/state/projectStore'
+import { audioEngine } from '@/state/audioInstance'
+import { capturePointer } from '@/lib/pointer'
+import { Knob } from '../mixer/Knob'
+
+/**
+ * The mixer essentials that live on the track header itself: a stereo pan
+ * knob and a volume slider whose track doubles as a live level meter.
+ * Both follow the one-gesture-one-op rule — drags preview through the
+ * engine and dispatch a single operation on release.
+ */
+
+function panLabel(pan: number): string {
+  if (Math.abs(pan) < 0.01) return 'C'
+  return `${Math.round(Math.abs(pan) * 100)}${pan < 0 ? 'L' : 'R'}`
+}
+
+function gainToDb(gain: number): string {
+  if (gain <= 0.0001) return '-∞'
+  const db = 20 * Math.log10(gain)
+  return `${db >= 0 ? '+' : ''}${db.toFixed(1)}`
+}
+
+export function TrackStripControls({ track }: { track: Track }): React.JSX.Element {
+  return (
+    <div className="track-strip">
+      <Knob
+        value={track.pan}
+        min={-1}
+        max={1}
+        defaultValue={0}
+        size={26}
+        format={panLabel}
+        title="Pan · drag vertically (Shift = fine) · double-click for centre"
+        onPreview={(pan) => audioEngine.previewTrackPan(track.id, pan)}
+        onCommit={(pan) => projectStore.dispatch({ type: 'track/setPan', trackId: track.id, pan })}
+      />
+      <VolumeSlider track={track} />
+    </div>
+  )
+}
+
+function VolumeSlider({ track }: { track: Track }): React.JSX.Element {
+  const [dragGain, setDragGain] = useState<number | null>(null)
+  const barRef = useRef<HTMLDivElement>(null)
+  const meterRef = useRef<HTMLDivElement>(null)
+  const shown = dragGain ?? track.volume
+
+  // Live level, painted straight onto the DOM from a rAF loop so metering
+  // never re-renders React (one repaint per frame, whatever the track count).
+  useEffect(() => {
+    let raf = 0
+    let level = 0
+    const draw = (): void => {
+      // Decay toward zero, but snap to it: an asymptote would otherwise keep
+      // writing denormal widths into the DOM forever on a silent track.
+      level = Math.max(audioEngine.trackLevel(track.id), level * 0.9)
+      if (level < 0.001) level = 0
+      if (meterRef.current) {
+        meterRef.current.style.width = `${Math.min(100, level * 100)}%`
+      }
+      raf = requestAnimationFrame(draw)
+    }
+    draw()
+    return () => cancelAnimationFrame(raf)
+  }, [track.id])
+
+  const gainAt = (clientX: number): number => {
+    const rect = barRef.current?.getBoundingClientRect()
+    if (!rect) return track.volume
+    const ratio = Math.min(1, Math.max(0, (clientX - rect.left) / rect.width))
+    return ratio * MAX_GAIN
+  }
+
+  const begin = (e: React.PointerEvent): void => {
+    if (e.button !== 0) return
+    e.stopPropagation() // don't start a track-reorder drag
+    capturePointer(e)
+    const next = gainAt(e.clientX)
+    setDragGain(next)
+    audioEngine.previewTrackVolume(track.id, next)
+  }
+  const move = (e: React.PointerEvent): void => {
+    if (dragGain === null) return
+    const next = gainAt(e.clientX)
+    setDragGain(next)
+    audioEngine.previewTrackVolume(track.id, next)
+  }
+  const end = (): void => {
+    if (dragGain === null) return
+    if (dragGain !== track.volume) {
+      projectStore.dispatch({ type: 'track/setVolume', trackId: track.id, volume: dragGain })
+    }
+    setDragGain(null)
+  }
+
+  return (
+    <div className="track-vol">
+      <div
+        className="track-vol-bar"
+        ref={barRef}
+        title="Volume · drag · double-click for 0 dB"
+        onPointerDown={begin}
+        onPointerMove={move}
+        onPointerUp={end}
+        onDoubleClick={(e) => {
+          e.stopPropagation()
+          projectStore.dispatch({ type: 'track/setVolume', trackId: track.id, volume: 1 })
+        }}
+      >
+        <div className="track-vol-meter" ref={meterRef} />
+        <div className="track-vol-fill" style={{ width: `${(shown / MAX_GAIN) * 100}%` }} />
+        <div className="track-vol-thumb" style={{ left: `${(shown / MAX_GAIN) * 100}%` }} />
+      </div>
+      <span className="track-vol-db mono">{gainToDb(shown)}</span>
+    </div>
+  )
+}

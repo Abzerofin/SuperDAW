@@ -29,6 +29,14 @@ export function describe(state: ProjectState, op: Operation): string | null {
       return `${op.soloed ? 'Soloed' : 'Unsoloed'} "${trackName(state, op.trackId)}"`
     case 'track/reorder':
       return `Reordered track "${trackName(state, op.trackId)}"`
+    case 'track/setParent':
+      return op.parentId === null
+        ? `Moved "${trackName(state, op.trackId)}" out of its folder`
+        : `Moved "${trackName(state, op.trackId)}" into "${trackName(state, op.parentId)}"`
+    case 'track/freeze':
+      return `Froze track "${trackName(state, op.trackId)}"`
+    case 'track/unfreeze':
+      return `Unfroze track "${trackName(state, op.trackId)}"`
     case 'track/setVolume':
       return `Set "${trackName(state, op.trackId)}" volume to ${gainToDb(op.volume)}`
     case 'track/setPan':
@@ -123,6 +131,23 @@ export function describe(state: ProjectState, op: Operation): string | null {
       return `Renamed clip "${clipName(state, op.clipId)}" to "${op.name}"`
     case 'clip/setColor':
       return `Recolored clip "${clipName(state, op.clipId)}"`
+    case 'clip/setFades':
+      return `Adjusted fades on clip "${clipName(state, op.clipId)}"`
+    case 'clip/setPlayback': {
+      // One op covers three settings: name whichever actually changed.
+      const clip = state.clips[op.clipId]
+      const name = clipName(state, op.clipId)
+      if (clip && clip.reverse !== op.reverse) {
+        return `${op.reverse ? 'Reversed' : 'Un-reversed'} clip "${name}"`
+      }
+      if (clip && clip.pitch !== op.pitch) {
+        return `Pitched clip "${name}" to ${op.pitch > 0 ? '+' : ''}${op.pitch} st`
+      }
+      if (clip && clip.stretch !== op.stretch) {
+        return `Stretched clip "${name}" to ${Math.round(op.stretch * 100)}%`
+      }
+      return `Changed playback of clip "${name}"`
+    }
     case 'clip/split':
       return `Split clip "${clipName(state, op.clipId)}"`
     case 'clip/merge':

@@ -1,0 +1,202 @@
+import { useEffect, useState } from 'react'
+import { audioEngine } from '@/state/audioInstance'
+import { audioDevices, useAudioDevices } from '@/state/audioDevices'
+import { collab, useCollab } from '@/state/collab'
+import {
+  IMPLEMENTED_SECTIONS,
+  settingsUi,
+  useSettingsUi,
+  type SettingsSection
+} from '@/state/settingsUi'
+
+/**
+ * The settings window: an in-app overlay (professional, no OS dialogs)
+ * with a section sidebar built for expansion — General and Audio are live,
+ * the rest are placeholders that gain panes without touching this shell.
+ * Everything here is app-level state, fully independent of project files.
+ */
+
+const SECTIONS: Array<{ id: SettingsSection; label: string }> = [
+  { id: 'general', label: 'General' },
+  { id: 'audio', label: 'Audio' },
+  { id: 'appearance', label: 'Appearance' },
+  { id: 'shortcuts', label: 'Keyboard Shortcuts' },
+  { id: 'collaboration', label: 'Collaboration' },
+  { id: 'plugins', label: 'Plugins' }
+]
+
+export function SettingsWindow(): React.JSX.Element | null {
+  const ui = useSettingsUi()
+
+  useEffect(() => {
+    if (!ui.isOpen) return
+    const onKeyDown = (e: KeyboardEvent): void => {
+      if (e.key === 'Escape') settingsUi.close()
+    }
+    window.addEventListener('keydown', onKeyDown)
+    return () => window.removeEventListener('keydown', onKeyDown)
+  }, [ui.isOpen])
+
+  if (!ui.isOpen) return null
+
+  return (
+    <div className="settings-backdrop" onPointerDown={() => settingsUi.close()}>
+      <div className="settings-window" onPointerDown={(e) => e.stopPropagation()}>
+        <div className="settings-sidebar">
+          <div className="settings-title">Settings</div>
+          {SECTIONS.map((s) => (
+            <button
+              key={s.id}
+              className={`settings-nav ${ui.section === s.id ? 'settings-nav-active' : ''} ${
+                IMPLEMENTED_SECTIONS.has(s.id) ? '' : 'settings-nav-future'
+              }`}
+              onClick={() => settingsUi.setSection(s.id)}
+            >
+              {s.label}
+            </button>
+          ))}
+        </div>
+        <div className="settings-body">
+          <button className="settings-close" title="Close (Esc)" onClick={() => settingsUi.close()}>
+            ×
+          </button>
+          {ui.section === 'general' && <GeneralPane />}
+          {ui.section === 'audio' && <AudioPane />}
+          {!IMPLEMENTED_SECTIONS.has(ui.section) && (
+            <div className="settings-pane">
+              <h2>{SECTIONS.find((s) => s.id === ui.section)?.label}</h2>
+              <p className="settings-dim">Coming in a future milestone.</p>
+            </div>
+          )}
+        </div>
+      </div>
+    </div>
+  )
+}
+
+function GeneralPane(): React.JSX.Element {
+  useCollab()
+  const [name, setName] = useState(collab.displayName)
+
+  return (
+    <div className="settings-pane">
+      <h2>General</h2>
+      <div className="settings-field">
+        <label htmlFor="settings-display-name">Display name</label>
+        <input
+          id="settings-display-name"
+          value={name}
+          onChange={(e) => setName(e.target.value)}
+          onBlur={() => collab.setDisplayName(name)}
+          onKeyDown={(e) => {
+            if (e.key === 'Enter') collab.setDisplayName(name)
+          }}
+        />
+        <p className="settings-dim">
+          Shown to collaborators in sessions, on your cursor and in chat.
+        </p>
+      </div>
+      <div className="settings-field">
+        <label>Projects</label>
+        <p className="settings-dim">
+          Projects are local .sdaw files — no account, no cloud. Collaboration sessions run over a
+          join code from the Collab menu.
+        </p>
+      </div>
+    </div>
+  )
+}
+
+function AudioPane(): React.JSX.Element {
+  const devices = useAudioDevices()
+  // The context reports the live sample rate / channel layout; creating it
+  // here is safe (it starts suspended until the first transport gesture).
+  const [info, setInfo] = useState(audioEngine.contextInfo())
+  useEffect(() => {
+    audioEngine.ensureContext()
+    setInfo(audioEngine.contextInfo())
+    void audioDevices.refresh(false)
+  }, [])
+
+  return (
+    <div className="settings-pane">
+      <h2>Audio</h2>
+
+      {!devices.labelsVisible && (
+        <div className="settings-field">
+          <button className="corner-btn" onClick={() => void devices.revealLabels()}>
+            Show device names…
+          </button>
+          <p className="settings-dim">
+            The browser hides device names until microphone access is granted once.
+          </p>
+        </div>
+      )}
+
+      <div className="settings-field">
+        <label htmlFor="settings-output">Output device</label>
+        <select
+          id="settings-output"
+          value={devices.outputDeviceId ?? ''}
+          onChange={(e) => void devices.setOutput(e.target.value || null)}
+        >
+          <option value="">System default</option>
+          {devices.outputs
+            .filter((d) => d.deviceId !== '')
+            .map((d) => (
+              <option key={d.deviceId} value={d.deviceId}>
+                {d.label}
+              </option>
+            ))}
+        </select>
+        <p className="settings-dim">Switches live — playback keeps running.</p>
+      </div>
+
+      <div className="settings-field">
+        <label htmlFor="settings-input">Input device</label>
+        <select
+          id="settings-input"
+          value={devices.inputDeviceId ?? ''}
+          onChange={(e) => void devices.setInput(e.target.value || null)}
+        >
+          <option value="">System default</option>
+          {devices.inputs
+            .filter((d) => d.deviceId !== '')
+            .map((d) => (
+              <option key={d.deviceId} value={d.deviceId}>
+                {d.label}
+              </option>
+            ))}
+        </select>
+        <p className="settings-dim">Used when recording armed tracks.</p>
+      </div>
+
+      <div className="settings-field">
+        <label>Engine</label>
+        {info ? (
+          <div className="settings-info mono">
+            <span>Sample rate</span>
+            <span>{info.sampleRate} Hz</span>
+            <span>Output channels</span>
+            <span>{info.outputChannels}</span>
+            {info.baseLatencySec !== null && (
+              <>
+                <span>Output latency</span>
+                <span>
+                  ≈ {Math.round(info.baseLatencySec * 1000 * 10) / 10} ms (
+                  {Math.round(info.baseLatencySec * info.sampleRate)} frames)
+                </span>
+              </>
+            )}
+          </div>
+        ) : (
+          <p className="settings-dim">The audio engine has not started yet.</p>
+        )}
+        <p className="settings-dim">
+          If a selected device disappears, SuperDAW falls back to the closest available one and
+          notes it in the status bar.
+        </p>
+      </div>
+    </div>
+  )
+}

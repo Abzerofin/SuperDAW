@@ -27,6 +27,8 @@ function makeTrack(id: string): Track {
     color: '#5b8def',
     muted: false,
     soloed: false,
+    parentId: null,
+    frozenAssetId: null,
     volume: 1,
     pan: 0,
     synth: {}

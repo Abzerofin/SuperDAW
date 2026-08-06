@@ -1,11 +1,16 @@
-import { useEffect, useRef, useState } from 'react'
+import { useEffect, useReducer, useRef, useState } from 'react'
 import type { ProjectState } from '@core/model/types'
 import { pluginManifest } from '@core/plugins/manifest'
+import { referencedAssetIds } from '@core/persistence/format'
 import { pluginRegistry } from '@audio/pluginRegistry'
 import { projectStore } from '@/state/projectStore'
 import { useProjectState } from '@/state/hooks'
 import { usePluginRegistry } from '@/state/pluginRegistryHook'
 import { useSessionFile } from '@/state/sessionFile'
+import { useAudioDevices } from '@/state/audioDevices'
+import { useCollab } from '@/state/collab'
+import { audioEngine, assetStore } from '@/state/audioInstance'
+import { healthSampler } from '@/state/health'
 
 export function StatusBar(): React.JSX.Element {
   const state = useProjectState()
@@ -23,6 +28,7 @@ export function StatusBar(): React.JSX.Element {
         </span>
         <span className="statusbar-dim">Local project · {fileLabel}</span>
       </div>
+      <DeviceNotice />
       <div className="statusbar-hint statusbar-dim">
         Drop audio or .mid files on a track · Double-click a lane to add a clip · Double-click a
         MIDI clip to edit notes · Right-click a clip for colors
@@ -30,8 +36,123 @@ export function StatusBar(): React.JSX.Element {
       <div className="statusbar-right statusbar-dim mono">
         {trackCount} tracks · {clipCount} clips
         <PluginManifestStatus state={state} />
+        <HealthStatus state={state} />
       </div>
     </div>
+  )
+}
+
+/**
+ * Project health, one glance deep: a status dot that opens a compact
+ * diagnostics grid. All read-only observers (engine, event-loop lag,
+ * memory, collab transfers, derived asset/plugin state); polls only while
+ * the popover is open. Unobtrusive by design.
+ */
+function HealthStatus({ state }: { state: ProjectState }): React.JSX.Element {
+  const [open, setOpen] = useState(false)
+  const [, force] = useReducer((c: number) => c + 1, 0)
+  const rootRef = useRef<HTMLSpanElement>(null)
+  const collab = useCollab()
+
+  useEffect(() => {
+    healthSampler.start()
+  }, [])
+
+  useEffect(() => {
+    if (!open) return
+    const timer = setInterval(force, 1000)
+    const onPointerDown = (e: PointerEvent): void => {
+      if (rootRef.current && !rootRef.current.contains(e.target as Node)) setOpen(false)
+    }
+    window.addEventListener('pointerdown', onPointerDown, true)
+    return () => {
+      clearInterval(timer)
+      window.removeEventListener('pointerdown', onPointerDown, true)
+    }
+  }, [open])
+
+  const missingAssets = [...referencedAssetIds(state)].filter((id) => !assetStore.get(id)).length
+  const manifest = pluginManifest(state)
+  const missingPlugins = manifest.filter((e) => pluginRegistry.status(e.descriptor) !== 'local').length
+  const transfers = [...collab.assetProgress.values()]
+  const lag = healthSampler.loopLagMs
+  const warn = missingAssets > 0 || missingPlugins > 0 || lag > 50 || collab.reconnecting
+
+  const info = audioEngine.contextInfo()
+  const heap = healthSampler.heapMb
+  const row = (label: string, value: string, bad = false): React.JSX.Element => (
+    <div key={label} className="health-row">
+      <span>{label}</span>
+      <span className={bad ? 'health-bad' : ''}>{value}</span>
+    </div>
+  )
+
+  return (
+    <span className="statusbar-plugins" ref={rootRef}>
+      {' · '}
+      <button
+        className="statusbar-plugins-btn"
+        title="Project health"
+        onClick={() => setOpen((v) => !v)}
+      >
+        <span className={`health-dot ${warn ? 'health-dot-warn' : ''}`} /> health
+      </button>
+      {open && (
+        <div className="plugin-manifest health-panel">
+          {row('Main thread lag', `${lag.toFixed(1)} ms`, lag > 50)}
+          {row('Memory (JS heap)', heap === null ? 'n/a' : `${heap.toFixed(0)} MB`)}
+          {row('Sample rate', info ? `${info.sampleRate} Hz` : 'engine idle')}
+          {row(
+            'Audio latency',
+            info?.baseLatencySec != null
+              ? `≈ ${(info.baseLatencySec * 1000).toFixed(1)} ms (${Math.round(info.baseLatencySec * info.sampleRate)} frames)`
+              : 'n/a'
+          )}
+          {row(
+            'Collaboration',
+            collab.mode === 'off'
+              ? 'solo'
+              : `${collab.mode}${collab.reconnecting ? ' — reconnecting' : ' — connected'}`,
+            collab.reconnecting
+          )}
+          {row(
+            'Asset transfers',
+            transfers.length === 0
+              ? 'none pending'
+              : `${transfers.length} active (${Math.round(
+                  (transfers.reduce((a, t) => a + t.received, 0) /
+                    Math.max(1, transfers.reduce((a, t) => a + t.total, 0))) *
+                    100
+                )}%)`
+          )}
+          {row('Missing assets', String(missingAssets), missingAssets > 0)}
+          {row(
+            'Plugin compatibility',
+            manifest.length === 0
+              ? 'no plugins in use'
+              : missingPlugins === 0
+                ? `all ${manifest.length} available`
+                : `${missingPlugins} of ${manifest.length} unavailable here`,
+            missingPlugins > 0
+          )}
+        </div>
+      )}
+    </span>
+  )
+}
+
+/** One-shot device-loss notice (the "notify once" contract — never a popup). */
+function DeviceNotice(): React.JSX.Element | null {
+  const devices = useAudioDevices()
+  if (!devices.notice) return null
+  return (
+    <button
+      className="statusbar-notice"
+      title="Dismiss"
+      onClick={() => devices.dismissNotice()}
+    >
+      ⚠ {devices.notice}
+    </button>
   )
 }
 

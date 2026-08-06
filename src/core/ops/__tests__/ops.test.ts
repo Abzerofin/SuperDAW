@@ -7,6 +7,7 @@ import { describe as describeOp } from '../describe'
 import type { Operation } from '../operations'
 import { apply } from '../apply'
 import { invert } from '../invert'
+import { buildDuplicateTrackOp } from '../duplicateTrack'
 import { ProjectStore } from '../../state/store'
 
 function track(id: string, name = id): Track {
@@ -17,6 +18,8 @@ function track(id: string, name = id): Track {
     color: '#5b8def',
     muted: false,
     soloed: false,
+    parentId: null,
+    frozenAssetId: null,
     volume: 1,
     pan: 0,
     synth: {}
@@ -24,7 +27,7 @@ function track(id: string, name = id): Track {
 }
 
 function clip(id: string, trackId: string, start = 0, duration = 960): Clip {
-  return { id, trackId, name: id, start, duration, assetId: null, offset: 0, color: null }
+  return { id, trackId, name: id, start, duration, assetId: null, offset: 0, color: null, fadeIn: 0, fadeOut: 0, reverse: false, pitch: 0, stretch: 1 }
 }
 
 function fileNode(id: string, parentId: string | null, kind: FileNode['kind'] = 'audio'): FileNode {
@@ -102,6 +105,24 @@ function baseState(): ProjectState {
     notes: [],
     plugins: []
   })
+  // t2 is frozen (its render asset is referenced by id only)
+  s = apply(s, { type: 'track/freeze', trackId: 't2', assetId: 'ast_frozen' })
+  return s
+}
+
+/** baseState plus a folder containing t1 (and its clips/notes/automation/plugin). */
+function folderState(): ProjectState {
+  let s = baseState()
+  s = apply(s, {
+    type: 'track/create',
+    track: { ...track('fold'), kind: 'folder' },
+    index: 3,
+    clips: [],
+    automation: [],
+    notes: [],
+    plugins: []
+  })
+  s = apply(s, { type: 'track/setParent', trackId: 't1', parentId: 'fold' })
   return s
 }
 
@@ -133,6 +154,8 @@ suite('apply', () => {
     apply(s, { type: 'track/delete', trackId: 't1' })
     expect(JSON.stringify(s)).toBe(frozen)
   })
+
+
 })
 
 suite('invert', () => {
@@ -180,6 +203,10 @@ suite('invert', () => {
     { type: 'clip/resize', clipId: 'c2', start: 960, duration: 1920, offset: 480 },
     { type: 'clip/rename', clipId: 'c2', name: 'Renamed Clip' },
     { type: 'clip/setColor', clipId: 'c1', color: '#e06c75' },
+    { type: 'clip/setFades', clipId: 'c1', fadeIn: 120, fadeOut: 240 },
+    { type: 'track/freeze', trackId: 't1', assetId: 'ast_f1' },
+    { type: 'track/unfreeze', trackId: 't2' },
+    { type: 'track/reorder', trackId: 't1', index: 2, parentId: null },
     { type: 'clip/split', clipId: 'c1', at: 480, rightClipId: 'cs1' },
     // c1 (0..960) and c2 (1920..2880) are non-adjacent: the merge/split
     // round-trip must restore the gap via leftDuration.
@@ -413,3 +440,148 @@ suite('ProjectStore', () => {
     expect(seen).toEqual(['local:project/setTempo', 'history:project/setTempo'])
   })
 })
+
+suite('buildDuplicateTrackOp', () => {
+  test('materializes a full copy with fresh ids and remapped references', () => {
+    const before = baseState()
+    const op = buildDuplicateTrackOp(before, 't1')
+    expect(op).not.toBeNull()
+    if (!op || op.type !== 'track/create') throw new Error('expected a track/create op')
+
+    expect(op.track.name).toBe('t1 Copy')
+    expect(op.track.id).not.toBe('t1')
+    expect(op.index).toBe(1) // right after the original
+    expect(op.clips).toHaveLength(2)
+    expect(op.notes).toHaveLength(1)
+    expect(op.automation).toHaveLength(1)
+    expect(op.plugins).toHaveLength(1)
+
+    // Every cloned entity points at the new track/clips, never the originals.
+    for (const c of op.clips) expect(c.trackId).toBe(op.track.id)
+    for (const p of op.automation) expect(p.trackId).toBe(op.track.id)
+    for (const p of op.plugins) expect(p.trackId).toBe(op.track.id)
+    const clipIds = new Set(op.clips.map((c) => c.id))
+    for (const n of op.notes) expect(clipIds.has(n.clipId)).toBe(true)
+    expect(clipIds.has('c1')).toBe(false)
+
+    // Applying it leaves the source track untouched and undo removes it all.
+    const after = apply(before, op)
+    expect(after.trackOrder).toEqual(['t1', op.track.id, 't2', 'tm'])
+    expect(after.tracks['t1']).toEqual(before.tracks['t1'])
+    const inverse = invert(before, op)
+    expect(inverse).not.toBeNull()
+    expect(apply(after, inverse!)).toEqual(before)
+  })
+
+  test('returns null for a missing track', () => {
+    expect(buildDuplicateTrackOp(baseState(), 'ghost')).toBeNull()
+  })
+})
+
+suite('track folders', () => {
+  test('setParent rejects non-folders, self and subtree cycles', () => {
+    let s = folderState()
+    expect(apply(s, { type: 'track/setParent', trackId: 't2', parentId: 't1' })).toBe(s) // audio, not folder
+    expect(apply(s, { type: 'track/setParent', trackId: 'fold', parentId: 'fold' })).toBe(s)
+    s = apply(s, {
+      type: 'track/create',
+      track: { ...track('fold2'), kind: 'folder', parentId: 'fold' },
+      index: 4,
+      clips: [],
+      automation: [],
+      notes: [],
+      plugins: []
+    })
+    // fold2 lives inside fold: moving fold under fold2 would be a cycle.
+    expect(apply(s, { type: 'track/setParent', trackId: 'fold', parentId: 'fold2' })).toBe(s)
+  })
+
+  test('deleting a folder cascades over the subtree and undo restores it atomically', () => {
+    const before = folderState()
+    const op: Operation = { type: 'track/delete', trackId: 'fold' }
+    const inverse = invert(before, op)
+    const after = apply(before, op)
+    // Folder and child (with all content) are gone
+    expect(after.tracks['fold']).toBeUndefined()
+    expect(after.tracks['t1']).toBeUndefined()
+    expect(Object.keys(after.clips)).toHaveLength(0)
+    expect(after.plugins['fxA']).toBeUndefined()
+    expect(inverse).not.toBeNull()
+    expect(apply(after, inverse!)).toEqual(before)
+  })
+
+  test('reorder with parentId moves and re-parents atomically, and inverts', () => {
+    const before = folderState()
+    // Order is [t1, t2, tm, fold]; index applies after removal, so 3 = after fold.
+    const op: Operation = { type: 'track/reorder', trackId: 't2', index: 3, parentId: 'fold' }
+    const after = apply(before, op)
+    expect(after.tracks['t2'].parentId).toBe('fold')
+    expect(after.trackOrder).toEqual(['t1', 'tm', 'fold', 't2'])
+    const inverse = invert(before, op)
+    expect(inverse).not.toBeNull()
+    expect(apply(after, inverse!)).toEqual(before)
+  })
+
+  test('clips can never land on folder tracks', () => {
+    const s = folderState()
+    expect(apply(s, { type: 'clip/create', clip: clip('cf', 'fold'), notes: [] })).toBe(s)
+    expect(apply(s, { type: 'clip/move', clipId: 'c1', trackId: 'fold', start: 0 })).toBe(s)
+  })
+
+  test('duplicating a folder clones the whole subtree with fresh remapped ids', () => {
+    const before = folderState()
+    const op = buildDuplicateTrackOp(before, 'fold')
+    if (!op || op.type !== 'track/create') throw new Error('expected track/create')
+    expect(op.track.kind).toBe('folder')
+    expect(op.track.name).toBe('fold Copy')
+    expect(op.descendants).toHaveLength(1)
+    const childCopy = op.descendants![0].track
+    expect(childCopy.name).toBe('t1') // only the root gets "Copy"
+    expect(childCopy.parentId).toBe(op.track.id) // remapped into the new folder
+    const after = apply(before, op)
+    expect(Object.keys(after.tracks)).toHaveLength(Object.keys(before.tracks).length + 2)
+    const inverse = invert(before, op)
+    expect(apply(after, inverse!)).toEqual(before)
+  })
+})
+
+suite('track freeze', () => {
+  test('freeze stores the render asset and unfreeze restores the original untouched', () => {
+    const before = baseState()
+    const frozen = apply(before, { type: 'track/freeze', trackId: 't1', assetId: 'ast_r' })
+    expect(frozen.tracks['t1'].frozenAssetId).toBe('ast_r')
+    // Original content untouched by freezing
+    expect(frozen.clips).toEqual(before.clips)
+    expect(frozen.plugins).toEqual(before.plugins)
+    const thawed = apply(frozen, { type: 'track/unfreeze', trackId: 't1' })
+    expect(thawed.tracks['t1'].frozenAssetId).toBeNull()
+    expect(thawed).toEqual(before)
+  })
+
+  test('folders cannot freeze', () => {
+    const s = folderState()
+    expect(apply(s, { type: 'track/freeze', trackId: 'fold', assetId: 'x' })).toBe(s)
+  })
+})
+
+suite('clip fades', () => {
+  test('setFades clamps so fades never overlap', () => {
+    // c1 is 960 ticks long: 800 + 700 collide -> fadeOut shrinks first
+    const s = apply(baseState(), { type: 'clip/setFades', clipId: 'c1', fadeIn: 800, fadeOut: 700 })
+    expect(s.clips['c1'].fadeIn).toBe(800)
+    expect(s.clips['c1'].fadeOut).toBe(160)
+  })
+
+  test('split moves the fade-out to the right half and merge restores it', () => {
+    let s = apply(baseState(), { type: 'clip/setFades', clipId: 'c1', fadeIn: 120, fadeOut: 240 })
+    const withFades = s
+    s = apply(s, { type: 'clip/split', clipId: 'c1', at: 480, rightClipId: 'cs1' })
+    expect(s.clips['c1'].fadeIn).toBe(120)
+    expect(s.clips['c1'].fadeOut).toBe(0)
+    expect(s.clips['cs1'].fadeIn).toBe(0)
+    expect(s.clips['cs1'].fadeOut).toBe(240)
+    const merged = apply(s, { type: 'clip/merge', clipId: 'c1', rightClipId: 'cs1' })
+    expect(merged.clips['c1']).toEqual(withFades.clips['c1'])
+  })
+})
+

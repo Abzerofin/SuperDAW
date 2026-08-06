@@ -1,9 +1,49 @@
 import { app, BrowserWindow, dialog, ipcMain, Menu, shell } from 'electron'
-import { readFile, writeFile } from 'node:fs/promises'
-import { basename, join } from 'node:path'
+import { mkdir, readFile, rename, writeFile } from 'node:fs/promises'
+import { basename, dirname, join } from 'node:path'
 import { registerCollabIpc } from './collabServer'
 
 const PROJECT_FILTERS = [{ name: 'SuperDAW Project', extensions: ['sdaw'] }]
+
+/**
+ * App-level key/value storage (settings, recent-project index) as one JSON
+ * file in userData — independent of any project file. Values are opaque
+ * JSON owned by the renderer; main only persists them.
+ */
+const appDataPath = (): string => join(app.getPath('userData'), 'superdaw-appdata.json')
+let appDataCache: Record<string, unknown> | null = null
+
+async function readAppData(): Promise<Record<string, unknown>> {
+  if (appDataCache) return appDataCache
+  try {
+    appDataCache = JSON.parse(await readFile(appDataPath(), 'utf8')) as Record<string, unknown>
+  } catch {
+    appDataCache = {} // first run, or an unreadable file — start fresh
+  }
+  return appDataCache
+}
+
+let appDataWrite = Promise.resolve()
+
+function registerAppDataIpc(): void {
+  ipcMain.handle('appdata:get', async (_event, key: string): Promise<unknown> => {
+    return (await readAppData())[key] ?? null
+  })
+
+  ipcMain.handle('appdata:set', async (_event, key: string, value: unknown): Promise<void> => {
+    const data = await readAppData()
+    data[key] = value
+    // Serialize writes (atomic via temp file) so concurrent sets can't interleave.
+    appDataWrite = appDataWrite.then(async () => {
+      const path = appDataPath()
+      await mkdir(dirname(path), { recursive: true })
+      const tmp = `${path}.tmp`
+      await writeFile(tmp, JSON.stringify(data, null, 2))
+      await rename(tmp, path)
+    })
+    await appDataWrite
+  })
+}
 
 function registerIpc(): void {
   // Save project bytes. Shows a Save dialog unless a known path is passed
@@ -37,6 +77,40 @@ function registerIpc(): void {
       if (!win) return null
       const result = await dialog.showOpenDialog(win, {
         filters: PROJECT_FILTERS,
+        properties: ['openFile']
+      })
+      if (result.canceled || result.filePaths.length === 0) return null
+      const path = result.filePaths[0]
+      const data = await readFile(path)
+      return { path, name: basename(path), data: new Uint8Array(data) }
+    }
+  )
+
+  // Open a project by known path (the home screen's recent list / Open
+  // Recent menu). Null when the file is gone — the renderer prunes it.
+  ipcMain.handle(
+    'project:open-path',
+    async (_event, path: string): Promise<{ path: string; name: string; data: Uint8Array } | null> => {
+      try {
+        const data = await readFile(path)
+        return { path, name: basename(path), data: new Uint8Array(data) }
+      } catch {
+        return null
+      }
+    }
+  )
+
+  // Generic single-file picker (e.g. track presets). Null = cancelled.
+  ipcMain.handle(
+    'file:open',
+    async (
+      event,
+      args: { filterName: string; ext: string }
+    ): Promise<{ path: string; name: string; data: Uint8Array } | null> => {
+      const win = BrowserWindow.fromWebContents(event.sender)
+      if (!win) return null
+      const result = await dialog.showOpenDialog(win, {
+        filters: [{ name: args.filterName, extensions: [args.ext] }],
         properties: ['openFile']
       })
       if (result.canceled || result.filePaths.length === 0) return null
@@ -147,6 +221,7 @@ app.whenReady().then(() => {
   // default menu for DevTools/reload).
   if (!process.env['ELECTRON_RENDERER_URL']) Menu.setApplicationMenu(null)
   registerIpc()
+  registerAppDataIpc()
   registerCollabIpc()
   createWindow()
   app.on('activate', () => {

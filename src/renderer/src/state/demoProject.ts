@@ -23,6 +23,8 @@ export function createDemoProject(): ProjectState {
       color: nextTrackColor(tracks.length),
       muted: false,
       soloed: false,
+      parentId: null,
+      frozenAssetId: null,
       volume: 1,
       pan: 0,
       synth: kind === 'midi' ? synthDefaults() : {}
@@ -40,7 +42,12 @@ export function createDemoProject(): ProjectState {
       duration: bars(lengthBars),
       assetId: null,
       offset: 0,
-      color: null
+      color: null,
+      fadeIn: 0,
+      fadeOut: 0,
+      reverse: false,
+      pitch: 0,
+      stretch: 1
     })
   }
 
@@ -58,6 +65,7 @@ export function createDemoProject(): ProjectState {
 
   return {
     name: 'Demo Project',
+    createdAt: 0,
     tempo: 120,
     timeSignature: sig,
     tracks: Object.fromEntries(tracks.map((t) => [t.id, t])),

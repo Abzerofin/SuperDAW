@@ -6,6 +6,12 @@ import { useProjectState } from '@/state/hooks'
 import { audioEngine } from '@/state/audioInstance'
 import { fxUi } from '@/state/fxUi'
 import { capturePointer } from '@/lib/pointer'
+import { Knob } from './Knob'
+
+function panLabel(pan: number): string {
+  if (Math.abs(pan) < 0.01) return 'C'
+  return `${Math.round(Math.abs(pan) * 100)}${pan < 0 ? 'L' : 'R'}`
+}
 
 /**
  * The mixer: one strip per track plus master. Fader/pan drags preview
@@ -36,8 +42,13 @@ function TrackStrip({ track }: { track: Track }): React.JSX.Element {
       <button className="corner-btn strip-fx" onClick={() => fxUi.toggle(track.id)}>
         FX
       </button>
-      <PanKnob
-        pan={track.pan}
+      <Knob
+        value={track.pan}
+        min={-1}
+        max={1}
+        defaultValue={0}
+        format={panLabel}
+        title="Pan · drag vertically (Shift = fine) · double-click for center"
         onPreview={(pan) => audioEngine.previewTrackPan(track.id, pan)}
         onCommit={(pan) => projectStore.dispatch({ type: 'track/setPan', trackId: track.id, pan })}
       />
@@ -132,56 +143,6 @@ function Fader({
         <div className="fader-thumb" style={{ bottom: `${(shown / MAX_GAIN) * 100}%` }} />
       </div>
       <div className="fader-db mono">{gainToDb(shown)}</div>
-    </div>
-  )
-}
-
-function PanKnob({
-  pan,
-  onPreview,
-  onCommit
-}: {
-  pan: number
-  onPreview: (pan: number) => void
-  onCommit: (pan: number) => void
-}): React.JSX.Element {
-  const [dragPan, setDragPan] = useState<number | null>(null)
-  const origin = useRef({ x: 0, pan: 0 })
-  const shown = dragPan ?? pan
-
-  const begin = (e: React.PointerEvent): void => {
-    if (e.button !== 0) return
-    capturePointer(e)
-    origin.current = { x: e.clientX, pan }
-    setDragPan(pan)
-  }
-  const move = (e: React.PointerEvent): void => {
-    if (dragPan === null) return
-    const next = Math.min(1, Math.max(-1, origin.current.pan + (e.clientX - origin.current.x) / 40))
-    setDragPan(next)
-    onPreview(next)
-  }
-  const end = (): void => {
-    if (dragPan === null) return
-    if (dragPan !== pan) onCommit(dragPan)
-    setDragPan(null)
-  }
-
-  return (
-    <div
-      className="pan"
-      onPointerDown={begin}
-      onPointerMove={move}
-      onPointerUp={end}
-      onDoubleClick={() => onCommit(0)}
-      title="Drag to pan · double-click for center"
-    >
-      <div className="pan-track">
-        <div className="pan-thumb" style={{ left: `${((shown + 1) / 2) * 100}%` }} />
-      </div>
-      <div className="pan-label mono">
-        {Math.abs(shown) < 0.01 ? 'C' : `${Math.round(Math.abs(shown) * 100)}${shown < 0 ? 'L' : 'R'}`}
-      </div>
     </div>
   )
 }

@@ -10,7 +10,17 @@ import type {
   Note,
   PluginInstance
 } from '../model/types'
-import { clipsOfTrack, isSelfOrDescendant, subtreeOf, MAX_GAIN } from '../model/types'
+import {
+  clipsOfTrack,
+  isSelfOrDescendant,
+  isTrackSelfOrDescendant,
+  subtreeOf,
+  MAX_GAIN,
+  MAX_PITCH,
+  MAX_STRETCH,
+  MIN_PITCH,
+  MIN_STRETCH
+} from '../model/types'
 import { SYNTH_DEFS, clampParam, type ParamDef } from '../model/effects'
 import { paramDefsOf } from '../plugins/builtin'
 
@@ -39,6 +49,7 @@ function withNotes(
 function clampInt(value: number, min: number, max: number): number {
   return Math.min(max, Math.max(min, Math.round(value)))
 }
+
 
 /**
  * With param defs (builtins, or external plugins that snapshotted defs):
@@ -94,10 +105,29 @@ export function apply(state: ProjectState, op: Operation): ProjectState {
 
     case 'track/create': {
       if (state.tracks[op.track.id]) return state
+      // Root first, then descendants in ascending original index — exactly
+      // reverses a cascading delete. Indices land correctly because every
+      // earlier insertion sits at a lower index.
+      const inserts = [
+        { track: op.track, index: op.index },
+        ...(op.descendants ?? []).filter((d) => !state.tracks[d.track.id])
+      ].sort((a, b) => a.index - b.index)
       const trackOrder = [...state.trackOrder]
-      trackOrder.splice(clamp(op.index, 0, trackOrder.length), 0, op.track.id)
+      const tracks = { ...state.tracks }
+      for (const { track, index } of inserts) {
+        trackOrder.splice(clamp(index, 0, trackOrder.length), 0, track.id)
+        tracks[track.id] = track
+      }
+      // A parent that doesn't exist (concurrent folder delete) degrades to root.
+      for (const { track } of inserts) {
+        if (track.parentId !== null && !tracks[track.parentId]) {
+          tracks[track.id] = { ...track, parentId: null }
+        }
+      }
       const clips = { ...state.clips }
-      for (const clip of op.clips) clips[clip.id] = clip
+      for (const clip of op.clips) {
+        if (tracks[clip.trackId]) clips[clip.id] = clip
+      }
       const automation = { ...state.automation }
       for (const point of op.automation) automation[point.id] = point
       const { notes } = withNotes(state.notes, clips, op.notes)
@@ -105,28 +135,26 @@ export function apply(state: ProjectState, op: Operation): ProjectState {
       for (const instance of op.plugins) {
         if (!plugins[instance.id]) plugins[instance.id] = instance
       }
-      return {
-        ...state,
-        tracks: { ...state.tracks, [op.track.id]: op.track },
-        trackOrder,
-        clips,
-        automation,
-        notes,
-        plugins
-      }
+      return { ...state, tracks, trackOrder, clips, automation, notes, plugins }
     }
 
     case 'track/delete': {
       if (!state.tracks[op.trackId]) return state
-      const tracks = { ...state.tracks }
-      delete tracks[op.trackId]
+      // Folders cascade: deleting a folder removes its whole subtree.
+      const doomed = new Set(
+        state.trackOrder.filter((id) => isTrackSelfOrDescendant(state, id, op.trackId))
+      )
+      const tracks: Record<TrackId, Track> = {}
+      for (const track of Object.values(state.tracks)) {
+        if (!doomed.has(track.id)) tracks[track.id] = track
+      }
       const clips: Record<ClipId, Clip> = {}
       for (const clip of Object.values(state.clips)) {
-        if (clip.trackId !== op.trackId) clips[clip.id] = clip
+        if (!doomed.has(clip.trackId)) clips[clip.id] = clip
       }
       const automation: Record<string, AutomationPoint> = {}
       for (const point of Object.values(state.automation)) {
-        if (point.trackId !== op.trackId) automation[point.id] = point
+        if (!doomed.has(point.trackId)) automation[point.id] = point
       }
       const notes: Record<string, Note> = {}
       for (const note of Object.values(state.notes)) {
@@ -134,16 +162,49 @@ export function apply(state: ProjectState, op: Operation): ProjectState {
       }
       const plugins: Record<string, PluginInstance> = {}
       for (const instance of Object.values(state.plugins)) {
-        if (instance.trackId !== op.trackId) plugins[instance.id] = instance
+        if (!doomed.has(instance.trackId)) plugins[instance.id] = instance
       }
       return {
         ...state,
         tracks,
-        trackOrder: state.trackOrder.filter((id) => id !== op.trackId),
+        trackOrder: state.trackOrder.filter((id) => !doomed.has(id)),
         clips,
         automation,
         notes,
         plugins
+      }
+    }
+
+    case 'track/setParent': {
+      const track = state.tracks[op.trackId]
+      if (!track || track.parentId === op.parentId) return state
+      if (op.parentId !== null) {
+        const parent = state.tracks[op.parentId]
+        if (!parent || parent.kind !== 'folder') return state
+        // A folder can never be moved into itself or its own subtree.
+        if (isTrackSelfOrDescendant(state, op.parentId, op.trackId)) return state
+      }
+      return {
+        ...state,
+        tracks: { ...state.tracks, [op.trackId]: { ...track, parentId: op.parentId } }
+      }
+    }
+
+    case 'track/freeze': {
+      const track = state.tracks[op.trackId]
+      if (!track || track.kind === 'folder' || track.frozenAssetId === op.assetId) return state
+      return {
+        ...state,
+        tracks: { ...state.tracks, [op.trackId]: { ...track, frozenAssetId: op.assetId } }
+      }
+    }
+
+    case 'track/unfreeze': {
+      const track = state.tracks[op.trackId]
+      if (!track || track.frozenAssetId === null) return state
+      return {
+        ...state,
+        tracks: { ...state.tracks, [op.trackId]: { ...track, frozenAssetId: null } }
       }
     }
 
@@ -315,12 +376,18 @@ export function apply(state: ProjectState, op: Operation): ProjectState {
       const trackOrder = [...state.trackOrder]
       trackOrder.splice(from, 1)
       trackOrder.splice(clamp(op.index, 0, trackOrder.length), 0, op.trackId)
-      return { ...state, trackOrder }
+      let next: ProjectState = { ...state, trackOrder }
+      // Optional atomic re-parent (drag into/out of a folder = one op).
+      if (op.parentId !== undefined) {
+        next = apply(next, { type: 'track/setParent', trackId: op.trackId, parentId: op.parentId })
+      }
+      return next
     }
 
     case 'clip/create': {
       if (state.clips[op.clip.id]) return state
-      if (!state.tracks[op.clip.trackId]) return state
+      const track = state.tracks[op.clip.trackId]
+      if (!track || track.kind === 'folder') return state // folders hold tracks, not clips
       const clips = { ...state.clips, [op.clip.id]: op.clip }
       const { notes } = withNotes(state.notes, clips, op.notes)
       return { ...state, clips, notes }
@@ -338,7 +405,8 @@ export function apply(state: ProjectState, op: Operation): ProjectState {
     }
 
     case 'clip/move': {
-      if (!state.tracks[op.trackId]) return state
+      const target = state.tracks[op.trackId]
+      if (!target || target.kind === 'folder') return state
       return updateClip(state, op.clipId, (c) => ({
         ...c,
         trackId: op.trackId,
@@ -362,6 +430,28 @@ export function apply(state: ProjectState, op: Operation): ProjectState {
         c.color === op.color ? c : { ...c, color: op.color }
       )
 
+    case 'clip/setPlayback':
+      return updateClip(state, op.clipId, (c) => {
+        const pitch = Number.isFinite(op.pitch)
+          ? Math.min(MAX_PITCH, Math.max(MIN_PITCH, Math.round(op.pitch * 100) / 100))
+          : c.pitch
+        const stretch = Number.isFinite(op.stretch)
+          ? Math.min(MAX_STRETCH, Math.max(MIN_STRETCH, Math.round(op.stretch * 1000) / 1000))
+          : c.stretch
+        return c.reverse === op.reverse && c.pitch === pitch && c.stretch === stretch
+          ? c
+          : { ...c, reverse: op.reverse, pitch, stretch }
+      })
+
+    case 'clip/setFades':
+      return updateClip(state, op.clipId, (c) => {
+        // Fades can never overlap: cap each at the duration, then shrink
+        // the fade-out first if they still collide (deterministic).
+        const fadeIn = clampInt(op.fadeIn, 0, c.duration)
+        const fadeOut = clampInt(op.fadeOut, 0, c.duration - fadeIn)
+        return c.fadeIn === fadeIn && c.fadeOut === fadeOut ? c : { ...c, fadeIn, fadeOut }
+      })
+
     case 'clip/split': {
       const clip = state.clips[op.clipId]
       if (!clip) return state
@@ -379,11 +469,18 @@ export function apply(state: ProjectState, op: Operation): ProjectState {
         assetId: clip.assetId,
         // Audio keeps playing the same source material across the cut.
         offset: clip.assetId !== null ? clip.offset + splitOffset : 0,
-        color: op.rightColor !== undefined ? op.rightColor : clip.color
+        color: op.rightColor !== undefined ? op.rightColor : clip.color,
+        // The original fade-out travels with the clip's end (the right half).
+        fadeIn: op.rightFades ? op.rightFades[0] : 0,
+        fadeOut: op.rightFades ? op.rightFades[1] : clip.fadeOut,
+        // Both halves keep playing the same way (reversed/transposed/scaled).
+        reverse: clip.reverse,
+        pitch: clip.pitch,
+        stretch: clip.stretch
       }
       const clips = {
         ...state.clips,
-        [clip.id]: { ...clip, duration: leftDuration },
+        [clip.id]: { ...clip, duration: leftDuration, fadeOut: op.leftFadeOut ?? 0 },
         [right.id]: right
       }
       // Notes at/after the cut move to the right clip, re-based to its start.
@@ -405,7 +502,8 @@ export function apply(state: ProjectState, op: Operation): ProjectState {
       if (!left || !right || left.trackId !== right.trackId) return state
       if (right.start < left.start) return state
       const duration = Math.max(left.duration, right.start + right.duration - left.start)
-      const clips = { ...state.clips, [left.id]: { ...left, duration } }
+      // The merged clip's end is the right clip's end: its fade-out wins.
+      const clips = { ...state.clips, [left.id]: { ...left, duration, fadeOut: right.fadeOut } }
       delete clips[right.id]
       const shift = right.start - left.start
       let notes = state.notes

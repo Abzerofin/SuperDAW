@@ -19,6 +19,22 @@ const api = {
   openProjectFile: (): Promise<{ path: string; name: string; data: Uint8Array } | null> =>
     ipcRenderer.invoke('project:open'),
 
+  /** Read a project by known path (recent projects). Null = unreadable/gone. */
+  openProjectPath: (path: string): Promise<{ path: string; name: string; data: Uint8Array } | null> =>
+    ipcRenderer.invoke('project:open-path', path),
+
+  /** App-level key/value storage in userData (settings, recents). */
+  appDataGet: (key: string): Promise<unknown> => ipcRenderer.invoke('appdata:get', key),
+  appDataSet: (key: string, value: unknown): Promise<void> =>
+    ipcRenderer.invoke('appdata:set', key, value),
+
+  /** Pick and read any single file (e.g. a track preset). Null = cancelled. */
+  openFile: (args: {
+    filterName: string
+    ext: string
+  }): Promise<{ path: string; name: string; data: Uint8Array } | null> =>
+    ipcRenderer.invoke('file:open', args),
+
   /** Save arbitrary bytes via a dialog (e.g. WAV export). Null = cancelled. */
   exportFile: (args: {
     data: Uint8Array

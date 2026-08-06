@@ -57,13 +57,37 @@ export function duplicateSelectedClip(): void {
   createCopy(snap, snap.clip.trackId, snap.clip.start + snap.clip.duration)
 }
 
+/** True when the playhead sits strictly inside the clip (so a slice is possible). */
+export function canSliceAtPlayhead(clipId: string): boolean {
+  const clip = projectStore.state.clips[clipId]
+  if (!clip) return false
+  const at = Math.round(transport.positionTicks())
+  return at > clip.start && at < clip.start + clip.duration
+}
+
+/** Slice a specific clip in two at the playhead. */
+export function sliceClipAtPlayhead(clipId: string): void {
+  if (!canSliceAtPlayhead(clipId)) return
+  projectStore.dispatch({
+    type: 'clip/split',
+    clipId,
+    at: Math.round(transport.positionTicks()),
+    rightClipId: newId('clp')
+  })
+}
+
 /** Split the selected clip at the playhead (must fall inside the clip). */
 export function splitSelectedClipAtPlayhead(): void {
-  const clipId = selection.selectedClipId
-  if (!clipId) return
+  if (selection.selectedClipId) sliceClipAtPlayhead(selection.selectedClipId)
+}
+
+/** Duplicate a specific clip immediately after itself. */
+export function duplicateClip(clipId: string): void {
   const clip = projectStore.state.clips[clipId]
   if (!clip) return
-  const at = Math.round(transport.positionTicks())
-  if (at <= clip.start || at >= clip.start + clip.duration) return
-  projectStore.dispatch({ type: 'clip/split', clipId, at, rightClipId: newId('clp') })
+  createCopy(
+    { clip, notes: notesOfClip(projectStore.state, clipId) },
+    clip.trackId,
+    clip.start + clip.duration
+  )
 }

@@ -10,7 +10,18 @@ import { pianoRollUi, usePianoRollUi } from '@/state/pianoRollUi'
 import { useRecording } from '@/state/recording'
 import { useSelectedClipId } from '@/state/selection'
 import { GRID_CHOICES, gridUi, useGridChoice, type GridChoice } from '@/state/gridUi'
-import { exportWav, newProject, openProject, saveProject } from '@/lib/projectFile'
+import { RULER_MODES, rulerUi, useRulerMode, type RulerMode } from '@/state/rulerUi'
+import {
+  closeProject,
+  exportWav,
+  newProject,
+  openProject,
+  openRecentProject,
+  saveProject
+} from '@/lib/projectFile'
+import { appShell } from '@/state/appShell'
+import { settingsUi } from '@/state/settingsUi'
+import { useRecentProjects } from '@/state/recentProjects'
 import { CollabPanel } from './CollabPanel'
 
 export function TransportBar(): React.JSX.Element {
@@ -38,7 +49,9 @@ export function TransportBar(): React.JSX.Element {
         <TempoField tempo={state.tempo} />
         <TimeSignatureField signature={state.timeSignature} />
         <MetronomeButton />
+        <LoopButton />
         <GridSelect />
+        <RulerSelect />
         <Meter />
       </div>
 
@@ -81,6 +94,9 @@ export function TransportBar(): React.JSX.Element {
           onClick={() => panelState.toggleRight('activity')}
         >
           Activity
+        </button>
+        <button className="tbtn" title="Settings" onClick={() => settingsUi.open()}>
+          ⚙
         </button>
       </div>
     </div>
@@ -161,6 +177,8 @@ function PianoRollTab(): React.JSX.Element {
 
 function FileMenu(): React.JSX.Element {
   const [open, setOpen] = useState(false)
+  const [recentsOpen, setRecentsOpen] = useState(false)
+  const recents = useRecentProjects()
   const ref = useRef<HTMLDivElement>(null)
 
   // Any click outside the menu closes it.
@@ -171,6 +189,10 @@ function FileMenu(): React.JSX.Element {
     }
     window.addEventListener('pointerdown', onPointerDown)
     return () => window.removeEventListener('pointerdown', onPointerDown)
+  }, [open])
+
+  useEffect(() => {
+    if (!open) setRecentsOpen(false)
   }, [open])
 
   const item = (label: string, shortcut: string | null, action: () => void): React.JSX.Element => (
@@ -195,14 +217,57 @@ function FileMenu(): React.JSX.Element {
         <div className="menu-panel">
           {item('New project', 'Ctrl+Shift+N', () => newProject())}
           {item('Open…', 'Ctrl+O', () => void openProject())}
+          <button
+            className="menu-item"
+            disabled={recents.length === 0}
+            onClick={() => setRecentsOpen((v) => !v)}
+          >
+            <span>Open recent</span>
+            <span className="menu-shortcut mono">{recentsOpen ? '▾' : '▸'}</span>
+          </button>
+          {recentsOpen &&
+            recents.slice(0, 8).map((entry) => (
+              <button
+                key={(entry.path ?? '') + entry.name}
+                className="menu-item menu-item-sub"
+                title={entry.path ?? undefined}
+                onClick={() => {
+                  setOpen(false)
+                  void openRecentProject(entry)
+                }}
+              >
+                <span>{entry.name}</span>
+              </button>
+            ))}
           <div className="menu-sep" />
           {item('Save', 'Ctrl+S', () => void saveProject())}
           {item('Save as…', 'Ctrl+Shift+S', () => void saveProject(true))}
           <div className="menu-sep" />
           {item('Export WAV…', null, () => void exportWav())}
+          <div className="menu-sep" />
+          {item('Close project', null, () => closeProject())}
+          {item('Return to Home', null, () => appShell.goHome())}
         </div>
       )}
     </div>
+  )
+}
+
+function RulerSelect(): React.JSX.Element {
+  const mode = useRulerMode()
+  return (
+    <select
+      className="transport-grid"
+      title="Timeline ruler: bars/beats, minutes:seconds, or samples"
+      value={mode}
+      onChange={(e) => rulerUi.set(e.target.value as RulerMode)}
+    >
+      {RULER_MODES.map((m) => (
+        <option key={m.value} value={m.value}>
+          Ruler: {m.label}
+        </option>
+      ))}
+    </select>
   )
 }
 
@@ -276,6 +341,11 @@ function CollabButton(): React.JSX.Element {
   const [open, setOpen] = useState(false)
   const active = collab.mode !== 'off'
 
+  // The home screen's "Join Collaboration" lands here with the panel open.
+  useEffect(() => {
+    if (appShell.consumeCollabIntent()) setOpen(true)
+  }, [])
+
   return (
     <div className="collab-anchor">
       <button
@@ -300,6 +370,30 @@ function CollabButton(): React.JSX.Element {
       </button>
       {open && <CollabPanel onClose={() => setOpen(false)} />}
     </div>
+  )
+}
+
+/**
+ * Cycle playback on/off. The region itself is dragged out on the timeline
+ * ruler; with none set the button explains how to make one.
+ */
+function LoopButton(): React.JSX.Element {
+  const [, force] = useReducer((c: number) => c + 1, 0)
+  useEffect(() => transport.subscribe(force), [])
+  const region = transport.loopRegion
+  return (
+    <button
+      className={`tbtn ${transport.loopEnabled && region ? 'tbtn-active' : ''}`}
+      disabled={!region}
+      title={
+        region
+          ? 'Loop the selected region (drag the top of the ruler to change it)'
+          : 'Drag across the top of the timeline ruler to set a loop region'
+      }
+      onClick={() => transport.setLoopEnabled(!transport.loopEnabled)}
+    >
+      ⟳
+    </button>
   )
 }
 

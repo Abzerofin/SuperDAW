@@ -40,6 +40,8 @@ function makeTrack(id: string, kind: Track['kind'] = 'audio'): Track {
     color: '#5b8def',
     muted: false,
     soloed: false,
+    parentId: null,
+    frozenAssetId: null,
     volume: 1,
     pan: 0,
     synth: {}
@@ -47,7 +49,7 @@ function makeTrack(id: string, kind: Track['kind'] = 'audio'): Track {
 }
 
 function makeClip(id: string, trackId: string, start = 0, duration = PPQ * 4): Clip {
-  return { id, trackId, name: id, start, duration, assetId: null, offset: 0, color: null }
+  return { id, trackId, name: id, start, duration, assetId: null, offset: 0, color: null, fadeIn: 0, fadeOut: 0, reverse: false, pitch: 0, stretch: 1 }
 }
 
 function seedProject(): ProjectState {

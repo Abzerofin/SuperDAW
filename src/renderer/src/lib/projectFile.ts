@@ -15,6 +15,9 @@ import { transport } from '@/state/transport'
 import { selection } from '@/state/selection'
 import { sessionFile } from '@/state/sessionFile'
 import { pianoRollUi } from '@/state/pianoRollUi'
+import { recentProjects, type RecentProject } from '@/state/recentProjects'
+import { appShell } from '@/state/appShell'
+import { trackInputs } from '@/state/trackInputs'
 
 /**
  * Save/open orchestration. The .sdaw container is a ZIP of project.json
@@ -53,6 +56,8 @@ export async function loadProjectBytes(data: Uint8Array, path: string | null): P
 
   transport.stop()
   selection.select(null)
+  // Never carry a live input into another project's tracks.
+  void trackInputs.stopAllMonitors()
   assetStore.clear()
 
   for (const entry of assets) {
@@ -75,6 +80,7 @@ export async function loadProjectBytes(data: Uint8Array, path: string | null): P
   projectStore.loadProject(state)
   transport.setPosition(0)
   sessionFile.markLoaded(path)
+  recentProjects.record(state, path)
 }
 
 function defaultFileName(): string {
@@ -92,7 +98,10 @@ export async function saveProject(forceDialog = false): Promise<void> {
       path: forceDialog ? null : sessionFile.path,
       defaultName: defaultFileName()
     })
-    if (path !== null) sessionFile.markSaved(path)
+    if (path !== null) {
+      sessionFile.markSaved(path)
+      recentProjects.record(projectStore.state, path)
+    }
     return
   }
   // Browser fallback: download. No stable path, so every save re-downloads.
@@ -103,6 +112,7 @@ export async function saveProject(forceDialog = false): Promise<void> {
   anchor.click()
   URL.revokeObjectURL(url)
   sessionFile.markSaved(null)
+  recentProjects.record(projectStore.state, null)
 }
 
 /** Start an empty project. Asks before discarding unsaved changes. */
@@ -117,9 +127,34 @@ export function newProject(): void {
   transport.setPosition(0)
   selection.select(null)
   pianoRollUi.close()
+  void trackInputs.stopAllMonitors()
+  assetStore.clear()
+  projectStore.loadProject(createEmptyProject('Untitled', Date.now()))
+  sessionFile.markLoaded(null)
+  appShell.enterProject()
+}
+
+/**
+ * Discard the current document and return to the home screen. Asks before
+ * discarding unsaved changes; returns false if the user cancelled.
+ */
+export function closeProject(): boolean {
+  if (
+    sessionFile.dirty &&
+    !window.confirm('Discard unsaved changes and close the project?')
+  ) {
+    return false
+  }
+  transport.stop()
+  transport.setPosition(0)
+  selection.select(null)
+  pianoRollUi.close()
+  void trackInputs.stopAllMonitors()
   assetStore.clear()
   projectStore.loadProject(createEmptyProject('Untitled'))
   sessionFile.markLoaded(null)
+  appShell.markProjectClosed()
+  return true
 }
 
 /**
@@ -147,7 +182,10 @@ export async function openProject(): Promise<void> {
   const bridge = window.superdaw
   if (bridge) {
     const result = await bridge.openProjectFile()
-    if (result) await loadProjectBytes(result.data, result.path)
+    if (result) {
+      await loadProjectBytes(result.data, result.path)
+      appShell.enterProject()
+    }
     return
   }
   // Browser fallback: file picker.
@@ -156,7 +194,31 @@ export async function openProject(): Promise<void> {
   input.accept = `.${PROJECT_FILE_EXTENSION}`
   input.onchange = async () => {
     const file = input.files?.[0]
-    if (file) await loadProjectBytes(new Uint8Array(await file.arrayBuffer()), null)
+    if (file) {
+      await loadProjectBytes(new Uint8Array(await file.arrayBuffer()), null)
+      appShell.enterProject()
+    }
   }
   input.click()
+}
+
+/**
+ * Open an entry from the recent-projects index. Entries without a path
+ * (browser saves) fall back to the picker; entries whose file is gone are
+ * pruned from the index.
+ */
+export async function openRecentProject(entry: RecentProject): Promise<void> {
+  const bridge = window.superdaw
+  if (!entry.path || !bridge) {
+    await openProject()
+    return
+  }
+  const result = await bridge.openProjectPath(entry.path)
+  if (!result) {
+    recentProjects.remove(entry)
+    window.alert(`"${entry.name}" could not be opened — the file has moved or been deleted.`)
+    return
+  }
+  await loadProjectBytes(result.data, result.path)
+  appShell.enterProject()
 }

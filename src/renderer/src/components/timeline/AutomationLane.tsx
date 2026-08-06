@@ -1,13 +1,28 @@
 import { useState } from 'react'
-import type { AutomationPoint, Track } from '@core/model/types'
+import type { AutomationParam, AutomationPoint, Track } from '@core/model/types'
 import { automationOf } from '@core/model/types'
 import { newId } from '@core/model/ids'
 import { projectStore } from '@/state/projectStore'
 import { useProjectState } from '@/state/hooks'
+import { automationUi, useAutomationUi } from '@/state/automationUi'
 import { capturePointer } from '@/lib/pointer'
 import { AUTO_H } from './geometry'
 
 const PAD = 5 // px inset so points at value 0/1 stay grabbable
+
+const PARAMS: AutomationParam[] = ['volume', 'pan']
+
+/** Neutral value when a curve has no points: unity gain / centered pan. */
+function restingValue(param: AutomationParam): number {
+  return param === 'volume' ? 1 : 0.5
+}
+
+function pointLabel(param: AutomationParam, value: number): string {
+  if (param === 'volume') return `${Math.round(value * 100)}%`
+  const pan = value * 2 - 1
+  if (Math.abs(pan) < 0.01) return 'C'
+  return `${Math.round(Math.abs(pan) * 100)}${pan < 0 ? 'L' : 'R'}`
+}
 
 interface Props {
   track: Track
@@ -16,12 +31,14 @@ interface Props {
 }
 
 /**
- * A volume-automation lane under a track. Double-click adds a point, drag
- * moves it (one op on release), double-click a point deletes it. The curve
- * multiplies the fader (1 = fader level, 0 = silence).
+ * An automation lane under a track, editing one parameter at a time
+ * (volume multiplies the fader; pan drives the stereo panner). Double-click
+ * adds a point, drag moves it (one op on release), double-click a point
+ * deletes it.
  */
 export function AutomationLane({ track, pxPerTick, contentW }: Props): React.JSX.Element {
   const state = useProjectState()
+  const param = useAutomationUi().paramOf(track.id)
   const [drag, setDrag] = useState<{
     pointId: string
     originX: number
@@ -32,7 +49,7 @@ export function AutomationLane({ track, pxPerTick, contentW }: Props): React.JSX
     value: number
   } | null>(null)
 
-  const points = automationOf(state, track.id, 'volume').map((p) =>
+  const points = automationOf(state, track.id, param).map((p) =>
     drag && p.id === drag.pointId ? { ...p, ticks: drag.ticks, value: drag.value } : p
   )
   points.sort((a, b) => a.ticks - b.ticks)
@@ -46,7 +63,7 @@ export function AutomationLane({ track, pxPerTick, contentW }: Props): React.JSX
     const point: AutomationPoint = {
       id: newId('aut'),
       trackId: track.id,
-      param: 'volume',
+      param,
       ticks: Math.max(0, (e.clientX - rect.left) / pxPerTick),
       value: yToValue(e.clientY - rect.top)
     }
@@ -93,10 +110,11 @@ export function AutomationLane({ track, pxPerTick, contentW }: Props): React.JSX
     setDrag(null)
   }
 
-  // Curve polyline: flat at 1 when empty; held at edge values outside points.
+  // Curve polyline: flat at the resting value when empty; held at edge
+  // values outside points.
   const path =
     points.length === 0
-      ? `0,${valueToY(1)} ${contentW},${valueToY(1)}`
+      ? `0,${valueToY(restingValue(param))} ${contentW},${valueToY(restingValue(param))}`
       : [
           `0,${valueToY(points[0].value)}`,
           ...points.map((p) => `${p.ticks * pxPerTick},${valueToY(p.value)}`),
@@ -111,8 +129,23 @@ export function AutomationLane({ track, pxPerTick, contentW }: Props): React.JSX
       onPointerMove={onPointerMove}
       onPointerUp={endDrag}
     >
-      <span className="auto-lane-label">volume</span>
+      <span className="auto-lane-label">
+        {PARAMS.map((p) => (
+          <button
+            key={p}
+            className={`auto-param ${p === param ? 'auto-param-active' : ''}`}
+            onDoubleClick={(e) => e.stopPropagation()}
+            onPointerDown={(e) => e.stopPropagation()}
+            onClick={() => automationUi.setParam(track.id, p)}
+          >
+            {p}
+          </button>
+        ))}
+      </span>
       <svg className="auto-svg" width={contentW} height={AUTO_H}>
+        {param === 'pan' && (
+          <line x1={0} y1={valueToY(0.5)} x2={contentW} y2={valueToY(0.5)} className="auto-center" />
+        )}
         <polyline points={path} className="auto-curve" />
       </svg>
       {points.map((point) => (
@@ -120,7 +153,7 @@ export function AutomationLane({ track, pxPerTick, contentW }: Props): React.JSX
           key={point.id}
           className="auto-point"
           style={{ left: point.ticks * pxPerTick - 5, top: valueToY(point.value) - 5 }}
-          title={`${Math.round(point.value * 100)}% — double-click to delete`}
+          title={`${pointLabel(param, point.value)} — double-click to delete`}
           onPointerDown={(e) => beginDrag(e, point)}
           onDoubleClick={(e) => {
             e.stopPropagation()

@@ -1,7 +1,11 @@
 /**
- * Raw PCM capture from a MediaStream via an AudioWorklet. Chunks stream to
- * the main thread and accumulate; stop() concatenates per channel. No
- * monitoring path (input is never routed to output — no feedback loops).
+ * Raw PCM capture from any AudioNode via an AudioWorklet. Chunks stream to
+ * the main thread and accumulate; stop() concatenates per channel.
+ *
+ * The caller supplies the input node — normally a channel-selection tap
+ * (audio/input.ts) — so a recorder captures exactly the channels the track
+ * is set to, and the same tap can feed monitoring. Recording itself never
+ * routes to the speakers; monitoring is a separate, explicit connection.
  */
 
 const WORKLET_SOURCE = `
@@ -35,7 +39,7 @@ export interface Recording {
 
 export class Recorder {
   private chunks: Float32Array[][] = [] // [chunkIndex][channel]
-  private source: MediaStreamAudioSourceNode | null = null
+  private input: AudioNode | null = null
   private capture: AudioWorkletNode | null = null
   private sink: GainNode | null = null
   private ctx: AudioContext | null = null
@@ -44,12 +48,13 @@ export class Recorder {
     return this.capture !== null
   }
 
-  async start(ctx: AudioContext, stream: MediaStream): Promise<void> {
+  /** `input` is the node to capture (a channel-selection tap, or any node). */
+  async start(ctx: AudioContext, input: AudioNode): Promise<void> {
     if (this.capture) throw new Error('Already recording')
     await ensureWorklet(ctx)
     this.ctx = ctx
     this.chunks = []
-    this.source = ctx.createMediaStreamSource(stream)
+    this.input = input
     this.capture = new AudioWorkletNode(ctx, 'superdaw-capture', {
       numberOfInputs: 1,
       numberOfOutputs: 1
@@ -60,7 +65,7 @@ export class Recorder {
     // A silent sink keeps the worklet pulled by the graph without being audible.
     this.sink = ctx.createGain()
     this.sink.gain.value = 0
-    this.source.connect(this.capture)
+    this.input.connect(this.capture)
     this.capture.connect(this.sink)
     this.sink.connect(ctx.destination)
   }
@@ -69,10 +74,16 @@ export class Recorder {
     const ctx = this.ctx
     if (!this.capture || !ctx) return null
     this.capture.port.onmessage = null
-    this.source?.disconnect()
+    // Only our own edge is cut: the input node belongs to the caller (it may
+    // still be feeding a monitor path).
+    try {
+      this.input?.disconnect(this.capture)
+    } catch {
+      // already disconnected — fine
+    }
     this.capture.disconnect()
     this.sink?.disconnect()
-    this.source = null
+    this.input = null
     this.capture = null
     this.sink = null
     this.ctx = null

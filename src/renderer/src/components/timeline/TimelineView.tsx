@@ -1,13 +1,17 @@
 ﻿import { useEffect, useLayoutEffect, useReducer, useRef, useState } from 'react'
-import type { ClipId, TrackKind } from '@core/model/types'
+import type { ClipId, Track, TrackKind } from '@core/model/types'
+import {
+  childTracksOf,
+  isTrackEffectivelyAudible,
+  isTrackSelfOrDescendant,
+  trackSubtreeOf
+} from '@core/model/types'
 import { PPQ, barsToTicks, snapTicks, ticksPerBar } from '@core/model/timebase'
-import { synthDefaults } from '@core/model/effects'
 import { newId } from '@core/model/ids'
 import { projectStore } from '@/state/projectStore'
 import { useProjectState } from '@/state/hooks'
 import { selection, useSelectedClipId } from '@/state/selection'
 import { transport } from '@/state/transport'
-import { nextTrackColor, TRACK_COLORS } from '@/lib/colors'
 import { gridTicksFor, useGridChoice } from '@/state/gridUi'
 import {
   BAY_DRAG_MIME,
@@ -16,14 +20,20 @@ import {
   type BayDragPayload
 } from '@/lib/importAudio'
 import { collab } from '@/state/collab'
+import { createTrack } from '@/lib/trackActions'
 import { capturePointer } from '@/lib/pointer'
 import { commentUi, useCommentUi } from '@/state/commentUi'
 import { useAutomationUi } from '@/state/automationUi'
 import { pianoRollUi } from '@/state/pianoRollUi'
 import { useRecording } from '@/state/recording'
+import { folderUi, useFolderUi } from '@/state/folderUi'
+import { useRulerMode } from '@/state/rulerUi'
+import { audioEngine } from '@/state/audioInstance'
+import { ticksPerSecond } from '@audio/scheduling'
 import { HEADER_W, RULER_H, LANE_H, AUTO_H, MIN_PX_PER_BEAT, MAX_PX_PER_BEAT } from './geometry'
 import { TrackHeader } from './TrackHeader'
 import { ClipView } from './ClipView'
+import { ClipMenu } from './ClipMenu'
 import { AutomationLane } from './AutomationLane'
 import { PingOverlay, RemoteCursors } from './PresenceOverlay'
 import { CommentThread } from '../comments/CommentThread'
@@ -32,9 +42,30 @@ interface ReorderState {
   fromIndex: number
   /** Insertion slot 0..trackCount (between rows). */
   slot: number
+  /**
+   * Folder the pointer is hovering the MIDDLE of — the drop goes inside it
+   * (the row lights up). Null means an ordinary between-rows insertion at
+   * `slot`, shown as a line.
+   */
+  intoFolderId: string | null
   originY: number
   /** Engages after a small vertical threshold so clicks stay clicks. */
   active: boolean
+}
+
+/** Height of the ruler strip that drags out a loop region. */
+const LOOP_STRIP_H = 12
+
+type LoopDragMode = 'new' | 'start' | 'end' | 'move'
+
+interface LoopDrag {
+  mode: LoopDragMode
+  /** Where the gesture began, in ticks. */
+  anchorTicks: number
+  start: number
+  end: number
+  origStart?: number
+  origEnd?: number
 }
 
 interface DragState {
@@ -85,11 +116,22 @@ export function TimelineView(): React.JSX.Element {
     setReorderState(value)
   }
   const [colorMenu, setColorMenu] = useState<{ clipId: ClipId; x: number; y: number } | null>(null)
+  // Loop-region drag (ephemeral preview; the transport is updated on release).
+  const [loopDrag, setLoopDragState] = useState<LoopDrag | null>(null)
+  const loopDragRef = useRef<LoopDrag | null>(null)
+  const setLoopDrag = (value: LoopDrag | null): void => {
+    loopDragRef.current = value
+    setLoopDragState(value)
+  }
+  // Redraw when the transport's loop region changes (it is not React state).
+  const [, forceTransport] = useReducer((c: number) => c + 1, 0)
+  useEffect(() => transport.subscribe(forceTransport), [])
   const scrollRef = useRef<HTMLDivElement>(null)
   const gridRef = useRef<HTMLDivElement>(null)
   const pendingScrollX = useRef<number | null>(null)
   const lastCursorSent = useRef(0)
   const gridChoice = useGridChoice()
+  const rulerMode = useRulerMode()
 
   const sig = state.timeSignature
   const pxPerTick = pxPerBeat / PPQ
@@ -97,11 +139,27 @@ export function TimelineView(): React.JSX.Element {
   const gridTicks = gridTicksFor(gridChoice, sig, pxPerBeat)
   const pxPerBar = barTicks * pxPerTick
 
-  const tracks = state.trackOrder
-    .map((id) => state.tracks[id])
-    .filter((t) => t !== undefined)
-  const trackCount = tracks.length
   const autoUi = useAutomationUi()
+  const foldUi = useFolderUi()
+
+  // Visible rows derive from the folder tree: roots in trackOrder order,
+  // each folder followed by its children (collapsed folders hide theirs).
+  // Sibling order is trackOrder-relative, so any interleaving a concurrent
+  // edit produces still renders sanely.
+  const tracks: Track[] = []
+  const depthOf: number[] = []
+  {
+    const visit = (parentId: string | null, depth: number): void => {
+      for (const child of childTracksOf(state, parentId)) {
+        tracks.push(child)
+        depthOf.push(depth)
+        if (child.kind === 'folder' && !foldUi.isCollapsed(child.id)) visit(child.id, depth + 1)
+      }
+    }
+    visit(null, 0)
+  }
+  const rowIndexOfTrack = new Map(tracks.map((t, i) => [t.id, i]))
+  const trackCount = tracks.length
 
   // Row layout: each track lane, optionally followed by its automation lane.
   // All overlay layers position by trackTops (content px below the ruler).
@@ -219,7 +277,14 @@ export function TimelineView(): React.JSX.Element {
     e.stopPropagation()
     const clip = projectStore.state.clips[clipId]
     if (!clip) return
-    const trackIndex = state.trackOrder.indexOf(clip.trackId)
+    // Frozen tracks are locked: their render would go stale if clips moved.
+    // Unfreeze to edit (selection and comments still work).
+    if (projectStore.state.tracks[clip.trackId]?.frozenAssetId) {
+      selection.select(clipId)
+      return
+    }
+    const trackIndex = rowIndexOfTrack.get(clip.trackId) ?? -1
+    if (trackIndex === -1) return
     selection.select(clipId)
     capturePointer(e)
     setDrag({
@@ -245,8 +310,16 @@ export function TimelineView(): React.JSX.Element {
     if (e.button !== 0) return
     // Buttons, inputs and popovers inside the header keep their own gestures.
     if ((e.target as HTMLElement).closest('button, input, .comment-layer-anchor')) return
-    capturePointer(e)
-    setReorder({ fromIndex: index, slot: index, originY: e.clientY, active: false })
+    // NOTE: pointer capture is deliberately deferred until the gesture is a
+    // real drag (see onPointerMove). Capturing here would retarget the
+    // follow-up clicks and swallow the double-click that renames a track.
+    setReorder({
+      fromIndex: index,
+      slot: index,
+      intoFolderId: null,
+      originY: e.clientY,
+      active: false
+    })
   }
 
   /** Share the pointer as a presence cursor, throttled to ~20 Hz. */
@@ -257,16 +330,12 @@ export function TimelineView(): React.JSX.Element {
     lastCursorSent.current = now
     const rect = gridRef.current?.getBoundingClientRect()
     if (!rect) return
-    const x = e.clientX - rect.left - HEADER_W
-    const y = e.clientY - rect.top - RULER_H
-    if (x < 0 || y < 0) {
-      collab.sendCursor(null)
-      return
-    }
-    collab.sendCursor({
-      ticks: Math.max(0, x / pxPerTick),
-      trackIndex: trackIndexAtY(y)
-    })
+    // Over the headers or ruler, clamp instead of hiding: a cursor that
+    // blinks out whenever a collaborator reaches for a fader reads as
+    // "presence is broken". It clears only on leaving the timeline.
+    const x = Math.max(0, e.clientX - rect.left - HEADER_W)
+    const y = Math.max(0, e.clientY - rect.top - RULER_H)
+    collab.sendCursor({ ticks: x / pxPerTick, trackIndex: trackIndexAtY(y) })
   }
 
   /** Middle mouse = temporary ping identifying exactly what was clicked. */
@@ -295,12 +364,20 @@ export function TimelineView(): React.JSX.Element {
 
   const onPointerMove = (e: React.PointerEvent): void => {
     shareCursor(e)
+    if (loopDragRef.current) {
+      onLoopDragMove(e)
+      return
+    }
     const activeReorder = reorderRef.current
     if (activeReorder) {
       const rect = gridRef.current?.getBoundingClientRect()
       if (!rect) return
       const y = e.clientY - rect.top - RULER_H
       const active = activeReorder.active || Math.abs(e.clientY - activeReorder.originY) > 4
+      // Capture only once this is really a drag — capturing on pointerdown
+      // would swallow the double-click that starts an inline rename.
+      if (active && !activeReorder.active) capturePointer(e)
+
       let slot = rowMeta.length
       for (let i = 0; i < rowMeta.length; i++) {
         const mid = trackTops[i] + (LANE_H + (rowMeta[i].auto ? AUTO_H : 0)) / 2
@@ -309,7 +386,23 @@ export function TimelineView(): React.JSX.Element {
           break
         }
       }
-      setReorder({ ...activeReorder, active, slot })
+
+      // Hovering the middle band of a folder row means "drop INSIDE this
+      // folder" (the row lights up); the edges keep the between-rows
+      // insertion line, so both gestures stay reachable on every row.
+      const dragged = tracks[activeReorder.fromIndex]
+      let intoFolderId: string | null = null
+      for (let i = 0; i < rowMeta.length; i++) {
+        const top = trackTops[i]
+        if (y < top + LANE_H * 0.25 || y > top + LANE_H * 0.75) continue
+        const row = tracks[i]
+        // A folder can never be dropped into itself or its own subtree.
+        if (row.kind === 'folder' && dragged && !isTrackSelfOrDescendant(state, row.id, dragged.id)) {
+          intoFolderId = row.id
+        }
+        break
+      }
+      setReorder({ ...activeReorder, active, slot, intoFolderId })
       return
     }
     if (!drag) return
@@ -331,7 +424,8 @@ export function TimelineView(): React.JSX.Element {
           Math.max(minStart, Math.max(0, snapTicks(prev.origStart + dxTicks, gridTicks)))
         )
         duration = prev.origStart + prev.origDuration - start
-        offset = prev.hasAsset ? prev.origOffset + (start - prev.origStart) : 0
+        offset =
+          prev.hasAsset ? prev.origOffset + (start - prev.origStart) : prev.origOffset
       } else {
         duration = Math.max(gridTicks, snapTicks(prev.origDuration + dxTicks, gridTicks))
       }
@@ -344,14 +438,80 @@ export function TimelineView(): React.JSX.Element {
   }
 
   const onPointerUp = (): void => {
+    if (loopDragRef.current) {
+      onLoopDragEnd()
+      return
+    }
     const endedReorder = reorderRef.current
     if (endedReorder) {
       if (endedReorder.active) {
         const track = tracks[endedReorder.fromIndex]
-        const index =
-          endedReorder.slot > endedReorder.fromIndex ? endedReorder.slot - 1 : endedReorder.slot
-        if (track && index !== endedReorder.fromIndex) {
-          projectStore.dispatch({ type: 'track/reorder', trackId: track.id, index })
+        if (track && endedReorder.intoFolderId) {
+          // Dropped on a folder's middle: land at the end of its contents.
+          const folderId = endedReorder.intoFolderId
+          const lastIndex = trackSubtreeOf(state, folderId).reduce(
+            (max, t) => Math.max(max, state.trackOrder.indexOf(t.id)),
+            -1
+          )
+          const fromOrder = state.trackOrder.indexOf(track.id)
+          let targetOrder = lastIndex + 1
+          if (fromOrder < targetOrder) targetOrder -= 1
+          if (targetOrder !== fromOrder || track.parentId !== folderId) {
+            projectStore.dispatch({
+              type: 'track/reorder',
+              trackId: track.id,
+              index: targetOrder,
+              parentId: folderId
+            })
+          }
+          // Reveal the result if the folder was collapsed.
+          if (folderUi.isCollapsed(folderId)) folderUi.toggle(folderId)
+          setReorder(null)
+          return
+        }
+        if (track) {
+          // An insertion line NEVER puts a track into a folder it is only
+          // passing: joining a folder means dropping ON it (the highlighted
+          // middle band). The line just adopts the depth of the row it
+          // pushes down. One gesture = one op.
+          const slot = endedReorder.slot
+          const above = slot > 0 ? tracks[slot - 1] : null
+          const below = slot < tracks.length ? tracks[slot] : null
+          const underFolderHeader =
+            above !== null && above.kind === 'folder' && !foldUi.isCollapsed(above.id)
+          const parentId: string | null = underFolderHeader
+            ? // Directly beneath an open folder's header: that line sits at
+              // the FOLDER's own level, not inside it.
+              above.parentId
+            : (below?.parentId ?? null) // no row below = end of list = root
+          // Never nest a folder inside itself/its subtree (reducer would
+          // reject the parent change and leave a confusing half-move).
+          let p: string | null = parentId
+          while (p !== null && p !== track.id) p = state.tracks[p]?.parentId ?? null
+          if (p !== track.id) {
+            const fromOrder = state.trackOrder.indexOf(track.id)
+            let targetOrder = below
+              ? state.trackOrder.indexOf(below.id)
+              : state.trackOrder.length
+            if (underFolderHeader) {
+              // Landing at the folder's level: go after its whole subtree,
+              // so the stored order matches where the row is drawn.
+              targetOrder =
+                trackSubtreeOf(state, above.id).reduce(
+                  (max, t) => Math.max(max, state.trackOrder.indexOf(t.id)),
+                  -1
+                ) + 1
+            }
+            if (fromOrder < targetOrder) targetOrder -= 1
+            if (targetOrder !== fromOrder || parentId !== track.parentId) {
+              projectStore.dispatch({
+                type: 'track/reorder',
+                trackId: track.id,
+                index: targetOrder,
+                parentId
+              })
+            }
+          }
         }
       }
       setReorder(null)
@@ -364,7 +524,9 @@ export function TimelineView(): React.JSX.Element {
     if (drag.moved) {
       if (drag.mode === 'move') {
         const targetTrack = tracks[drag.trackIndex]
-        if (targetTrack) {
+        // Folder and frozen lanes never accept clips (the reducer would
+        // reject the folder case anyway; skip the no-op dispatch).
+        if (targetTrack && targetTrack.kind !== 'folder' && !targetTrack.frozenAssetId) {
           projectStore.dispatch({
             type: 'clip/move',
             clipId: drag.clipId,
@@ -387,7 +549,7 @@ export function TimelineView(): React.JSX.Element {
 
   const onLaneDoubleClick = (e: React.MouseEvent, trackIndex: number): void => {
     const track = tracks[trackIndex]
-    if (!track) return
+    if (!track || track.kind === 'folder' || track.frozenAssetId) return
     const laneRect = (e.currentTarget as HTMLElement).getBoundingClientRect()
     const ticks = (e.clientX - laneRect.left) / pxPerTick
     const start = Math.floor(ticks / gridTicks) * gridTicks
@@ -399,7 +561,12 @@ export function TimelineView(): React.JSX.Element {
       duration: barTicks,
       assetId: null,
       offset: 0,
-      color: null
+      color: null,
+      fadeIn: 0,
+      fadeOut: 0,
+      reverse: false,
+      pitch: 0,
+      stretch: 1
     }
     projectStore.dispatch({ type: 'clip/create', clip, notes: [] })
     selection.select(clip.id)
@@ -407,7 +574,7 @@ export function TimelineView(): React.JSX.Element {
 
   const onLaneDragOver = (e: React.DragEvent, trackIndex: number): void => {
     const track = tracks[trackIndex]
-    if (!track) return
+    if (!track || track.kind === 'folder' || track.frozenAssetId) return
     // Bay assets announce their kind as a data type so we can filter here,
     // before the payload itself is readable (it only is on drop).
     const bayMatch = e.dataTransfer.types.includes(`${BAY_DRAG_MIME}-${track.kind}`)
@@ -420,7 +587,7 @@ export function TimelineView(): React.JSX.Element {
 
   const onLaneDrop = (e: React.DragEvent, trackIndex: number): void => {
     const track = tracks[trackIndex]
-    if (!track) return
+    if (!track || track.kind === 'folder' || track.frozenAssetId) return
     e.preventDefault()
     const laneRect = (e.currentTarget as HTMLElement).getBoundingClientRect()
     const ticks = (e.clientX - laneRect.left) / pxPerTick
@@ -434,38 +601,98 @@ export function TimelineView(): React.JSX.Element {
     void importFilesToTrack(Array.from(e.dataTransfer.files), track, start)
   }
 
+  /**
+   * The ruler has two gestures: the lower half scrubs the playhead, the
+   * upper strip drags out the loop region (and a drag anywhere with Alt
+   * does too, for muscle memory from other DAWs).
+   */
   const onRulerPointerDown = (e: React.PointerEvent): void => {
     const rect = (e.currentTarget as HTMLElement).getBoundingClientRect()
+    const ticks = Math.max(0, snapTicks((e.clientX - rect.left) / pxPerTick, gridTicks))
+    const inLoopStrip = e.clientY - rect.top < LOOP_STRIP_H
+    if (inLoopStrip || e.altKey) {
+      capturePointer(e)
+      setLoopDrag({ mode: 'new', anchorTicks: ticks, start: ticks, end: ticks })
+      return
+    }
     transport.setPosition((e.clientX - rect.left) / pxPerTick)
   }
 
-  const addTrack = (kind: TrackKind): void => {
-    const count = projectStore.state.trackOrder.length
-    projectStore.dispatch({
-      type: 'track/create',
-      track: {
-        id: newId('trk'),
-        kind,
-        name: `${kind === 'audio' ? 'Audio' : 'MIDI'} ${count + 1}`,
-        color: nextTrackColor(count),
-        muted: false,
-        soloed: false,
-        volume: 1,
-        pan: 0,
-        synth: kind === 'midi' ? synthDefaults() : {}
-      },
-      index: count,
-      clips: [],
-      automation: [],
-      notes: [],
-      plugins: []
+  /** Grab an existing region: its edges resize, its body moves it. */
+  const beginLoopAdjust = (e: React.PointerEvent, mode: LoopDragMode): void => {
+    const region = transport.loopRegion
+    if (!region || e.button !== 0) return
+    e.stopPropagation()
+    capturePointer(e)
+    const rect = gridRef.current?.getBoundingClientRect()
+    const ticks = rect ? (e.clientX - rect.left - HEADER_W) / pxPerTick : 0
+    setLoopDrag({
+      mode,
+      anchorTicks: ticks,
+      start: region.start,
+      end: region.end,
+      origStart: region.start,
+      origEnd: region.end
     })
   }
 
-  // Bar-number labels, thinned so they stay >= ~64px apart.
-  const labelStepBars = Math.max(1, Math.pow(2, Math.ceil(Math.log2(64 / Math.max(1, pxPerBar)))))
-  const barLabels: number[] = []
-  for (let bar = 0; bar * barTicks < contentTicks; bar += labelStepBars) barLabels.push(bar)
+  const onLoopDragMove = (e: React.PointerEvent): void => {
+    const drag = loopDragRef.current
+    if (!drag) return
+    const rect = gridRef.current?.getBoundingClientRect()
+    if (!rect) return
+    const ticks = Math.max(0, snapTicks((e.clientX - rect.left - HEADER_W) / pxPerTick, gridTicks))
+    if (drag.mode === 'new') {
+      setLoopDrag({ ...drag, start: Math.min(drag.anchorTicks, ticks), end: Math.max(drag.anchorTicks, ticks) })
+    } else if (drag.mode === 'start') {
+      setLoopDrag({ ...drag, start: Math.min(ticks, drag.end - gridTicks) })
+    } else if (drag.mode === 'end') {
+      setLoopDrag({ ...drag, end: Math.max(ticks, drag.start + gridTicks) })
+    } else {
+      // Move: shift both edges, keeping the span and never going negative.
+      const delta = ticks - drag.anchorTicks
+      const span = (drag.origEnd ?? drag.end) - (drag.origStart ?? drag.start)
+      const start = Math.max(0, (drag.origStart ?? drag.start) + delta)
+      setLoopDrag({ ...drag, start, end: start + span })
+    }
+  }
+
+  const onLoopDragEnd = (): void => {
+    const drag = loopDragRef.current
+    if (!drag) return
+    setLoopDrag(null)
+    if (drag.end - drag.start >= 1) transport.setLoopRegion(drag.start, drag.end)
+    else if (drag.mode === 'new') transport.clearLoop() // a click clears it
+  }
+
+  const addTrack = (kind: TrackKind): void => createTrack(kind)
+
+  // Ruler labels for the active mode, thinned to stay legible.
+  const rulerLabels: Array<{ x: number; text: string }> = []
+  if (rulerMode === 'bars') {
+    const step = Math.max(1, Math.pow(2, Math.ceil(Math.log2(64 / Math.max(1, pxPerBar)))))
+    for (let bar = 0; bar * barTicks < contentTicks; bar += step) {
+      rulerLabels.push({ x: bar * pxPerBar, text: String(bar + 1) })
+    }
+  } else {
+    const tps = ticksPerSecond(state.tempo)
+    const pxPerSec = tps * pxPerTick
+    const minPx = rulerMode === 'samples' ? 110 : 64
+    const steps = [0.1, 0.25, 0.5, 1, 2, 5, 10, 15, 30, 60, 120, 300, 600]
+    const secStep = steps.find((s) => s * pxPerSec >= minPx) ?? 1200
+    const totalSec = contentTicks / tps
+    const sampleRate = audioEngine.contextInfo()?.sampleRate ?? 48000
+    for (let sec = 0; sec <= totalSec; sec += secStep) {
+      const text =
+        rulerMode === 'time'
+          ? `${Math.floor(sec / 60)}:${(sec % 60).toFixed(secStep < 1 ? 1 : 0).padStart(secStep < 1 ? 4 : 2, '0')}`
+          : Math.round(sec * sampleRate).toLocaleString()
+      rulerLabels.push({ x: sec * pxPerSec, text })
+    }
+  }
+
+  // The region being dragged wins over the committed one, so the drag reads live.
+  const shownLoop = loopDrag ?? transport.loopRegion
 
   const laneBackground = {
     backgroundImage:
@@ -475,7 +702,8 @@ export function TimelineView(): React.JSX.Element {
         : `repeating-linear-gradient(to right, var(--grid-bar) 0 1px, transparent 1px ${pxPerBar}px)`
   }
 
-  const anySoloed = tracks.some((t) => t.soloed)
+  // Silent = own mute/solo state OR any ancestor folder-bus closed.
+  const isSilent = (trackId: string): boolean => !isTrackEffectivelyAudible(state, trackId)
 
   return (
     <div className="timeline" ref={scrollRef}>
@@ -498,6 +726,9 @@ export function TimelineView(): React.JSX.Element {
           <button className="corner-btn" onClick={() => addTrack('midi')}>
             + MIDI
           </button>
+          <button className="corner-btn" title="Folder track (a bus — drag tracks into it)" onClick={() => addTrack('folder')}>
+            + Folder
+          </button>
         </div>
 
         <div
@@ -505,11 +736,36 @@ export function TimelineView(): React.JSX.Element {
           style={{ gridRow: 1, gridColumn: 2 }}
           onPointerDown={onRulerPointerDown}
         >
-          {barLabels.map((bar) => (
-            <span key={bar} className="ruler-label mono" style={{ left: bar * pxPerBar + 4 }}>
-              {bar + 1}
+          {rulerLabels.map((label) => (
+            <span key={label.x} className="ruler-label mono" style={{ left: label.x + 4 }}>
+              {label.text}
             </span>
           ))}
+          <div className="ruler-loop-strip" style={{ height: LOOP_STRIP_H }} />
+          {shownLoop && (
+            <div
+              className={`ruler-loop ${transport.loopEnabled ? '' : 'ruler-loop-off'}`}
+              style={{
+                left: shownLoop.start * pxPerTick,
+                width: Math.max(2, (shownLoop.end - shownLoop.start) * pxPerTick)
+              }}
+              title="Loop region — drag to move, edges to resize, double-click to clear"
+              onPointerDown={(e) => beginLoopAdjust(e, 'move')}
+              onDoubleClick={(e) => {
+                e.stopPropagation()
+                transport.clearLoop()
+              }}
+            >
+              <div
+                className="ruler-loop-handle"
+                onPointerDown={(e) => beginLoopAdjust(e, 'start')}
+              />
+              <div
+                className="ruler-loop-handle ruler-loop-handle-end"
+                onPointerDown={(e) => beginLoopAdjust(e, 'end')}
+              />
+            </div>
+          )}
         </div>
 
         {tracks.map((track, i) => (
@@ -524,14 +780,16 @@ export function TimelineView(): React.JSX.Element {
             }`}
             onPointerDown={(e) => beginReorder(e, i)}
           >
-            <TrackHeader track={track} />
+            <TrackHeader track={track} depth={depthOf[i]} />
           </div>
         ))}
 
         {tracks.map((track, i) => (
           <div
             key={track.id}
-            className={`lane ${track.muted || (anySoloed && !track.soloed) ? 'lane-muted' : ''}`}
+            className={`lane ${isSilent(track.id) ? 'lane-muted' : ''} ${
+              track.kind === 'folder' ? 'lane-folder' : ''
+            }`}
             style={{ gridRow: gridRowOfTrack[i], gridColumn: 2, ...laneBackground }}
             onPointerDown={() => selection.select(null)}
             onDoubleClick={(e) => onLaneDoubleClick(e, i)}
@@ -559,7 +817,8 @@ export function TimelineView(): React.JSX.Element {
             style={{ gridRow: `2 / ${lastGridRow}`, gridColumn: 2 }}
           >
             {Object.values(state.clips).map((clip) => {
-              const trackIndex = state.trackOrder.indexOf(clip.trackId)
+              // Hidden (collapsed-folder) tracks render no clips.
+              const trackIndex = rowIndexOfTrack.get(clip.trackId) ?? -1
               const track = state.tracks[clip.trackId]
               if (trackIndex === -1 || !track) return null
               return (
@@ -579,12 +838,13 @@ export function TimelineView(): React.JSX.Element {
                       : null
                   }
                   selected={clip.id === selectedClipId}
-                  dimmed={track.muted || (anySoloed && !track.soloed)}
+                  dimmed={isSilent(track.id) || track.frozenAssetId !== null}
                   pxPerTick={pxPerTick}
                   tempo={state.tempo}
                   laneTops={trackTops}
                   commentCount={clipCommentCounts.get(clip.id) ?? 0}
                   notes={notesByClip.get(clip.id) ?? []}
+                  fadesEditable={clip.assetId !== null && track.frozenAssetId === null}
                   onPointerDown={(e, mode) => beginDrag(e, clip.id, mode)}
                   onOpenComments={() => commentUi.open({ kind: 'clip', id: clip.id })}
                   onContextMenu={(e) => {
@@ -602,6 +862,18 @@ export function TimelineView(): React.JSX.Element {
           </div>
         )}
 
+        {trackCount > 0 && shownLoop && (
+          <div className="loop-layer" style={{ gridRow: `2 / ${lastGridRow}`, gridColumn: 2 }}>
+            <div
+              className={`loop-region ${transport.loopEnabled ? '' : 'loop-region-off'}`}
+              style={{
+                left: shownLoop.start * pxPerTick,
+                width: Math.max(2, (shownLoop.end - shownLoop.start) * pxPerTick)
+              }}
+            />
+          </div>
+        )}
+
         {trackCount > 0 && (
           <div className="playhead-layer" style={{ gridRow: `2 / ${lastGridRow}`, gridColumn: 2 }}>
             <Playhead pxPerTick={pxPerTick} />
@@ -613,17 +885,28 @@ export function TimelineView(): React.JSX.Element {
             className="reorder-layer"
             style={{ gridRow: `2 / ${lastGridRow}`, gridColumn: '1 / 3' }}
           >
-            <div
-              className="reorder-line"
-              style={{
-                top:
-                  reorder.slot < rowMeta.length
-                    ? trackTops[reorder.slot]
-                    : trackTops[rowMeta.length - 1] +
-                      LANE_H +
-                      (rowMeta[rowMeta.length - 1].auto ? AUTO_H : 0)
-              }}
-            />
+            {reorder.intoFolderId !== null ? (
+              <div
+                className="reorder-into"
+                style={{
+                  top: trackTops[rowIndexOfTrack.get(reorder.intoFolderId) ?? 0],
+                  height: LANE_H,
+                  '--track-color': state.tracks[reorder.intoFolderId]?.color
+                } as React.CSSProperties}
+              />
+            ) : (
+              <div
+                className="reorder-line"
+                style={{
+                  top:
+                    reorder.slot < rowMeta.length
+                      ? trackTops[reorder.slot]
+                      : trackTops[rowMeta.length - 1] +
+                        LANE_H +
+                        (rowMeta[rowMeta.length - 1].auto ? AUTO_H : 0)
+                }}
+              />
+            )}
           </div>
         )}
 
@@ -648,7 +931,7 @@ export function TimelineView(): React.JSX.Element {
           openCommentAnchor?.kind === 'clip' &&
           (() => {
             const clip = state.clips[openCommentAnchor.id]
-            const laneIndex = clip ? state.trackOrder.indexOf(clip.trackId) : -1
+            const laneIndex = clip ? rowIndexOfTrack.get(clip.trackId) ?? -1 : -1
             if (!clip || laneIndex === -1) return null
             return (
               <div
@@ -673,35 +956,13 @@ export function TimelineView(): React.JSX.Element {
         (() => {
           const clip = state.clips[colorMenu.clipId]
           if (!clip) return null
-          const pick = (color: string | null): void => {
-            projectStore.dispatch({ type: 'clip/setColor', clipId: clip.id, color })
-            setColorMenu(null)
-          }
           return (
-            <div
-              className="color-menu"
-              style={{ left: colorMenu.x, top: colorMenu.y }}
-              onPointerDown={(e) => e.stopPropagation()}
-            >
-              {TRACK_COLORS.map((color) => (
-                <button
-                  key={color}
-                  className={`color-swatch ${clip.color === color ? 'color-swatch-active' : ''}`}
-                  style={{ background: color }}
-                  title={color}
-                  onClick={() => pick(color)}
-                />
-              ))}
-              <button
-                className={`color-swatch color-swatch-reset ${
-                  clip.color === null ? 'color-swatch-active' : ''
-                }`}
-                title="Use the track color"
-                onClick={() => pick(null)}
-              >
-                ×
-              </button>
-            </div>
+            <ClipMenu
+              clip={clip}
+              x={colorMenu.x}
+              y={colorMenu.y}
+              onClose={() => setColorMenu(null)}
+            />
           )
         })()}
     </div>
