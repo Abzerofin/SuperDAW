@@ -5,9 +5,21 @@ import { referencedAssetIds } from '@core/persistence/format'
 import { HostSession, type HostPeer } from '@core/session/host'
 import { ClientSession } from '@core/session/client'
 import type { PresenceData, SessionUser } from '@core/session/protocol'
+import type { TransferMeta } from '@core/session/transfer'
 import { decodeJoinCode, encodeJoinCode } from '@core/session/joinCode'
+import type { ProjectAsset } from '@audio/assets'
 import { projectStore } from './projectStore'
 import { assetStore, audioEngine } from './audioInstance'
+
+function metaOf(asset: ProjectAsset): TransferMeta {
+  return {
+    assetId: asset.id,
+    name: asset.name,
+    kind: asset.kind,
+    ext: asset.ext,
+    size: asset.encoded.length
+  }
+}
 
 /**
  * Session orchestration for the renderer: hosting (via the main-process
@@ -64,6 +76,8 @@ class CollabStore {
   private pingList: ActivePing[] = []
   /** Names/colors survive departures so the activity feed stays readable. */
   private identities = new Map<string, { name: string; colorIndex: number }>()
+  /** Live downloads: assetId → progress (drives placeholder fills). */
+  readonly assetProgress = new Map<string, { received: number; total: number }>()
 
   private hostSession: HostSession | null = null
   private hostPeers = new Map<number, HostPeer>()
@@ -138,15 +152,14 @@ class CollabStore {
     const session = new HostSession(projectStore, {
       hostName: this.displayName,
       assetProvider: {
-        getAssetForTransfer: (assetId) => {
+        has: (assetId) => assetStore.get(assetId) !== undefined,
+        get: (assetId) => {
           const asset = assetStore.get(assetId)
           if (!asset) return null
-          return {
-            name: asset.name,
-            kind: asset.kind,
-            ext: asset.ext,
-            bytesBase64: u8ToBase64(asset.encoded)
-          }
+          return { meta: metaOf(asset), bytes: asset.encoded }
+        },
+        store: (meta, bytes) => {
+          void this.receiveAsset(meta, bytes)
         }
       },
       onRosterChange: (users) => {
@@ -198,33 +211,53 @@ class CollabStore {
     }
     if (this.mode !== 'off') this.stopAll()
 
-    this.clientSession = new ClientSession(projectStore, this.displayName, {
-      onWelcome: (snapshot, users, _you, _firstJoin) => {
-        this.users = users
-        this.rememberIdentities(users)
-        this.reconnecting = false
-        this.requestMissingAssets(snapshot)
-        this.emit()
+    this.clientSession = new ClientSession(
+      projectStore,
+      this.displayName,
+      {
+        onWelcome: (snapshot, users, _you, _firstJoin) => {
+          this.users = users
+          this.rememberIdentities(users)
+          this.reconnecting = false
+          this.requestMissingAssets(snapshot)
+          this.emit()
+        },
+        onRejected: (reason) => {
+          this.fail(reason)
+          this.leave()
+        },
+        onUserJoined: (user) => {
+          this.users = [...this.users.filter((u) => u.userId !== user.userId), user]
+          this.rememberIdentities([user])
+          this.emit()
+        },
+        onUserLeft: (userId) => {
+          this.users = this.users.filter((u) => u.userId !== userId)
+          this.cursors.delete(userId)
+          this.emit()
+        },
+        onPresence: (userId, data) => this.applyRemotePresence(userId, data),
+        onAssetAvailable: (meta) => {
+          if (!assetStore.get(meta.assetId)) this.clientSession?.requestAsset(meta.assetId)
+        },
+        onAssetProgress: (assetId, received, total) => {
+          this.assetProgress.set(assetId, { received, total })
+          this.emit()
+        },
+        onAssetComplete: (meta, bytes) => {
+          this.assetProgress.delete(meta.assetId)
+          void this.receiveAsset(meta, bytes)
+        }
       },
-      onRejected: (reason) => {
-        this.fail(reason)
-        this.leave()
-      },
-      onUserJoined: (user) => {
-        this.users = [...this.users.filter((u) => u.userId !== user.userId), user]
-        this.rememberIdentities([user])
-        this.emit()
-      },
-      onUserLeft: (userId) => {
-        this.users = this.users.filter((u) => u.userId !== userId)
-        this.cursors.delete(userId)
-        this.emit()
-      },
-      onPresence: (userId, data) => this.applyRemotePresence(userId, data),
-      onAssetData: (assetId, name, kind, ext, bytesBase64) => {
-        void this.receiveAsset(assetId, name, kind, ext, bytesBase64)
+      {
+        // Uploads (host pulls an asset we offered) read from the asset store.
+        get: (assetId) => {
+          const asset = assetStore.get(assetId)
+          if (!asset) return null
+          return { meta: metaOf(asset), bytes: asset.encoded }
+        }
       }
-    })
+    )
 
     this.mode = 'joined'
     this.reconnecting = true
@@ -341,24 +374,32 @@ class CollabStore {
     }
   }
 
-  private async receiveAsset(
-    assetId: string,
-    name: string,
-    kind: 'audio' | 'midi',
-    ext: string,
-    bytesBase64: string
-  ): Promise<void> {
-    if (assetStore.get(assetId)) return
-    const bytes = base64ToU8(bytesBase64)
+  /** A transfer finished (download, or a guest upload while hosting). */
+  private async receiveAsset(meta: TransferMeta, bytes: Uint8Array): Promise<void> {
+    if (assetStore.get(meta.assetId)) return
     let buffer: AudioBuffer | null = null
-    if (kind === 'audio') {
+    if (meta.kind === 'audio') {
       try {
         buffer = await audioEngine.decode(bytes.slice().buffer)
       } catch (error) {
-        console.error(`Could not decode received asset "${name}"`, error)
+        console.error(`Could not decode received asset "${meta.name}"`, error)
       }
     }
-    assetStore.restore(assetId, name, kind, ext, bytes, buffer)
+    assetStore.restore(meta.assetId, meta.name, meta.kind, meta.ext, bytes, buffer)
+  }
+
+  /**
+   * Auto-offer: any asset imported/recorded ON THIS MACHINE while in a
+   * session is announced so collaborators get it in the background — the
+   * user never thinks about it. Wired once at construction.
+   */
+  attachAssetOffers(): void {
+    assetStore.subscribe((event) => {
+      if (!event || event.origin !== 'local') return
+      const meta = metaOf(event.asset)
+      if (this.mode === 'hosting') this.hostSession?.announceAsset(meta)
+      else if (this.mode === 'joined') this.clientSession?.offerAsset(meta)
+    })
   }
 
   // ---------- misc ----------
@@ -376,27 +417,10 @@ class CollabStore {
 }
 
 export const collab = new CollabStore()
+collab.attachAssetOffers()
 
 /** Re-render on any collab change; read fields directly off `collab`. */
 export function useCollab(): CollabStore {
   useSyncExternalStore(collab.subscribe, collab.getVersion)
   return collab
-}
-
-// ---------- base64 helpers ----------
-
-function u8ToBase64(u8: Uint8Array): string {
-  let binary = ''
-  const CHUNK = 0x8000
-  for (let i = 0; i < u8.length; i += CHUNK) {
-    binary += String.fromCharCode(...u8.subarray(i, i + CHUNK))
-  }
-  return btoa(binary)
-}
-
-function base64ToU8(base64: string): Uint8Array {
-  const binary = atob(base64)
-  const u8 = new Uint8Array(binary.length)
-  for (let i = 0; i < binary.length; i++) u8[i] = binary.charCodeAt(i)
-  return u8
 }

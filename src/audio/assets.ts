@@ -37,16 +37,26 @@ export interface ProjectAsset {
 
 export const PEAKS_PER_SECOND = 120
 
+/**
+ * 'local' = imported/recorded on THIS machine (a session should offer it
+ * to collaborators); 'restored' = loaded from a project file or received
+ * from the session (never re-offered). Absent for bulk changes (clear).
+ */
+export interface AssetEvent {
+  readonly asset: ProjectAsset
+  readonly origin: 'local' | 'restored'
+}
+
 export class AssetStore {
   private assets = new Map<string, ProjectAsset>()
-  private listeners = new Set<() => void>()
+  private listeners = new Set<(event?: AssetEvent) => void>()
 
   addAudio(name: string, ext: string, encoded: Uint8Array, buffer: AudioBuffer): ProjectAsset {
-    return this.restore(newId('ast'), name, 'audio', ext, encoded, buffer)
+    return this.register(newId('ast'), name, 'audio', ext, encoded, buffer, 'local')
   }
 
   addMidi(name: string, ext: string, encoded: Uint8Array): ProjectAsset {
-    return this.restore(newId('ast'), name, 'midi', ext, encoded, null)
+    return this.register(newId('ast'), name, 'midi', ext, encoded, null, 'local')
   }
 
   /** Register an asset under a fixed id (loading project files, remote sync). */
@@ -57,6 +67,18 @@ export class AssetStore {
     ext: string,
     encoded: Uint8Array,
     buffer: AudioBuffer | null
+  ): ProjectAsset {
+    return this.register(id, name, kind, ext, encoded, buffer, 'restored')
+  }
+
+  private register(
+    id: string,
+    name: string,
+    kind: 'audio' | 'midi',
+    ext: string,
+    encoded: Uint8Array,
+    buffer: AudioBuffer | null,
+    origin: 'local' | 'restored'
   ): ProjectAsset {
     const asset: ProjectAsset = {
       id,
@@ -70,7 +92,7 @@ export class AssetStore {
       peaksPerSecond: PEAKS_PER_SECOND
     }
     this.assets.set(asset.id, asset)
-    for (const listener of this.listeners) listener()
+    for (const listener of this.listeners) listener({ asset, origin })
     return asset
   }
 
@@ -93,7 +115,7 @@ export class AssetStore {
     for (const listener of this.listeners) listener()
   }
 
-  subscribe = (listener: () => void): (() => void) => {
+  subscribe = (listener: (event?: AssetEvent) => void): (() => void) => {
     this.listeners.add(listener)
     return () => this.listeners.delete(listener)
   }

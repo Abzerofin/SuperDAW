@@ -1,0 +1,6 @@
+{
+  "name": "superdaw-relay",
+  "private": true,
+  "type": "module",
+  "description": "SuperDAW collaboration relay — in-memory session rendezvous, no database"
+}

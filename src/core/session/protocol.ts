@@ -1,13 +1,18 @@
 import type { ProjectState } from '../model/types'
 import type { OpEnvelope } from '../ops/operations'
+import type { AssetTransferMessage, TransferMeta } from './transfer'
 
 /**
  * Wire protocol for a collaboration session (see docs/PROTOCOL.md).
  * Everything here is plain JSON-serializable data; the transport layer
- * (WebSocket, in-memory test relay) just moves these messages verbatim.
+ * (WebSocket, in-memory test relay, internet relay) just moves these
+ * messages verbatim.
+ *
+ * v2: single-blob asset-data replaced by chunked, flow-controlled
+ * transfers (transfer.ts) with guest uploads (asset-offer/asset-pull).
  */
 
-export const PROTOCOL_VERSION = 1
+export const PROTOCOL_VERSION = 2
 
 export interface SessionUser {
   readonly userId: string
@@ -41,7 +46,11 @@ export type ClientToHost =
     }
   | { t: 'op'; envelope: OpEnvelope }
   | { t: 'presence'; data: PresenceData }
-  | { t: 'asset-request'; assetId: string }
+  /** "Send me this asset" — `haveBytes` resumes an interrupted download. */
+  | { t: 'asset-request'; assetId: string; haveBytes: number }
+  /** "I imported an asset" — the host pulls it if it doesn't have it. */
+  | { t: 'asset-offer'; meta: TransferMeta }
+  | AssetTransferMessage
 
 export type HostToClient =
   | {
@@ -62,14 +71,11 @@ export type HostToClient =
   | { t: 'presence'; userId: string; data: PresenceData }
   | { t: 'user-joined'; user: SessionUser }
   | { t: 'user-left'; userId: string }
-  | {
-      t: 'asset-data'
-      assetId: string
-      name: string
-      kind: 'audio' | 'midi'
-      ext: string
-      bytesBase64: string
-    }
+  /** Host wants an offered asset uploaded; the guest answers with asset-begin. */
+  | { t: 'asset-pull'; assetId: string; transferId: string }
+  /** A new asset exists in the session; clients missing it should request it. */
+  | { t: 'asset-available'; meta: TransferMeta }
+  | AssetTransferMessage
 
 export type SessionMessage = ClientToHost | HostToClient
 

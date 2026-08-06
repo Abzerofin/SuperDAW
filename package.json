@@ -10,8 +10,9 @@
     "dev": "electron-vite dev",
     "dev:web": "vite --config vite.web.config.ts",
     "build": "electron-vite build",
-    "typecheck": "tsc --noEmit -p tsconfig.json && tsc --noEmit -p tsconfig.node.json",
+    "typecheck": "tsc --noEmit -p tsconfig.json && tsc --noEmit -p tsconfig.node.json && tsc --noEmit -p server/tsconfig.json",
     "test": "vitest run",
+    "relay": "node server/src/index.ts",
     "dist": "electron-vite build && electron-builder --win --dir"
   },
   "build": {
