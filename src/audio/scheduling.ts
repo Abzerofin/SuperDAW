@@ -131,6 +131,8 @@ export function scheduleClips(
 
 export interface NoteSchedule {
   readonly trackId: string
+  /** Owning clip — lets the engine route the voice through its fade envelope. */
+  readonly clipId: string
   readonly pitch: number
   /** Normalized 0..1 from MIDI velocity. */
   readonly velocity: number
@@ -170,6 +172,7 @@ export function scheduleNotes(
 
     out.push({
       trackId: track.id,
+      clipId: clip.id,
       pitch: note.pitch,
       velocity: note.velocity / 127,
       startSec: anchorSec + (Math.max(absStart, anchorTicks) - anchorTicks) / tps,

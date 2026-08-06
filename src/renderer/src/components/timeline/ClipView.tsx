@@ -6,7 +6,6 @@ import type { ProjectAsset } from '@audio/assets'
 import { assetStore } from '@/state/audioInstance'
 import { projectStore } from '@/state/projectStore'
 import { capturePointer } from '@/lib/pointer'
-import { LANE_H } from './geometry'
 
 interface Props {
   clip: Clip
@@ -20,6 +19,8 @@ interface Props {
   tempo: number
   /** Content-space y of each track lane (automation lanes shift these). */
   laneTops: number[]
+  /** Row height in px (compact mode shrinks it). */
+  laneHeight: number
   /** Open (unresolved) comment threads on this clip. */
   commentCount: number
   /** This clip's notes (MIDI clips); empty for audio. */
@@ -44,6 +45,7 @@ export function ClipView({
   pxPerTick,
   tempo,
   laneTops,
+  laneHeight,
   commentCount,
   notes,
   fadesEditable,
@@ -63,7 +65,7 @@ export function ClipView({
   )
 
   const width = Math.max(4, duration * pxPerTick - 1)
-  const height = LANE_H - 8
+  const height = laneHeight - 8
 
 
   // Fade handle drag: local preview, ONE clip/setFades op on release.
@@ -161,7 +163,7 @@ export function ClipView({
       {notes.length > 0 && (
         <NotePreview notes={notes} duration={duration} width={width} height={height} />
       )}
-      {clip.assetId !== null && (fadeInTicks > 0 || fadeOutTicks > 0) && (
+      {(fadeInTicks > 0 || fadeOutTicks > 0) && (
         <FadeShade
           width={width}
           height={height}

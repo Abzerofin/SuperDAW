@@ -27,10 +27,19 @@ import { useAutomationUi } from '@/state/automationUi'
 import { pianoRollUi } from '@/state/pianoRollUi'
 import { useRecording } from '@/state/recording'
 import { folderUi, useFolderUi } from '@/state/folderUi'
+import { trackViewUi, useTrackViewUi } from '@/state/trackViewUi'
 import { useRulerMode } from '@/state/rulerUi'
 import { audioEngine } from '@/state/audioInstance'
 import { ticksPerSecond } from '@audio/scheduling'
-import { HEADER_W, RULER_H, LANE_H, AUTO_H, MIN_PX_PER_BEAT, MAX_PX_PER_BEAT } from './geometry'
+import {
+  HEADER_W,
+  RULER_H,
+  LANE_H,
+  COMPACT_LANE_H,
+  AUTO_H,
+  MIN_PX_PER_BEAT,
+  MAX_PX_PER_BEAT
+} from './geometry'
 import { TrackHeader } from './TrackHeader'
 import { ClipView } from './ClipView'
 import { ClipMenu } from './ClipMenu'
@@ -141,6 +150,9 @@ export function TimelineView(): React.JSX.Element {
 
   const autoUi = useAutomationUi()
   const foldUi = useFolderUi()
+  // Compact mode shrinks every row and strips the header down to its name.
+  const compact = useTrackViewUi().compact
+  const laneH = compact ? COMPACT_LANE_H : LANE_H
 
   // Visible rows derive from the folder tree: roots in trackOrder order,
   // each folder followed by its children (collapsed folders hide theirs).
@@ -172,7 +184,7 @@ export function TimelineView(): React.JSX.Element {
     for (const meta of rowMeta) {
       trackTops.push(top)
       gridRowOfTrack.push(row)
-      top += LANE_H
+      top += laneH
       row += 1
       if (meta.auto) {
         top += AUTO_H
@@ -184,15 +196,15 @@ export function TimelineView(): React.JSX.Element {
     2 + rowMeta.reduce((n, m) => n + (m.auto ? 2 : 1), 0)
   const rowTemplate =
     trackCount === 0
-      ? `${RULER_H}px ${LANE_H}px`
+      ? `${RULER_H}px ${laneH}px`
       : `${RULER_H}px ${rowMeta
-          .map((m) => (m.auto ? `${LANE_H}px ${AUTO_H}px` : `${LANE_H}px`))
+          .map((m) => (m.auto ? `${laneH}px ${AUTO_H}px` : `${laneH}px`))
           .join(' ')}`
 
   /** Track index for a y position in content coordinates (below the ruler). */
   const trackIndexAtY = (y: number): number => {
     for (let i = 0; i < rowMeta.length; i++) {
-      const bottom = trackTops[i] + LANE_H + (rowMeta[i].auto ? AUTO_H : 0)
+      const bottom = trackTops[i] + laneH + (rowMeta[i].auto ? AUTO_H : 0)
       if (y < bottom) return i
     }
     return Math.max(0, rowMeta.length - 1)
@@ -380,7 +392,7 @@ export function TimelineView(): React.JSX.Element {
 
       let slot = rowMeta.length
       for (let i = 0; i < rowMeta.length; i++) {
-        const mid = trackTops[i] + (LANE_H + (rowMeta[i].auto ? AUTO_H : 0)) / 2
+        const mid = trackTops[i] + (laneH + (rowMeta[i].auto ? AUTO_H : 0)) / 2
         if (y < mid) {
           slot = i
           break
@@ -394,7 +406,7 @@ export function TimelineView(): React.JSX.Element {
       let intoFolderId: string | null = null
       for (let i = 0; i < rowMeta.length; i++) {
         const top = trackTops[i]
-        if (y < top + LANE_H * 0.25 || y > top + LANE_H * 0.75) continue
+        if (y < top + laneH * 0.25 || y > top + laneH * 0.75) continue
         const row = tracks[i]
         // A folder can never be dropped into itself or its own subtree.
         if (row.kind === 'folder' && dragged && !isTrackSelfOrDescendant(state, row.id, dragged.id)) {
@@ -413,7 +425,7 @@ export function TimelineView(): React.JSX.Element {
       if (prev.mode === 'move') {
         start = Math.max(0, snapTicks(prev.origStart + dxTicks, gridTicks))
         const yCenter =
-          trackTops[prev.origTrackIndex] + LANE_H / 2 + (e.clientY - prev.originY)
+          trackTops[prev.origTrackIndex] + laneH / 2 + (e.clientY - prev.originY)
         trackIndex = trackIndexAtY(yCenter)
       } else if (prev.mode === 'resize-l') {
         const maxStart = prev.origStart + prev.origDuration - gridTicks
@@ -729,6 +741,13 @@ export function TimelineView(): React.JSX.Element {
           <button className="corner-btn" title="Folder track (a bus — drag tracks into it)" onClick={() => addTrack('folder')}>
             + Folder
           </button>
+          <button
+            className={`corner-btn corner-btn-icon ${compact ? 'corner-btn-active' : ''}`}
+            title={compact ? 'Show track controls' : 'Compact tracks — hide controls to fit more on screen'}
+            onClick={() => trackViewUi.toggleCompact()}
+          >
+            {compact ? '⇕' : '⇳'}
+          </button>
         </div>
 
         <div
@@ -780,7 +799,7 @@ export function TimelineView(): React.JSX.Element {
             }`}
             onPointerDown={(e) => beginReorder(e, i)}
           >
-            <TrackHeader track={track} depth={depthOf[i]} />
+            <TrackHeader track={track} depth={depthOf[i]} compact={compact} />
           </div>
         ))}
 
@@ -842,9 +861,10 @@ export function TimelineView(): React.JSX.Element {
                   pxPerTick={pxPerTick}
                   tempo={state.tempo}
                   laneTops={trackTops}
+                  laneHeight={laneH}
                   commentCount={clipCommentCounts.get(clip.id) ?? 0}
                   notes={notesByClip.get(clip.id) ?? []}
-                  fadesEditable={clip.assetId !== null && track.frozenAssetId === null}
+                  fadesEditable={track.kind !== 'folder' && track.frozenAssetId === null}
                   onPointerDown={(e, mode) => beginDrag(e, clip.id, mode)}
                   onOpenComments={() => commentUi.open({ kind: 'clip', id: clip.id })}
                   onContextMenu={(e) => {
@@ -890,7 +910,7 @@ export function TimelineView(): React.JSX.Element {
                 className="reorder-into"
                 style={{
                   top: trackTops[rowIndexOfTrack.get(reorder.intoFolderId) ?? 0],
-                  height: LANE_H,
+                  height: laneH,
                   '--track-color': state.tracks[reorder.intoFolderId]?.color
                 } as React.CSSProperties}
               />
@@ -902,7 +922,7 @@ export function TimelineView(): React.JSX.Element {
                     reorder.slot < rowMeta.length
                       ? trackTops[reorder.slot]
                       : trackTops[rowMeta.length - 1] +
-                        LANE_H +
+                        laneH +
                         (rowMeta[rowMeta.length - 1].auto ? AUTO_H : 0)
                 }}
               />
@@ -912,8 +932,8 @@ export function TimelineView(): React.JSX.Element {
 
         {trackCount > 0 && (
           <div className="presence-layer" style={{ gridRow: `2 / ${lastGridRow}`, gridColumn: 2 }}>
-            <RemoteCursors pxPerTick={pxPerTick} trackTops={trackTops} />
-            <PingOverlay pxPerTick={pxPerTick} trackTops={trackTops} />
+            <RemoteCursors pxPerTick={pxPerTick} trackTops={trackTops} laneHeight={laneH} />
+            <PingOverlay pxPerTick={pxPerTick} trackTops={trackTops} laneHeight={laneH} />
           </div>
         )}
 
@@ -923,6 +943,7 @@ export function TimelineView(): React.JSX.Element {
               pxPerTick={pxPerTick}
               trackTops={trackTops}
               trackIds={tracks.map((t) => t.id)}
+              laneHeight={laneH}
             />
           </div>
         )}
@@ -942,7 +963,7 @@ export function TimelineView(): React.JSX.Element {
                   className="comment-layer-anchor"
                   style={{
                     left: clip.start * pxPerTick + 8,
-                    top: trackTops[laneIndex] + LANE_H - 8
+                    top: trackTops[laneIndex] + laneH - 8
                   }}
                 >
                   <CommentThread anchor={openCommentAnchor} />
@@ -973,11 +994,13 @@ export function TimelineView(): React.JSX.Element {
 function RecordingRegions({
   pxPerTick,
   trackTops,
-  trackIds
+  trackIds,
+  laneHeight
 }: {
   pxPerTick: number
   trackTops: number[]
   trackIds: string[]
+  laneHeight: number
 }): React.JSX.Element | null {
   const rec = useRecording()
   const [, force] = useReducer((c: number) => c + 1, 0)
@@ -992,7 +1015,7 @@ function RecordingRegions({
           <div
             key={trackId}
             className="recording-region"
-            style={{ left, top: trackTops[i] + 4, width, height: LANE_H - 8 }}
+            style={{ left, top: trackTops[i] + 4, width, height: laneHeight - 8 }}
           />
         ) : null
       )}

@@ -474,7 +474,8 @@ input {
 
 .remote-cursor-caret {
   width: 2px;
-  height: 72px;
+  /* Matches the row height, so the caret fits compact tracks too. */
+  height: var(--lane-height, 72px);
   background: var(--user-color);
   opacity: 0.9;
 }
@@ -3107,4 +3108,41 @@ input {
 .loop-region-off {
   background: rgba(255, 255, 255, 0.03);
   border-color: rgba(255, 255, 255, 0.12);
+}
+
+/* ---------- Compact tracks ---------- */
+.track-header-compact {
+  justify-content: center;
+  padding-top: 4px;
+  padding-bottom: 4px;
+}
+
+.track-header-compact .track-header-top {
+  gap: 6px;
+}
+
+.track-header-compact .track-name {
+  font-size: 12px;
+}
+
+/* The ⋯ menu is the one control kept in compact mode (right-click also
+ * opens it), and only on hover so the row stays clean. */
+.track-header-compact .track-menu-btn {
+  opacity: 0;
+}
+
+.track-header-compact:hover .track-menu-btn {
+  opacity: 1;
+}
+
+.corner-btn-icon {
+  padding: 2px 6px;
+  font-size: 12px;
+  line-height: 1;
+}
+
+.corner-btn-active {
+  color: var(--text);
+  background: var(--accent);
+  border-color: var(--accent);
 }

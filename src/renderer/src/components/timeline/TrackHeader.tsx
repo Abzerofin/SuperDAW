@@ -25,7 +25,16 @@ import { TrackStripControls } from './TrackStripControls'
  * automation, comments, duplicate, freeze, presets, routing, delete) sits
  * behind the ⋯ menu, which is the same menu right-click opens.
  */
-export function TrackHeader({ track, depth = 0 }: { track: Track; depth?: number }): React.JSX.Element {
+export function TrackHeader({
+  track,
+  depth = 0,
+  compact = false
+}: {
+  track: Track
+  depth?: number
+  /** Hide every control, leaving the name — see state/trackViewUi. */
+  compact?: boolean
+}): React.JSX.Element {
   const [editing, setEditing] = useState(false)
   const [name, setName] = useState('')
   const [menu, setMenu] = useState<{ x: number; y: number } | null>(null)
@@ -83,7 +92,9 @@ export function TrackHeader({ track, depth = 0 }: { track: Track; depth?: number
 
   return (
     <div
-      className={`track-header ${frozen ? 'track-header-frozen' : ''}`}
+      className={`track-header ${frozen ? 'track-header-frozen' : ''} ${
+        compact ? 'track-header-compact' : ''
+      }`}
       style={{ borderLeftColor: track.color, paddingLeft: 9 + depth * 14 }}
       onContextMenu={(e) => {
         e.preventDefault()
@@ -171,8 +182,9 @@ export function TrackHeader({ track, depth = 0 }: { track: Track; depth?: number
         </div>
       )}
 
-      <TrackStripControls track={track} />
+      {!compact && <TrackStripControls track={track} />}
 
+      {!compact && (
       <div className="track-header-bottom">
         <span className="track-kind">
           {track.kind === 'audio' ? 'AUD' : track.kind === 'midi' ? 'MIDI' : 'FLDR'}
@@ -229,6 +241,7 @@ export function TrackHeader({ track, depth = 0 }: { track: Track; depth?: number
           </button>
         </div>
       </div>
+      )}
 
       {menu && (
         <div

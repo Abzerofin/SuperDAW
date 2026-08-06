@@ -258,10 +258,14 @@ audio engine milestone.
   `styles.css`.
 - Track headers show only what is used constantly — name, pan knob, volume
   slider (whose bar doubles as a live per-track meter, painted straight to
-  the DOM from one rAF loop so metering never re-renders React),
+  the DOM from one rAF loop so metering never re-renders React), FX,
   mute/solo, plus arm and monitor on audio tracks. Everything else lives
   behind the ⋯ menu, which is the same menu right-click opens: one
   definition, two entry points.
+- Compact mode (`state/trackViewUi`) shrinks every row to just the track
+  name so many tracks fit on screen. Row height is therefore dynamic:
+  `laneH` flows from TimelineView into the header, clips, presence
+  overlay and recording regions rather than being a fixed constant.
 - Right-clicking a clip opens its editing menu: slice, reverse, pitch,
   length, fit-to-material and colour.
 - Timeline is a CSS grid with sticky ruler/headers and absolutely positioned
@@ -401,8 +405,9 @@ default).
     — portable validated JSON of mixer/synth/insert chain by descriptor,
     loaded as a plain `track/create`). Clip fade handles
     (`Clip.fadeIn/fadeOut` + `clip/setFades`; raised-cosine envelopes,
-    pure math shared by engine and mixdown; split/merge carry fades so
-    inverts reconstruct exactly). Ruler modes (bars · min:sec · samples,
+    pure math shared by engine and mixdown; a clip's audio source AND its
+    synth voices run through one fade gain per clip, so MIDI tapers like
+    audio; split/merge carry fades so inverts reconstruct exactly). Ruler modes (bars · min:sec · samples,
     ephemeral). Project metadata (`createdAt` in the document; recents
     index derives duration/plugin count/missing assets/compat at
     save/open). Command palette (Ctrl+P; entries derived from the

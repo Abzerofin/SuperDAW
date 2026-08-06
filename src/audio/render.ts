@@ -75,7 +75,23 @@ function scheduleSources(
   assets: AssetSourceLike,
   inputs: Map<TrackId, AudioNode>
 ): void {
+  // One fade envelope per clip, shared by its audio source and its synth
+  // voices so MIDI and audio taper identically (and identically to playback).
   const fadeGains = new Map<string, GainNode>()
+  const destinationFor = (clipId: string, trackId: TrackId): AudioNode | undefined => {
+    const chainInput = inputs.get(trackId)
+    const clip = state.clips[clipId]
+    if (!chainInput || !clip || (clip.fadeIn <= 0 && clip.fadeOut <= 0)) return chainInput
+    let gain = fadeGains.get(clipId)
+    if (!gain) {
+      gain = ctx.createGain()
+      gain.connect(chainInput)
+      applyClipFades(gain.gain, clip, state.tempo, 0, 0)
+      fadeGains.set(clipId, gain)
+    }
+    return gain
+  }
+
   for (const s of scheduleClips(state, (id) => assets.getSeconds(id), 0, 0)) {
     const plain = assets.get(s.assetId)?.buffer
     // Reversed clips read the mirrored copy, exactly as in live playback.
@@ -86,19 +102,8 @@ function scheduleSources(
           return b
         }) ?? null)
       : plain
-    let dest = inputs.get(s.trackId)
+    const dest = destinationFor(s.clipId, s.trackId)
     if (!buffer || !dest) continue
-    const clip = state.clips[s.clipId]
-    if (clip && (clip.fadeIn > 0 || clip.fadeOut > 0)) {
-      let gain = fadeGains.get(s.clipId)
-      if (!gain) {
-        gain = ctx.createGain()
-        gain.connect(dest)
-        applyClipFades(gain.gain, clip, state.tempo, 0, 0)
-        fadeGains.set(s.clipId, gain)
-      }
-      dest = gain
-    }
     const source = ctx.createBufferSource()
     source.buffer = buffer
     if (s.rate !== 1) source.playbackRate.value = s.rate
@@ -106,7 +111,7 @@ function scheduleSources(
     source.start(s.when, s.offsetSec, s.durationSec)
   }
   for (const s of scheduleNotes(state, 0, 0)) {
-    const dest = inputs.get(s.trackId)
+    const dest = destinationFor(s.clipId, s.trackId)
     if (!dest) continue
     buildSynthVoice(ctx, dest, s, state.tracks[s.trackId]?.synth ?? {})
   }

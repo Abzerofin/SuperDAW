@@ -442,8 +442,40 @@ export class AudioEngine {
    * instead of dependent on a timer firing on time.
    */
   private schedulePass(fromTicks: number, atSec: number, untilTicks: number): void {
-    this.scheduleClipsPass(fromTicks, atSec, untilTicks)
-    this.scheduleNotesPass(fromTicks, atSec, untilTicks)
+    // Clips and synth voices share one fade envelope per clip, so a MIDI
+    // clip tapers exactly like an audio one.
+    const fadeGains = new Map<string, GainNode>()
+    this.scheduleClipsPass(fromTicks, atSec, untilTicks, fadeGains)
+    this.scheduleNotesPass(fromTicks, atSec, untilTicks, fadeGains)
+  }
+
+  /**
+   * Where a clip's audio should be routed: through its fade envelope when
+   * it has one (created lazily per pass), otherwise straight into the
+   * track chain.
+   */
+  private destinationFor(
+    clipId: string,
+    trackId: TrackId,
+    fadeGains: Map<string, GainNode>,
+    fromTicks: number,
+    atSec: number
+  ): AudioNode {
+    const ctx = this.ctx!
+    const chainInput = this.chain(trackId).input
+    const clip = this.store.state.clips[clipId]
+    if (!clip || (clip.fadeIn <= 0 && clip.fadeOut <= 0)) return chainInput
+    let gain = fadeGains.get(clipId)
+    if (!gain) {
+      gain = ctx.createGain()
+      gain.connect(chainInput)
+      // Fades are relative to THIS pass's anchor, so a clip inside a loop
+      // region tapers identically on every iteration.
+      applyClipFades(gain.gain, clip, this.store.state.tempo, fromTicks, atSec)
+      fadeGains.set(clipId, gain)
+      this.fadeNodes.add(gain)
+    }
+    return gain
   }
 
   /**
@@ -482,7 +514,12 @@ export class AudioEngine {
     }
   }
 
-  private scheduleClipsPass(fromTicks: number, atSec: number, untilTicks: number): void {
+  private scheduleClipsPass(
+    fromTicks: number,
+    atSec: number,
+    untilTicks: number,
+    fadeGains: Map<string, GainNode>
+  ): void {
     const ctx = this.ctx
     if (!ctx) return
     const state = this.store.state
@@ -493,8 +530,6 @@ export class AudioEngine {
       atSec,
       untilTicks
     )
-    // One envelope gain per faded clip in this pass.
-    const fadeGains = new Map<string, GainNode>()
     for (const s of schedules) {
       const asset = this.assets.get(s.assetId)
       if (!asset?.buffer) continue
@@ -504,21 +539,7 @@ export class AudioEngine {
       source.buffer = buffer
       // Resampling: pitch and stretch both land here (see clipRate).
       if (s.rate !== 1) source.playbackRate.value = s.rate
-      let dest: AudioNode = this.chain(s.trackId).input
-      const clip = state.clips[s.clipId]
-      if (clip && (clip.fadeIn > 0 || clip.fadeOut > 0)) {
-        let gain = fadeGains.get(s.clipId)
-        if (!gain) {
-          gain = ctx.createGain()
-          gain.connect(dest)
-          // Fades are relative to THIS pass's anchor, so a looped clip fades
-          // identically on every iteration.
-          applyClipFades(gain.gain, clip, state.tempo, fromTicks, atSec)
-          fadeGains.set(s.clipId, gain)
-          this.fadeNodes.add(gain)
-        }
-        dest = gain
-      }
+      const dest = this.destinationFor(s.clipId, s.trackId, fadeGains, fromTicks, atSec)
       source.connect(dest)
       source.onended = () => this.sources.delete(source)
       source.start(s.when, s.offsetSec, s.durationSec)
@@ -532,11 +553,17 @@ export class AudioEngine {
    * pan, mute/solo all apply). Envelope times are absolute clock times, so
    * voices are sample-accurate like clip sources.
    */
-  private scheduleNotesPass(fromTicks: number, atSec: number, untilTicks: number): void {
+  private scheduleNotesPass(
+    fromTicks: number,
+    atSec: number,
+    untilTicks: number,
+    fadeGains: Map<string, GainNode>
+  ): void {
     const ctx = this.ctx
     if (!ctx) return
     for (const s of scheduleNotes(this.store.state, fromTicks, atSec, untilTicks)) {
-      const dest = this.chain(s.trackId).input
+      // Voices go through the clip's fade envelope, so MIDI tapers too.
+      const dest = this.destinationFor(s.clipId, s.trackId, fadeGains, fromTicks, atSec)
       const voices = buildSynthVoice(
         ctx,
         dest,

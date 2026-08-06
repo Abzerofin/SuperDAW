@@ -1,6 +1,5 @@
 import { useEffect, useReducer } from 'react'
 import { useCollab } from '@/state/collab'
-import { LANE_H } from './geometry'
 
 /**
  * Ephemeral collaborator visuals over the timeline. Deliberately sparse:
@@ -14,9 +13,11 @@ interface OverlayProps {
   pxPerTick: number
   /** Content-space y of each track lane (automation lanes shift these). */
   trackTops: number[]
+  /** Row height in px, so carets and pings match compact mode. */
+  laneHeight: number
 }
 
-export function RemoteCursors({ pxPerTick, trackTops }: OverlayProps): React.JSX.Element {
+export function RemoteCursors({ pxPerTick, trackTops, laneHeight }: OverlayProps): React.JSX.Element {
   const collab = useCollab()
   const [, force] = useReducer((c: number) => c + 1, 0)
   // Sweep stale cursors even when no new presence arrives.
@@ -34,7 +35,8 @@ export function RemoteCursors({ pxPerTick, trackTops }: OverlayProps): React.JSX
           style={{
             left: cursor.ticks * pxPerTick,
             top: trackTops[Math.min(cursor.trackIndex, trackTops.length - 1)] ?? 0,
-            '--user-color': collab.colorFor(cursor.userId)
+            '--user-color': collab.colorFor(cursor.userId),
+            '--lane-height': `${laneHeight}px`
           } as React.CSSProperties}
         >
           <div className="remote-cursor-caret" />
@@ -45,7 +47,7 @@ export function RemoteCursors({ pxPerTick, trackTops }: OverlayProps): React.JSX
   )
 }
 
-export function PingOverlay({ pxPerTick, trackTops }: OverlayProps): React.JSX.Element {
+export function PingOverlay({ pxPerTick, trackTops, laneHeight }: OverlayProps): React.JSX.Element {
   const collab = useCollab()
   const [, force] = useReducer((c: number) => c + 1, 0)
   useEffect(() => {
@@ -64,7 +66,7 @@ export function PingOverlay({ pxPerTick, trackTops }: OverlayProps): React.JSX.E
             top:
               ping.trackIndex === null
                 ? 8
-                : (trackTops[Math.min(ping.trackIndex, trackTops.length - 1)] ?? 0) + LANE_H / 2,
+                : (trackTops[Math.min(ping.trackIndex, trackTops.length - 1)] ?? 0) + laneHeight / 2,
             '--user-color': collab.colorFor(ping.userId)
           } as React.CSSProperties}
         >
