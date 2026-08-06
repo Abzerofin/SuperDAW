@@ -1,6 +1,8 @@
-import type { ClientToRelay, RelayErrorCode } from '../../src/core/relay/protocol.ts'
-import { RELAY_PROTOCOL_VERSION } from '../../src/core/relay/protocol.ts'
-import { normalizeCode } from '../../src/core/relay/codes.ts'
+// NOTE: .ts extensions are deliberate — the standalone relay server runs
+// these modules under Node's native type stripping, which requires them.
+import type { ClientToRelay, RelayErrorCode } from './protocol.ts'
+import { RELAY_PROTOCOL_VERSION } from './protocol.ts'
+import { normalizeCode } from './codes.ts'
 import { SessionRegistry, type Conn, type RelaySink, type Session } from './sessionRegistry.ts'
 
 /**

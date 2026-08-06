@@ -12,6 +12,7 @@
     "noImplicitReturns": true,
     "skipLibCheck": true,
     "noEmit": true,
+    "allowImportingTsExtensions": true,
     "esModuleInterop": true,
     "isolatedModules": true,
     "useDefineForClassFields": true,
@@ -21,5 +22,5 @@
       "@/*": ["./src/renderer/src/*"]
     }
   },
-  "include": ["src/core", "src/audio", "src/renderer/src"]
+  "include": ["src/core", "src/audio", "src/net", "src/renderer/src"]
 }

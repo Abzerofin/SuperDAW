@@ -1,4 +1,4 @@
-# SuperDAW Collaboration Protocol (v1)
+# SuperDAW Collaboration Protocol (v2)
 
 ## Model: host-authoritative op sequencing with optimistic clients
 
@@ -78,15 +78,38 @@ Client → host:
 - `hello { protocolVersion, userId, name, lastSeq | null }`
 - `op { envelope }` — envelope = `{ id, userId, time, op }`
 - `presence { data }` — ephemeral (cursors, pings); relayed, never stored
-- `asset-request { assetId }`
+- `asset-request { assetId, haveBytes }` — haveBytes resumes a partial
+- `asset-offer { meta }` — "I imported an asset" (host pulls if missing)
+- transfer messages (see below)
 
 Host → client:
 - `welcome { seq, snapshot, users, yourColor }`
 - `reject { reason }` — e.g. protocol version mismatch
-- `op { seq, envelope }`
+- `op { seq, envelope }` / `op-noop { envelopeId }`
 - `presence { userId, data }`
 - `user-joined { user }` / `user-left { userId }`
-- `asset-data { assetId, name, kind, ext, bytesBase64 }`
+- `asset-pull { assetId, transferId }` — upload what you offered
+- `asset-available { meta }` — a new asset exists; request it if missing
+- transfer messages (see below)
+
+### Chunked asset transfers (v2)
+
+v1's single-blob `asset-data` was replaced by chunked, flow-controlled,
+direction-agnostic transfers (`core/session/transfer.ts`); the same
+messages run a guest upload and a host serve:
+
+- `asset-begin { transferId, meta, chunkCount, startIndex }`
+- `asset-chunk { transferId, index, bytesBase64 }` (256 KiB raw/chunk)
+- `asset-done { transferId }`
+- `asset-credit { transferId, upToIndex }` — receiver→sender flow control;
+  at most 4 un-credited chunks in flight, so a big WAV never starves ops
+- `asset-cancel { transferId }`
+
+The HOST is the session's asset hub: guests offer their imports, the host
+pulls what it lacks, then announces `asset-available` so everyone else
+downloads from it. Interrupted downloads keep their partial bytes and
+resume via `haveBytes`/`startIndex`. Uploads the host never pulled are
+ignored (transferId must match an issued pull).
 
 ## Two-layer split: document vs assets, ops vs presence
 
@@ -99,9 +122,15 @@ Host → client:
 
 ## Transport
 
-Phase A proves this protocol over an in-memory simulated network (see
-`src/core/session/__tests__`). The real transport is LAN-first: the host
-listens on a WebSocket (Electron main process relays frames to the
-renderer); the join code encodes address + port + session token.
-Internet-wide rendezvous is a future, additive milestone — nothing in the
-protocol assumes LAN.
+This protocol is transport-agnostic (proven over the in-memory simulated
+network in `src/core/session/__tests__`) and ships over two transports,
+both behind the `CollabNetworking` interface (`src/net`):
+
+- **LAN** (15-char codes): the host listens on a WebSocket (Electron main
+  process relays frames to the renderer); the join code encodes
+  address + port + session token.
+- **Internet** (8-char codes): every peer — host included — dials the
+  relay server (`server/`, logic in `src/core/relay`), which routes
+  opaque payloads between the host and guests and never interprets them.
+  Sessions live only in the relay's memory and expire when everyone
+  leaves. Full design: docs/NETWORKING.md.

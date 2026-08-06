@@ -15,12 +15,16 @@ src/preload   Minimal contextBridge between renderer and main.
 src/main      Electron shell. Window management only.
 ```
 
-Peer layers: `src/audio` (engine) and `src/core/session` (sync protocol,
-transport-agnostic). Both depend on `core` and nothing else in the app.
-Networking stays independent from UI: the WebSocket relay lives in the
-Electron main process (`src/main/collabServer.ts`) and only moves strings;
-all session logic runs against abstract MessageSinks. Audio stays
-independent from collaboration.
+Peer layers: `src/audio` (engine), `src/core/session` (sync protocol,
+transport-agnostic), and `src/net` (the CollabNetworking abstraction —
+relay and LAN transports; the ONLY place the app touches a WebSocket).
+All depend on `core` and nothing else in the app. `src/core/relay` holds
+the internet relay's pure logic and wire contract, shared with the
+standalone relay server in `server/` (a tiny Node process — no database,
+sessions in memory only; see docs/NETWORKING.md). The LAN host transport
+still lives in the Electron main process (`src/main/collabServer.ts`) and
+only moves strings; all session logic runs against abstract MessageSinks.
+Audio stays independent from collaboration.
 
 ## The operation pipeline (the load-bearing decision)
 
@@ -267,11 +271,24 @@ default).
     migration of v1 `effects`. No external hosting yet — the contracts it
     will slot into.
 
+12. ✅ **Internet collaboration** — sessions over a standalone relay
+    server (design: docs/NETWORKING.md). Every peer, host included, dials
+    the relay; the host stays the authoritative sequencer and the relay
+    routes opaque payloads it never interprets. In-memory sessions, short
+    join codes (XXXX-XXXX), host/guest resume tokens, host-away grace,
+    automatic expiry — no accounts, no database, no project data at rest.
+    Inner protocol v2: chunked credit-windowed asset transfers with
+    resume, and guest uploads (host = asset hub). Client side: the
+    `CollabNetworking` interface (`src/net`) with relay and LAN
+    implementations — the UI never sees a WebSocket. LAN sessions remain
+    (code length picks the transport in one Join box).
+
 Roadmap beyond: VST3 hosting (native module; first consumer of the
 provider/`stateBlob` contracts), collaborator audio streaming + proxy
 renders for remote/missing plugins, autotune/pitch correction (dedicated AudioWorklet DSP
 milestone: pitch detection + PSOLA resynthesis), effect reordering UI,
-per-strip metering, internet rendezvous for join codes, packaging polish
+per-strip metering, packaging polish
 (icon, signing, auto-update), multi-clip/multi-note selection, loop/cycle
 region, master-bus effects, track height adjustment, count-in/punch
-recording, input monitoring.
+recording, input monitoring, relay deployment (TLS, public host) + relay
+accounts/persistence per docs/NETWORKING.md §15.

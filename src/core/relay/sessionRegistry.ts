@@ -1,5 +1,5 @@
-import type { GuestId, RelayToClient, SessionClosedReason } from '../../src/core/relay/protocol.ts'
-import { mintCode } from '../../src/core/relay/codes.ts'
+import type { GuestId, RelayToClient, SessionClosedReason } from './protocol.ts'
+import { mintCode } from './codes.ts'
 
 /**
  * In-memory session table — the relay's ONLY state. No database, no

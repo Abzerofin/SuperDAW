@@ -1,5 +1,5 @@
 import { randomBytes } from 'node:crypto'
-import { RelayCore, DEFAULT_CONFIG } from './relayCore.ts'
+import { RelayCore, DEFAULT_CONFIG } from '../../src/core/relay/relayCore.ts'
 import { startWsRelay } from './wsRelay.ts'
 
 /**

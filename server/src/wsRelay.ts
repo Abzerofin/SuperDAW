@@ -1,7 +1,7 @@
 import { WebSocketServer, type WebSocket } from 'ws'
 import type { ClientToRelay } from '../../src/core/relay/protocol.ts'
-import { RelayCore } from './relayCore.ts'
-import type { Conn } from './sessionRegistry.ts'
+import { RelayCore } from '../../src/core/relay/relayCore.ts'
+import type { Conn } from '../../src/core/relay/sessionRegistry.ts'
 
 /**
  * The only module that knows WebSockets exist. Sockets become RelaySinks;

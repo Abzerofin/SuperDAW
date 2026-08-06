@@ -2,34 +2,29 @@ import { useSyncExternalStore } from 'react'
 import type { ProjectState } from '@core/model/types'
 import { newId } from '@core/model/ids'
 import { referencedAssetIds } from '@core/persistence/format'
-import { HostSession, type HostPeer } from '@core/session/host'
-import { ClientSession } from '@core/session/client'
 import type { PresenceData, SessionUser } from '@core/session/protocol'
 import type { TransferMeta } from '@core/session/transfer'
-import { decodeJoinCode, encodeJoinCode } from '@core/session/joinCode'
+import { isRelayCode } from '@core/relay/codes'
+import type { CollabNetworking, NetworkingDeps } from '../../../net/networking'
+import { RelayNetworking } from '../../../net/relayNetworking'
+import { webSocketConnector } from '../../../net/relayTransport'
+import { LanNetworking } from '../../../net/lanNetworking'
 import type { ProjectAsset } from '@audio/assets'
 import { projectStore } from './projectStore'
 import { assetStore, audioEngine } from './audioInstance'
 
-function metaOf(asset: ProjectAsset): TransferMeta {
-  return {
-    assetId: asset.id,
-    name: asset.name,
-    kind: asset.kind,
-    ext: asset.ext,
-    size: asset.encoded.length
-  }
-}
-
 /**
- * Session orchestration for the renderer: hosting (via the main-process
- * WebSocket relay), joining (a plain renderer WebSocket), reconnection,
- * asset transfer, and the ephemeral presence state (cursors, pings,
- * roster). Networking stays invisible: the UI reads this store; nothing
- * here ever blocks editing.
+ * Session orchestration for the renderer. All networking goes through the
+ * CollabNetworking interface (src/net) — this store never touches a
+ * WebSocket. Two implementations sit behind it: internet sessions via the
+ * relay (8-char codes) and LAN sessions served by the host's machine
+ * (15-char codes); the join box tells them apart by code shape. This
+ * store owns what the UI reads: mode, roster, cursors, pings, quiet
+ * connection health. Nothing here ever blocks editing.
  */
 
 export type CollabMode = 'off' | 'hosting' | 'joined'
+export type CollabTransport = 'internet' | 'lan'
 
 export const USER_COLORS = [
   '#5b8def',
@@ -60,14 +55,26 @@ export interface ActivePing {
 
 const PING_LIFETIME_MS = 4000
 const CURSOR_STALE_MS = 6000
-const RECONNECT_DELAY_MS = 1500
+const DEFAULT_RELAY_URL = 'ws://localhost:8787'
+
+function metaOf(asset: ProjectAsset): TransferMeta {
+  return {
+    assetId: asset.id,
+    name: asset.name,
+    kind: asset.kind,
+    ext: asset.ext,
+    size: asset.encoded.length
+  }
+}
 
 class CollabStore {
   mode: CollabMode = 'off'
+  transport: CollabTransport | null = null
   joinCode: string | null = null
   users: SessionUser[] = []
-  /** joined-mode connection health; hosting is always 'connected'. */
+  /** Transport lost / host away — editing continues, syncing paused. */
   reconnecting = false
+  hostAway = false
   lastError: string | null = null
   displayName: string =
     (typeof localStorage !== 'undefined' && localStorage.getItem('superdaw.displayName')) || 'Anon'
@@ -79,14 +86,9 @@ class CollabStore {
   /** Live downloads: assetId → progress (drives placeholder fills). */
   readonly assetProgress = new Map<string, { received: number; total: number }>()
 
-  private hostSession: HostSession | null = null
-  private hostPeers = new Map<number, HostPeer>()
-  private unsubPeerEvents: (() => void) | null = null
-
-  private clientSession: ClientSession | null = null
-  private ws: WebSocket | null = null
-  private wsGeneration = 0
-  private reconnectTimer: ReturnType<typeof setTimeout> | null = null
+  private active: CollabNetworking | null = null
+  private relayNet: RelayNetworking | null = null
+  private lanNet: LanNetworking | null = null
 
   private version = 0
   private listeners = new Set<() => void>()
@@ -133,25 +135,13 @@ class CollabStore {
     return this.pingList.filter((p) => now - p.at < PING_LIFETIME_MS)
   }
 
-  // ---------- hosting ----------
+  // ---------- networking wiring ----------
 
-  async startHosting(): Promise<void> {
-    const bridge = window.superdaw
-    if (!bridge) {
-      this.fail('Hosting a session requires the desktop app')
-      return
-    }
-    if (this.mode !== 'off') this.stopAll()
-
-    const started = await bridge.collabHostStart()
-    if ('error' in started) {
-      this.fail(started.error)
-      return
-    }
-
-    const session = new HostSession(projectStore, {
-      hostName: this.displayName,
-      assetProvider: {
+  private deps(): NetworkingDeps {
+    return {
+      store: projectStore,
+      displayName: () => this.displayName,
+      hostAssets: {
         has: (assetId) => assetStore.get(assetId) !== undefined,
         get: (assetId) => {
           const asset = assetStore.get(assetId)
@@ -162,69 +152,30 @@ class CollabStore {
           void this.receiveAsset(meta, bytes)
         }
       },
-      onRosterChange: (users) => {
-        this.users = users
-        this.rememberIdentities(users)
-        this.emit()
-      },
-      onPresence: (userId, data) => this.applyRemotePresence(userId, data)
-    })
-    this.hostSession = session
-    this.users = session.users
-    this.rememberIdentities(this.users)
-
-    this.unsubPeerEvents = bridge.onCollabEvent({
-      connected: (connId) => {
-        this.hostPeers.set(
-          connId,
-          session.addPeer({ send: (m) => bridge.collabSendToPeer(connId, JSON.stringify(m)) })
-        )
-      },
-      message: (connId, data) => {
-        const peer = this.hostPeers.get(connId)
-        if (peer) session.handleMessage(peer, JSON.parse(data))
-      },
-      disconnected: (connId) => {
-        const peer = this.hostPeers.get(connId)
-        if (peer) {
-          session.removePeer(peer)
-          this.hostPeers.delete(connId)
+      clientAssets: {
+        get: (assetId) => {
+          const asset = assetStore.get(assetId)
+          if (!asset) return null
+          return { meta: metaOf(asset), bytes: asset.encoded }
         }
-      }
-    })
-
-    this.joinCode = encodeJoinCode(started)
-    this.mode = 'hosting'
-    this.lastError = null
-    this.emit()
-  }
-
-  // ---------- joining ----------
-
-  join(code: string): void {
-    let target
-    try {
-      target = decodeJoinCode(code)
-    } catch (error) {
-      this.fail(error instanceof Error ? error.message : String(error))
-      return
-    }
-    if (this.mode !== 'off') this.stopAll()
-
-    this.clientSession = new ClientSession(
-      projectStore,
-      this.displayName,
-      {
+      },
+      events: {
+        onStatusChange: (status) => {
+          this.reconnecting = status === 'reconnecting' || status === 'host-away'
+          this.hostAway = status === 'host-away'
+          if (status === 'off' && this.mode !== 'off') this.resetLocalState()
+          this.emit()
+        },
         onWelcome: (snapshot, users, _you, _firstJoin) => {
           this.users = users
           this.rememberIdentities(users)
-          this.reconnecting = false
           this.requestMissingAssets(snapshot)
           this.emit()
         },
-        onRejected: (reason) => {
-          this.fail(reason)
-          this.leave()
+        onRosterChange: (users) => {
+          this.users = users
+          this.rememberIdentities(users)
+          this.emit()
         },
         onUserJoined: (user) => {
           this.users = [...this.users.filter((u) => u.userId !== user.userId), user]
@@ -238,7 +189,7 @@ class CollabStore {
         },
         onPresence: (userId, data) => this.applyRemotePresence(userId, data),
         onAssetAvailable: (meta) => {
-          if (!assetStore.get(meta.assetId)) this.clientSession?.requestAsset(meta.assetId)
+          if (!assetStore.get(meta.assetId)) this.active?.requestAsset(meta.assetId)
         },
         onAssetProgress: (assetId, received, total) => {
           this.assetProgress.set(assetId, { received, total })
@@ -247,47 +198,69 @@ class CollabStore {
         onAssetComplete: (meta, bytes) => {
           this.assetProgress.delete(meta.assetId)
           void this.receiveAsset(meta, bytes)
-        }
-      },
-      {
-        // Uploads (host pulls an asset we offered) read from the asset store.
-        get: (assetId) => {
-          const asset = assetStore.get(assetId)
-          if (!asset) return null
-          return { meta: metaOf(asset), bytes: asset.encoded }
-        }
+        },
+        onSessionEnded: (reason) => {
+          this.lastError = reason
+          this.resetLocalState()
+          this.emit()
+        },
+        onError: (message) => this.fail(message)
       }
-    )
+    }
+  }
 
-    this.mode = 'joined'
-    this.reconnecting = true
-    this.lastError = null
-    this.connectWebSocket(target)
+  private relay(): RelayNetworking {
+    if (!this.relayNet) {
+      const url = localStorage.getItem('superdaw.relayUrl') || DEFAULT_RELAY_URL
+      this.relayNet = new RelayNetworking(webSocketConnector(url), this.deps())
+    }
+    return this.relayNet
+  }
+
+  private lan(): LanNetworking {
+    if (!this.lanNet) {
+      this.lanNet = new LanNetworking(window.superdaw ?? null, this.deps())
+    }
+    return this.lanNet
+  }
+
+  // ---------- hosting / joining ----------
+
+  async startHosting(transport: CollabTransport): Promise<void> {
+    if (this.mode !== 'off') this.stopAll()
+    const net = transport === 'internet' ? this.relay() : this.lan()
+    try {
+      const { joinCode } = await net.createSession()
+      this.active = net
+      this.transport = transport
+      this.joinCode = joinCode
+      this.mode = 'hosting'
+      this.users = [{ userId: projectStore.userId, name: this.displayName, colorIndex: 0 }]
+      this.rememberIdentities(this.users)
+      this.lastError = null
+    } catch (error) {
+      this.fail(error instanceof Error ? error.message : String(error))
+    }
     this.emit()
   }
 
-  private connectWebSocket(target: { host: string; port: number; token: string }): void {
-    const generation = ++this.wsGeneration
-    const ws = new WebSocket(`ws://${target.host}:${target.port}/${target.token}`)
-    this.ws = ws
-
-    ws.onopen = () => {
-      if (generation !== this.wsGeneration) return
-      this.clientSession?.connect({ send: (m) => ws.send(JSON.stringify(m)) })
+  async join(code: string): Promise<void> {
+    if (this.mode !== 'off') this.stopAll()
+    const transport: CollabTransport = isRelayCode(code) ? 'internet' : 'lan'
+    const net = transport === 'internet' ? this.relay() : this.lan()
+    this.mode = 'joined'
+    this.transport = transport
+    this.lastError = null
+    this.emit()
+    try {
+      await net.joinSession(code)
+      this.active = net
+    } catch (error) {
+      this.mode = 'off'
+      this.transport = null
+      this.fail(error instanceof Error ? error.message : String(error))
     }
-    ws.onmessage = (event) => {
-      if (generation !== this.wsGeneration) return
-      this.clientSession?.handleMessage(JSON.parse(String(event.data)))
-    }
-    ws.onclose = () => {
-      if (generation !== this.wsGeneration || this.mode !== 'joined') return
-      this.clientSession?.handleDisconnect()
-      this.reconnecting = true
-      this.emit()
-      // Keep working locally; retry quietly until the host is back.
-      this.reconnectTimer = setTimeout(() => this.connectWebSocket(target), RECONNECT_DELAY_MS)
-    }
-    ws.onerror = () => ws.close()
+    this.emit()
   }
 
   leave(): void {
@@ -301,24 +274,20 @@ class CollabStore {
   }
 
   private stopAll(): void {
-    this.wsGeneration++
-    if (this.reconnectTimer !== null) clearTimeout(this.reconnectTimer)
-    this.reconnectTimer = null
-    this.ws?.close()
-    this.ws = null
-    this.clientSession?.leave()
-    this.clientSession = null
-    this.hostSession?.close()
-    this.hostSession = null
-    this.hostPeers.clear()
-    this.unsubPeerEvents?.()
-    this.unsubPeerEvents = null
-    void window.superdaw?.collabHostStop()
+    this.active?.leaveSession()
+    this.resetLocalState()
+  }
+
+  private resetLocalState(): void {
+    this.active = null
     this.mode = 'off'
+    this.transport = null
     this.joinCode = null
     this.users = []
     this.cursors.clear()
+    this.assetProgress.clear()
     this.reconnecting = false
+    this.hostAway = false
   }
 
   // ---------- presence ----------
@@ -338,8 +307,7 @@ class CollabStore {
   }
 
   private sendPresence(data: PresenceData): void {
-    if (this.mode === 'hosting') this.hostSession?.sendHostPresence(data)
-    else if (this.mode === 'joined') this.clientSession?.sendPresence(data)
+    this.active?.sendPresence(data)
   }
 
   private applyRemotePresence(userId: string, data: PresenceData): void {
@@ -370,7 +338,7 @@ class CollabStore {
 
   private requestMissingAssets(state: ProjectState): void {
     for (const assetId of referencedAssetIds(state)) {
-      if (!assetStore.get(assetId)) this.clientSession?.requestAsset(assetId)
+      if (!assetStore.get(assetId)) this.active?.requestAsset(assetId)
     }
   }
 
@@ -397,8 +365,8 @@ class CollabStore {
     assetStore.subscribe((event) => {
       if (!event || event.origin !== 'local') return
       const meta = metaOf(event.asset)
-      if (this.mode === 'hosting') this.hostSession?.announceAsset(meta)
-      else if (this.mode === 'joined') this.clientSession?.offerAsset(meta)
+      if (this.mode === 'hosting') this.active?.announceAsset(meta)
+      else if (this.mode === 'joined') this.active?.offerAsset(meta)
     })
   }
 

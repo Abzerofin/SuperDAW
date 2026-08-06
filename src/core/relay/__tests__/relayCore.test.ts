@@ -1,6 +1,6 @@
 import { describe as suite, expect, test } from 'vitest'
-import type { RelayToClient } from '../../../src/core/relay/protocol.ts'
-import { RELAY_PROTOCOL_VERSION as V } from '../../../src/core/relay/protocol.ts'
+import type { RelayToClient } from '../protocol.ts'
+import { RELAY_PROTOCOL_VERSION as V } from '../protocol.ts'
 import { RelayCore, DEFAULT_CONFIG } from '../relayCore.ts'
 import type { Conn } from '../sessionRegistry.ts'
 

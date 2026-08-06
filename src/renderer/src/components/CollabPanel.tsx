@@ -26,24 +26,36 @@ export function CollabPanel({ onClose }: { onClose: () => void }): React.JSX.Ele
 
       {collab.mode === 'off' && (
         <>
-          <button className="collab-primary" onClick={() => void collab.startHosting()}>
+          <button
+            className="collab-primary"
+            onClick={() => void collab.startHosting('internet')}
+          >
             Start collaboration
           </button>
+          {window.superdaw && (
+            <button
+              className="collab-secondary"
+              title="Host directly on this machine — no internet needed"
+              onClick={() => void collab.startHosting('lan')}
+            >
+              Start LAN-only session
+            </button>
+          )}
           <div className="collab-divider">or join a session</div>
           <div className="collab-row">
             <input
               className="collab-code-input mono"
-              placeholder="XXXXX-XXXXX-XXXXX"
+              placeholder="Join code"
               value={codeInput}
               onChange={(e) => setCodeInput(e.target.value)}
               onKeyDown={(e) => {
-                if (e.key === 'Enter' && codeInput.trim()) collab.join(codeInput)
+                if (e.key === 'Enter' && codeInput.trim()) void collab.join(codeInput)
               }}
             />
             <button
               className="collab-primary collab-join-btn"
               disabled={!codeInput.trim()}
-              onClick={() => collab.join(codeInput)}
+              onClick={() => void collab.join(codeInput)}
             >
               Join
             </button>
@@ -53,7 +65,9 @@ export function CollabPanel({ onClose }: { onClose: () => void }): React.JSX.Ele
 
       {collab.mode === 'hosting' && collab.joinCode && (
         <>
-          <div className="collab-label">Share this code</div>
+          <div className="collab-label">
+            Share this code{collab.transport === 'lan' ? ' (LAN)' : ''}
+          </div>
           <button
             className="collab-code mono"
             title="Click to copy"
@@ -82,7 +96,14 @@ export function CollabPanel({ onClose }: { onClose: () => void }): React.JSX.Ele
             </div>
           ))}
           {collab.mode === 'joined' && collab.reconnecting && (
-            <div className="collab-reconnecting">Reconnecting… (edits continue locally)</div>
+            <div className="collab-reconnecting">
+              {collab.hostAway
+                ? 'Host reconnecting… (edits continue locally)'
+                : 'Reconnecting… (edits continue locally)'}
+            </div>
+          )}
+          {collab.mode === 'hosting' && collab.reconnecting && (
+            <div className="collab-reconnecting">Reconnecting to the relay…</div>
           )}
         </div>
       )}
