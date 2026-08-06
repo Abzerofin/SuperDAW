@@ -417,6 +417,18 @@ default).
     visualizer (read-only derivation of a track's actual signal path
     through inserts and folder buses to master).
 
+16. ✅ **Offline copy merge** — every project carries a `ProjectLineage`
+    (stable `projectId` + origin snapshot) and the trailing op log
+    (`ProjectStore.opLog`, deduped by envelope id, folded into the origin
+    past 20k ops), persisted in `.sdaw` format v3. `core/merge` combines
+    two copies of one project by replaying the union of their logs
+    chronologically from the earliest origin through the ordinary
+    reducer — per-field last-write-wins falls out of one-gesture-one-op,
+    structural conflicts resolve by the convergence rule. Collab welcome
+    carries the host's `projectId` so copies saved by any participant
+    share lineage and can merge later (File → Merge from copy…, disabled
+    during a live session).
+
 Roadmap beyond: VST3 hosting (native module; first consumer of the
 provider/`stateBlob` contracts), collaborator audio streaming + proxy
 renders for remote/missing plugins, autotune/pitch correction (dedicated AudioWorklet DSP

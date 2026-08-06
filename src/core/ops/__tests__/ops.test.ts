@@ -585,3 +585,61 @@ suite('clip fades', () => {
   })
 })
 
+suite('op log & lineage', () => {
+  test('every commit lands in the op log — dispatch, undo, redo', () => {
+    const store = new ProjectStore(baseState(), 'tester')
+    expect(store.opLog).toHaveLength(0)
+    store.dispatch({ type: 'track/rename', trackId: 't1', name: 'Logged' })
+    store.undo()
+    store.redo()
+    expect(store.opLog).toHaveLength(3)
+    expect(store.opLog[1].op).toMatchObject({ type: 'track/rename', name: 't1' }) // the inverse
+    // origin + log reproduces the document
+    let replayed = store.lineage.origin
+    for (const e of store.opLog) replayed = apply(replayed, e.op)
+    expect(replayed).toEqual(store.state)
+  })
+
+  test('the host echo of an own op is not logged twice', () => {
+    const store = new ProjectStore(baseState(), 'tester')
+    const sent: import('../operations').OpEnvelope[] = []
+    store.attachSession({ sendLocalOp: (e) => sent.push(e) })
+    store.dispatch({ type: 'track/setVolume', trackId: 't1', volume: 0.4 })
+    expect(store.opLog).toHaveLength(1)
+    store.receiveAuthoritative(sent[0]) // echo comes back
+    expect(store.opLog).toHaveLength(1)
+    // …while a remote peer's op IS logged.
+    store.receiveAuthoritative({
+      id: 'op_remote',
+      userId: 'peer',
+      time: Date.now(),
+      op: { type: 'track/setPan', trackId: 't1', pan: 0.5 }
+    })
+    expect(store.opLog).toHaveLength(2)
+  })
+
+  test('loadProject restores a saved lineage or mints a fresh one', () => {
+    const store = new ProjectStore(baseState(), 'tester')
+    const saved = {
+      projectId: 'prj_keep',
+      originTime: 42,
+      origin: baseState()
+    }
+    const log = [
+      {
+        id: 'op_1',
+        userId: 'u1',
+        time: 50,
+        op: { type: 'track/rename', trackId: 't1', name: 'X' } as Operation
+      }
+    ]
+    store.loadProject(baseState(), saved, log)
+    expect(store.lineage.projectId).toBe('prj_keep')
+    expect(store.opLog).toEqual(log)
+
+    store.loadProject(baseState())
+    expect(store.lineage.projectId).not.toBe('prj_keep')
+    expect(store.opLog).toHaveLength(0)
+  })
+})
+

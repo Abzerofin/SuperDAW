@@ -137,7 +137,8 @@ export class HostSession {
           seq: this.seq,
           snapshot: this.store.state,
           users: this.users,
-          you: user
+          you: user,
+          projectId: this.store.lineage.projectId
         })
         if (!rejoining) {
           this.broadcast({ t: 'user-joined', user }, peer)

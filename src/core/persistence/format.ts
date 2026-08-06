@@ -2,6 +2,8 @@ import type { Clip, PluginInstance, ProjectState, Track } from '../model/types'
 import { createEmptyProject } from '../model/types'
 import { synthDefaults, EFFECT_DEFS, type EffectType } from '../model/effects'
 import { builtinEffectDescriptor } from '../plugins/builtin'
+import type { OpEnvelope } from '../ops/operations'
+import type { ProjectLineage } from '../state/store'
 
 /**
  * The .sdaw project file is a ZIP archive:
@@ -18,8 +20,12 @@ import { builtinEffectDescriptor } from '../plugins/builtin'
  * is garbage-collected at save time.
  */
 
-/** 2: insert chain became plugin instances with descriptors (was `effects` keyed by EffectType). */
-export const FORMAT_VERSION = 2
+/**
+ * 2: insert chain became plugin instances with descriptors (was `effects` keyed by EffectType).
+ * 3: project lineage (stable projectId + origin snapshot) and the trailing
+ *    op log, enabling offline copies of one project to merge (core/merge).
+ */
+export const FORMAT_VERSION = 3
 export const PROJECT_FILE_EXTENSION = 'sdaw'
 
 export interface AssetManifestEntry {
@@ -34,6 +40,9 @@ export interface ProjectFileJson {
   readonly formatVersion: number
   readonly state: ProjectState
   readonly assets: AssetManifestEntry[]
+  /** Absent in pre-v3 files — the app mints a fresh lineage on load. */
+  readonly lineage?: ProjectLineage
+  readonly opLog?: OpEnvelope[]
 }
 
 export function assetPathInArchive(entry: AssetManifestEntry): string {
@@ -55,8 +64,18 @@ export function referencedAssetIds(state: ProjectState): Set<string> {
   return ids
 }
 
-export function serializeProjectJson(state: ProjectState, assets: AssetManifestEntry[]): string {
-  const json: ProjectFileJson = { formatVersion: FORMAT_VERSION, state, assets }
+export function serializeProjectJson(
+  state: ProjectState,
+  assets: AssetManifestEntry[],
+  lineage?: ProjectLineage,
+  opLog?: readonly OpEnvelope[]
+): string {
+  const json: ProjectFileJson = {
+    formatVersion: FORMAT_VERSION,
+    state,
+    assets,
+    ...(lineage ? { lineage, opLog: [...(opLog ?? [])] } : {})
+  }
   return JSON.stringify(json)
 }
 
@@ -104,10 +123,27 @@ export function parseProjectJson(text: string): ProjectFileJson {
     }
   }
 
-  // Merge over an empty project so top-level fields added in later app
-  // versions get defaults, then normalize per-track fields the same way
-  // (a v1 file from before the mixer has no volume/pan on its tracks).
-  const merged: ProjectState = { ...createEmptyProject(''), ...(state as unknown as ProjectState) }
+  const full = normalizeState(state as unknown as ProjectState)
+  const lineage = parseLineage(candidate.lineage)
+  const opLog = parseOpLog(candidate.opLog)
+  return {
+    formatVersion: candidate.formatVersion,
+    state: full,
+    assets,
+    ...(lineage ? { lineage } : {}),
+    ...(opLog ? { opLog } : {})
+  }
+}
+
+/**
+ * Migrate a raw saved state to the current shape. Merge over an empty
+ * project so top-level fields added in later app versions get defaults,
+ * then normalize per-track fields the same way (a v1 file from before the
+ * mixer has no volume/pan on its tracks). Applied to the document AND to
+ * the lineage origin snapshot — both replay through the current reducer.
+ */
+function normalizeState(state: ProjectState): ProjectState {
+  const merged: ProjectState = { ...createEmptyProject(''), ...state }
   const tracks: Record<string, Track> = {}
   for (const [id, track] of Object.entries(merged.tracks)) {
     const legacy = track as Omit<Track, 'volume' | 'pan' | 'synth'> & Partial<Track>
@@ -144,7 +180,46 @@ export function parseProjectJson(text: string): ProjectFileJson {
   const full: ProjectState = { ...merged, tracks, clips, plugins: migratePlugins(merged) }
   // v1 stored inserts under `effects`; migratePlugins consumed it.
   delete (full as { effects?: unknown }).effects
-  return { formatVersion: candidate.formatVersion, state: full, assets }
+  return full
+}
+
+/** Lineage is best-effort: anything malformed → undefined (fresh lineage on load). */
+function parseLineage(raw: unknown): ProjectLineage | undefined {
+  if (typeof raw !== 'object' || raw === null) return undefined
+  const candidate = raw as Record<string, unknown>
+  if (
+    typeof candidate.projectId !== 'string' ||
+    typeof candidate.originTime !== 'number' ||
+    typeof candidate.origin !== 'object' ||
+    candidate.origin === null
+  ) {
+    return undefined
+  }
+  return {
+    projectId: candidate.projectId,
+    originTime: candidate.originTime,
+    origin: normalizeState(candidate.origin as ProjectState)
+  }
+}
+
+function parseOpLog(raw: unknown): OpEnvelope[] | undefined {
+  if (!Array.isArray(raw)) return undefined
+  const log: OpEnvelope[] = []
+  for (const entry of raw as Array<Record<string, unknown>>) {
+    if (
+      typeof entry !== 'object' ||
+      entry === null ||
+      typeof entry.id !== 'string' ||
+      typeof entry.userId !== 'string' ||
+      typeof entry.time !== 'number' ||
+      typeof entry.op !== 'object' ||
+      entry.op === null
+    ) {
+      return undefined // a corrupt log is useless for merging — drop it whole
+    }
+    log.push(entry as unknown as OpEnvelope)
+  }
+  return log
 }
 
 interface LegacyEffect {

@@ -27,6 +27,32 @@ import { newId } from '../model/ids'
 
 export type OpSource = 'local' | 'remote' | 'history'
 
+/**
+ * A project's identity across saved copies. `projectId` is minted once at
+ * creation and travels with every copy; `origin` is a snapshot from which
+ * the op log replays. Offline copies of the same project can be merged by
+ * replaying the union of their logs from the earliest origin (core/merge).
+ */
+export interface ProjectLineage {
+  readonly projectId: string
+  /** When `origin` was captured — merge picks the earliest-origin fork as base. */
+  readonly originTime: number
+  readonly origin: ProjectState
+}
+
+export function mintLineage(state: ProjectState): ProjectLineage {
+  return { projectId: newId('prj'), originTime: Date.now(), origin: state }
+}
+
+/**
+ * Op-log bounds: past the limit the oldest entries are folded into the
+ * origin snapshot (origin + log always reproduces the document). Merging
+ * two copies then needs their histories to overlap within this window —
+ * generous enough that it only matters for very long-lived projects.
+ */
+const LOG_LIMIT = 20_000
+const LOG_KEEP = 15_000
+
 export interface ActivityEntry {
   readonly id: string
   readonly userId: string
@@ -61,12 +87,17 @@ export class ProjectStore {
   private stateListeners = new Set<() => void>()
   private opListeners = new Set<OpListener>()
 
+  private lineageInfo: ProjectLineage
+  private log: OpEnvelope[] = []
+  private logIds = new Set<string>()
+
   constructor(
     initial: ProjectState,
     readonly userId: string
   ) {
     this.confirmed = initial
     this.displayed = initial
+    this.lineageInfo = mintLineage(initial)
   }
 
   get state(): ProjectState {
@@ -83,6 +114,15 @@ export class ProjectStore {
 
   get activity(): readonly ActivityEntry[] {
     return this.activityLog
+  }
+
+  get lineage(): ProjectLineage {
+    return this.lineageInfo
+  }
+
+  /** Every committed envelope since `lineage.origin`, in application order. */
+  get opLog(): readonly OpEnvelope[] {
+    return this.log
   }
 
   get canUndo(): boolean {
@@ -125,15 +165,20 @@ export class ProjectStore {
   /**
    * Replace the entire document (opening a project file, or first join
    * snapshot). NOT an operation: history, activity, and pending reset
-   * because they describe a document that no longer exists.
+   * because they describe a document that no longer exists. Pass the
+   * file's lineage + op log to keep the project's identity across copies;
+   * omit them to start a fresh lineage (new/legacy projects).
    */
-  loadProject(state: ProjectState): void {
+  loadProject(state: ProjectState, lineage?: ProjectLineage, log?: readonly OpEnvelope[]): void {
     this.confirmed = state
     this.displayed = state
     this.pending = []
     this.undoStack = []
     this.redoStack = []
     this.activityLog = []
+    this.lineageInfo = lineage ?? mintLineage(state)
+    this.log = log ? [...log] : []
+    this.logIds = new Set(this.log.map((e) => e.id))
     this.emitState()
   }
 
@@ -162,6 +207,7 @@ export class ProjectStore {
     this.confirmed = apply(this.confirmed, envelope.op)
     if (isOwn) this.pending.splice(ownIndex, 1)
     this.rebase()
+    this.appendLog(envelope) // own ops were logged at dispatch; dedupe skips them
 
     if (!isOwn) {
       // Own ops were logged optimistically at dispatch time.
@@ -259,6 +305,7 @@ export class ProjectStore {
       // Solo/host mode: confirmed and displayed advance together.
       this.confirmed = apply(this.confirmed, op)
     }
+    this.appendLog(envelope)
 
     if (text) this.pushActivity(userId, text)
     for (const listener of this.opListeners) listener(envelope, source)
@@ -269,6 +316,31 @@ export class ProjectStore {
     let state = this.confirmed
     for (const p of this.pending) state = apply(state, p.op)
     this.displayed = state
+  }
+
+  /**
+   * Append to the persistent op log (deduped by envelope id — an op can
+   * arrive twice: optimistic dispatch then host echo, or an idempotent
+   * re-send). Past LOG_LIMIT the oldest entries fold into the origin
+   * snapshot so origin + log keeps reproducing the document.
+   */
+  private appendLog(envelope: OpEnvelope): void {
+    if (this.logIds.has(envelope.id)) return
+    this.logIds.add(envelope.id)
+    this.log.push(envelope)
+    if (this.log.length <= LOG_LIMIT) return
+
+    const folded = this.log.splice(0, this.log.length - LOG_KEEP)
+    let origin = this.lineageInfo.origin
+    for (const old of folded) {
+      origin = apply(origin, old.op)
+      this.logIds.delete(old.id)
+    }
+    this.lineageInfo = {
+      ...this.lineageInfo,
+      origin,
+      originTime: folded[folded.length - 1].time
+    }
   }
 
   private pushActivity(userId: string, text: string): void {

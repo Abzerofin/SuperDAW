@@ -126,8 +126,13 @@ export class ClientSession implements SequencerLink {
       case 'welcome': {
         const firstJoin = !this.joined
         if (firstJoin) {
-          // Joining replaces the document wholesale (fresh history)…
-          this.store.loadProject(message.snapshot)
+          // Joining replaces the document wholesale (fresh history). Adopt
+          // the host's project identity with the snapshot as our origin, so
+          // a copy saved here can merge offline with any other copy.
+          const lineage = message.projectId
+            ? { projectId: message.projectId, originTime: Date.now(), origin: message.snapshot }
+            : undefined
+          this.store.loadProject(message.snapshot, lineage)
           this.store.attachSession(this)
           this.joined = true
         } else {

@@ -14,6 +14,7 @@ import { RULER_MODES, rulerUi, useRulerMode, type RulerMode } from '@/state/rule
 import {
   closeProject,
   exportWav,
+  mergeProjectFromFile,
   newProject,
   openProject,
   openRecentProject,
@@ -179,6 +180,7 @@ function FileMenu(): React.JSX.Element {
   const [open, setOpen] = useState(false)
   const [recentsOpen, setRecentsOpen] = useState(false)
   const recents = useRecentProjects()
+  const inSession = useCollab().mode !== 'off'
   const ref = useRef<HTMLDivElement>(null)
 
   // Any click outside the menu closes it.
@@ -239,6 +241,21 @@ function FileMenu(): React.JSX.Element {
                 <span>{entry.name}</span>
               </button>
             ))}
+          <button
+            className="menu-item"
+            disabled={inSession}
+            title={
+              inSession
+                ? 'Leave the session first — live collaboration already syncs everyone'
+                : 'Combine a saved copy of this project: every change lands at whichever copy touched it last'
+            }
+            onClick={() => {
+              setOpen(false)
+              void mergeProjectFromFile()
+            }}
+          >
+            <span>Merge from copy…</span>
+          </button>
           <div className="menu-sep" />
           {item('Save', 'Ctrl+S', () => void saveProject())}
           {item('Save as…', 'Ctrl+Shift+S', () => void saveProject(true))}

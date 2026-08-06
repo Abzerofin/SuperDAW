@@ -76,6 +76,36 @@ suite('project file format', () => {
     expect(parsed.assets).toEqual(assets)
   })
 
+  test('round-trips lineage and op log; pre-v3 files come back without them', () => {
+    const state = sampleState()
+    const lineage = { projectId: 'prj_1', originTime: 1234, origin: createEmptyProject('Origin') }
+    const opLog = [
+      {
+        id: 'op_1',
+        userId: 'u1',
+        time: 2000,
+        op: { type: 'track/rename', trackId: 't1', name: 'Renamed' } as const
+      }
+    ]
+    const parsed = parseProjectJson(serializeProjectJson(state, [], lineage, opLog))
+    expect(parsed.lineage?.projectId).toBe('prj_1')
+    expect(parsed.lineage?.originTime).toBe(1234)
+    expect(parsed.lineage?.origin.name).toBe('Origin')
+    expect(parsed.opLog).toEqual(opLog)
+
+    // A v2-era file (no lineage) parses with both fields absent.
+    const legacy = parseProjectJson(JSON.stringify({ formatVersion: 2, state, assets: [] }))
+    expect(legacy.lineage).toBeUndefined()
+    expect(legacy.opLog).toBeUndefined()
+
+    // A corrupt log is dropped whole rather than merged from.
+    const corrupt = parseProjectJson(
+      JSON.stringify({ formatVersion: 3, state, assets: [], lineage, opLog: [{ id: 42 }] })
+    )
+    expect(corrupt.opLog).toBeUndefined()
+    expect(corrupt.lineage?.projectId).toBe('prj_1')
+  })
+
   test('referencedAssetIds collects clip and bay references', () => {
     expect([...referencedAssetIds(sampleState())].sort()).toEqual(['ast_1', 'ast_2'])
   })

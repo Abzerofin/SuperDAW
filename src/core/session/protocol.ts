@@ -59,6 +59,12 @@ export type HostToClient =
       snapshot: ProjectState
       users: SessionUser[]
       you: SessionUser
+      /**
+       * The host project's lineage id (additive in v2). Guests adopt it with
+       * the snapshot as their origin, so a copy saved by any participant can
+       * later be merged offline with any other copy (core/merge).
+       */
+      projectId?: string
     }
   | { t: 'reject'; reason: string }
   | { t: 'op'; seq: number; envelope: OpEnvelope }

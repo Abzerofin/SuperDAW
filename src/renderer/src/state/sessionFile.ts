@@ -33,6 +33,11 @@ class SessionFileStore {
     this.setDirty(false, true)
   }
 
+  /** The document changed outside the op stream (offline merge) — unsaved. */
+  markDirty(): void {
+    this.setDirty(true)
+  }
+
   private setDirty(dirty: boolean, force = false): void {
     if (this.unsaved === dirty && !force) return
     this.unsaved = dirty

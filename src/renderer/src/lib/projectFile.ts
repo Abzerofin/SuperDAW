@@ -8,6 +8,7 @@ import {
   type AssetManifestEntry
 } from '@core/persistence/format'
 import { createEmptyProject } from '@core/model/types'
+import { canMerge, mergeForks } from '@core/merge/merge'
 import { renderMixdown } from '@audio/render'
 import { projectStore } from '@/state/projectStore'
 import { assetStore, audioEngine } from '@/state/audioInstance'
@@ -43,24 +44,30 @@ export function packProject(): Uint8Array {
     manifest.push(entry)
     archive[assetPathInArchive(entry)] = asset.encoded
   }
-  archive['project.json'] = strToU8(serializeProjectJson(state, manifest))
+  archive['project.json'] = strToU8(
+    serializeProjectJson(state, manifest, projectStore.lineage, projectStore.opLog)
+  )
   // Audio payloads are already compressed formats; level 0 keeps saves fast.
   return zipSync(archive, { level: 0 })
 }
 
-export async function loadProjectBytes(data: Uint8Array, path: string | null): Promise<void> {
+function parseArchive(data: Uint8Array): {
+  archive: Record<string, Uint8Array>
+  parsed: ReturnType<typeof parseProjectJson>
+} {
   const archive = unzipSync(data)
   const projectJson = archive['project.json']
   if (!projectJson) throw new Error('Not a SuperDAW project file (missing project.json)')
-  const { state, assets } = parseProjectJson(strFromU8(projectJson))
+  return { archive, parsed: parseProjectJson(strFromU8(projectJson)) }
+}
 
-  transport.stop()
-  selection.select(null)
-  // Never carry a live input into another project's tracks.
-  void trackInputs.stopAllMonitors()
-  assetStore.clear()
-
+/** Decode and restore archive assets; skips ids already in the store. */
+async function restoreArchiveAssets(
+  archive: Record<string, Uint8Array>,
+  assets: AssetManifestEntry[]
+): Promise<void> {
   for (const entry of assets) {
+    if (assetStore.get(entry.id)) continue
     const bytes = archive[assetPathInArchive(entry)]
     if (!bytes) {
       console.warn(`Project file is missing asset "${entry.name}" (${entry.id})`)
@@ -76,8 +83,20 @@ export async function loadProjectBytes(data: Uint8Array, path: string | null): P
     }
     assetStore.restore(entry.id, entry.name, entry.kind, entry.ext, bytes, buffer)
   }
+}
 
-  projectStore.loadProject(state)
+export async function loadProjectBytes(data: Uint8Array, path: string | null): Promise<void> {
+  const { archive, parsed } = parseArchive(data)
+  const { state, assets, lineage, opLog } = parsed
+
+  transport.stop()
+  selection.select(null)
+  // Never carry a live input into another project's tracks.
+  void trackInputs.stopAllMonitors()
+  assetStore.clear()
+  await restoreArchiveAssets(archive, assets)
+
+  projectStore.loadProject(state, lineage, opLog)
   transport.setPosition(0)
   sessionFile.markLoaded(path)
   recentProjects.record(state, path)
@@ -221,4 +240,57 @@ export async function openRecentProject(entry: RecentProject): Promise<void> {
   }
   await loadProjectBytes(result.data, result.path)
   appShell.enterProject()
+}
+
+/**
+ * Merge a saved copy of THIS project (same lineage id) into the open
+ * document: assets the copy has and we lack are imported, then both op
+ * histories replay chronologically from the shared origin — every field
+ * ends up at whichever copy's change is newest (core/merge). The result
+ * is unsaved; Save writes the merged project with its merged history.
+ */
+export async function mergeProjectBytes(data: Uint8Array): Promise<void> {
+  const { archive, parsed } = parseArchive(data)
+  if (!parsed.lineage) {
+    throw new Error('That file has no edit history to merge (saved before merge support).')
+  }
+  const ours = { lineage: projectStore.lineage, log: projectStore.opLog }
+  const theirs = { lineage: parsed.lineage, log: parsed.opLog ?? [] }
+  if (!canMerge(ours, theirs)) {
+    throw new Error('That file is a different project, not a copy of this one.')
+  }
+
+  transport.stop()
+  selection.select(null)
+  pianoRollUi.close()
+  await restoreArchiveAssets(archive, parsed.assets) // keeps what we already have
+
+  const merged = mergeForks(ours, theirs)
+  projectStore.loadProject(merged.state, merged.lineage, merged.log)
+  sessionFile.markDirty()
+}
+
+/** File-picker front end for `mergeProjectBytes`. Reports errors inline. */
+export async function mergeProjectFromFile(): Promise<void> {
+  const merge = async (data: Uint8Array): Promise<void> => {
+    try {
+      await mergeProjectBytes(data)
+    } catch (error) {
+      window.alert(error instanceof Error ? error.message : 'Merge failed.')
+    }
+  }
+  const bridge = window.superdaw
+  if (bridge) {
+    const result = await bridge.openProjectFile()
+    if (result) await merge(result.data)
+    return
+  }
+  const input = document.createElement('input')
+  input.type = 'file'
+  input.accept = `.${PROJECT_FILE_EXTENSION}`
+  input.onchange = async () => {
+    const file = input.files?.[0]
+    if (file) await merge(new Uint8Array(await file.arrayBuffer()))
+  }
+  input.click()
 }
