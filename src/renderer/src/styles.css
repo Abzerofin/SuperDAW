@@ -2769,9 +2769,13 @@ input {
 
 .track-input-panel {
   width: 260px;
+}
+
+.track-input-body {
   display: flex;
   flex-direction: column;
   gap: 8px;
+  padding: 8px;
 }
 
 .track-input-field {
