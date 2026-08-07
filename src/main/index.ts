@@ -145,8 +145,12 @@ const dirtyWindows = new Set<number>()
 
 function registerCloseGuard(win: BrowserWindow): void {
   let closing = false
+  // Captured now: by the time 'closed' fires the window is destroyed and
+  // touching win.webContents throws "Object has been destroyed".
+  const webContentsId = win.webContents.id
+
   win.on('close', (e) => {
-    if (closing || !dirtyWindows.has(win.webContents.id)) return
+    if (closing || !dirtyWindows.has(webContentsId)) return
     e.preventDefault()
     void dialog
       .showMessageBox(win, {
@@ -159,6 +163,9 @@ function registerCloseGuard(win: BrowserWindow): void {
         noLink: true
       })
       .then(({ response }) => {
+        // The dialog is async: the window can be gone by the time it
+        // resolves (app quit, window closed another way).
+        if (win.isDestroyed()) return
         if (response === 2) return // Cancel
         if (response === 1) {
           closing = true
@@ -166,15 +173,24 @@ function registerCloseGuard(win: BrowserWindow): void {
           return
         }
         // Save: ask the renderer (it owns the project bytes), close on success.
-        ipcMain.once('project:save-done', (_event, saved: boolean) => {
+        const onSaveDone = (_event: Electron.IpcMainEvent, saved: boolean): void => {
           if (!saved) return // user cancelled the save dialog — stay open
+          ipcMain.removeListener('project:save-done', onSaveDone)
+          if (win.isDestroyed()) return
           closing = true
           win.close()
-        })
+        }
+        // `once` would leave a stale listener behind whenever the renderer
+        // reports a cancelled save, so the handler is removed explicitly:
+        // on cancel it stays armed for the next attempt, and 'closed'
+        // clears it if the window goes away first.
+        ipcMain.on('project:save-done', onSaveDone)
+        win.once('closed', () => ipcMain.removeListener('project:save-done', onSaveDone))
         win.webContents.send('project:save-request')
       })
   })
-  win.on('closed', () => dirtyWindows.delete(win.webContents.id))
+
+  win.on('closed', () => dirtyWindows.delete(webContentsId))
 }
 
 function createWindow(): void {
@@ -195,7 +211,11 @@ function createWindow(): void {
     }
   })
 
-  win.once('ready-to-show', () => win.show())
+  // Guarded: a window closed while still loading is already destroyed by
+  // the time this fires, and show() would throw in the main process.
+  win.once('ready-to-show', () => {
+    if (!win.isDestroyed()) win.show()
+  })
   registerCloseGuard(win)
 
   // External links open in the system browser, never in-app.
