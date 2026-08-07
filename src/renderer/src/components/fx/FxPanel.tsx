@@ -11,6 +11,12 @@ import { useProjectState } from '@/state/hooks'
 import { usePluginRegistry } from '@/state/pluginRegistryHook'
 import { audioEngine } from '@/state/audioInstance'
 import { fxUi } from '@/state/fxUi'
+import {
+  externalPlugins,
+  hasScanned,
+  scanExternalPlugins,
+  subscribeExternalPlugins
+} from '@/state/externalPlugins'
 import { capturePointer } from '@/lib/pointer'
 import { PluginPlaceholder } from './PluginPlaceholder'
 
@@ -149,7 +155,58 @@ export function FxPanel({ track }: { track: Track }): React.JSX.Element {
             </button>
           ))}
         </div>
+
+        <Vst3Picker onAdd={addPlugin} />
       </div>
+    </div>
+  )
+}
+
+/**
+ * Installed VST3 effects. They cannot run in the renderer's audio graph
+ * (see native/README.md), so an added one shows as a placeholder until the
+ * track is frozen — which is where its audio is actually rendered. The
+ * copy says so rather than letting it look broken.
+ */
+function Vst3Picker({
+  onAdd
+}: {
+  onAdd: (descriptor: PluginDescriptor) => void
+}): React.JSX.Element | null {
+  const [plugins, setPlugins] = useState(externalPlugins)
+
+  useEffect(() => {
+    const unsubscribe = subscribeExternalPlugins(() => setPlugins(externalPlugins()))
+    if (!hasScanned()) void scanExternalPlugins()
+    return unsubscribe
+  }, [])
+
+  // Effects only: instruments ignore audio input, and the insert chain is
+  // not where they belong.
+  const effects = plugins.filter((p) => p.subCategories.startsWith('Fx'))
+  if (effects.length === 0) return null
+
+  return (
+    <div className="fx-add fx-add-vst3">
+      <div className="fx-add-label statusbar-dim">VST3 · rendered on freeze</div>
+      {effects.map((plugin) => (
+        <button
+          key={plugin.uid}
+          className="fx-add-btn"
+          title={`${plugin.vendor} · ${plugin.version}`}
+          onClick={() =>
+            onAdd({
+              format: 'vst3',
+              uid: plugin.uid,
+              name: plugin.name,
+              vendor: plugin.vendor,
+              version: plugin.version
+            })
+          }
+        >
+          + {plugin.name}
+        </button>
+      ))}
     </div>
   )
 }

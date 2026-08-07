@@ -1,4 +1,5 @@
-import type { ProjectState, TrackId } from '@core/model/types'
+import type { PluginInstance, ProjectState, TrackId } from '@core/model/types'
+import type { PluginDescriptor } from '@core/plugins/descriptor'
 import {
   automationOf,
   automationValueAt,
@@ -32,6 +33,24 @@ interface AssetSourceLike {
     id: string,
     create: (channels: Float32Array[], sampleRate: number) => AudioBuffer
   ): AudioBuffer | null
+}
+
+/**
+ * Out-of-process plugin host (VST3 etc). External plugins cannot run in
+ * the renderer's audio graph, so freezing hands their audio to whoever
+ * can. Injected rather than imported so `src/audio` stays free of Electron
+ * and the browser build simply passes nothing (external inserts bypass,
+ * exactly as a missing plugin does).
+ */
+export interface ExternalPluginHost {
+  /** Can this client render this descriptor out of process? */
+  has(descriptor: PluginDescriptor): boolean
+  /** Offline-process; null = failed, and the insert bypasses. */
+  process(
+    instance: PluginInstance,
+    channels: Float32Array[],
+    sampleRate: number
+  ): Promise<Float32Array[] | null>
 }
 
 /** Seconds of reverb/delay tail appended after the last clip ends. */
@@ -192,7 +211,8 @@ export async function renderMixdown(
 export async function renderTrackFreeze(
   state: ProjectState,
   trackId: TrackId,
-  assets: AssetSourceLike
+  assets: AssetSourceLike,
+  external?: ExternalPluginHost
 ): Promise<AudioBuffer | null> {
   const endTicks = clipsOfTrack(state, trackId).reduce(
     (max, c) => Math.max(max, c.start + c.duration),
@@ -201,16 +221,145 @@ export async function renderTrackFreeze(
   if (endTicks <= 0) return null
   const tps = ticksPerSecond(state.tempo)
   const lengthSec = endTicks / tps + TAIL_SEC
-  const ctx = new OfflineAudioContext(2, Math.ceil(lengthSec * SAMPLE_RATE), SAMPLE_RATE)
+  const frames = Math.ceil(lengthSec * SAMPLE_RATE)
 
-  const input = ctx.createGain()
+  const externalInserts = external
+    ? pluginsOfTrack(state, trackId).filter(
+        (i) => i.enabled && !pluginRegistry.resolve(i.descriptor) && external.has(i.descriptor)
+      )
+    : []
+
+  // Fast path: nothing needs the out-of-process host, so the whole chain
+  // is one Web Audio pass exactly as before.
+  if (externalInserts.length === 0) {
+    const ctx = new OfflineAudioContext(2, frames, SAMPLE_RATE)
+    const input = ctx.createGain()
+    const auto = ctx.createGain()
+    buildInserts(ctx, state, trackId, input).connect(auto)
+    auto.connect(ctx.destination)
+    applyVolumeAutomation(auto, state, trackId, tps)
+    const inputs = new Map<TrackId, AudioNode>([[trackId, input]])
+    scheduleSources(ctx, state, assets, inputs)
+    return ctx.startRendering()
+  }
+
+  // External inserts cannot run in the renderer's audio graph, so the
+  // chain is rendered in SEGMENTS: consecutive runs of same-kind inserts,
+  // in rank order. Order is what must be preserved — an EQ before a
+  // saturator does not sound like a saturator before an EQ.
+  const sourcesCtx = new OfflineAudioContext(2, frames, SAMPLE_RATE)
+  const input = sourcesCtx.createGain()
+  input.connect(sourcesCtx.destination)
+  scheduleSources(sourcesCtx, state, assets, new Map([[trackId, input]]))
+  let buffer = await sourcesCtx.startRendering()
+
+  for (const segment of segmentInserts(state, trackId, external!)) {
+    buffer = segment.external
+      ? await processExternalSegment(buffer, segment.instances, external!)
+      : await renderInsertSegment(buffer, segment.instances)
+  }
+
+  // Volume automation sits after the inserts, so it lands in its own
+  // final pass rather than being folded into an arbitrary segment.
+  return applyAutomationPass(buffer, state, trackId, tps)
+}
+
+/** One run of consecutive inserts that can be processed the same way. */
+export interface InsertSegment {
+  external: boolean
+  instances: PluginInstance[]
+}
+
+/**
+ * Split a track's enabled inserts into consecutive same-kind runs, in rank
+ * order. Inserts that resolve locally are Web Audio; ones the native host
+ * has are external; anything neither can run is dropped (bypassed), which
+ * is the same thing live playback does.
+ */
+export function segmentInserts(
+  state: ProjectState,
+  trackId: TrackId,
+  external: ExternalPluginHost
+): InsertSegment[] {
+  const segments: InsertSegment[] = []
+  for (const instance of pluginsOfTrack(state, trackId)) {
+    if (!instance.enabled) continue
+    const local = pluginRegistry.resolve(instance.descriptor) !== null
+    const isExternal = !local && external.has(instance.descriptor)
+    if (!local && !isExternal) continue // missing on this client: bypass
+    const last = segments[segments.length - 1]
+    if (last && last.external === isExternal) last.instances.push(instance)
+    else segments.push({ external: isExternal, instances: [instance] })
+  }
+  return segments
+}
+
+function bufferChannels(buffer: AudioBuffer): Float32Array[] {
+  const channels: Float32Array[] = []
+  for (let ch = 0; ch < buffer.numberOfChannels; ch++) channels.push(buffer.getChannelData(ch))
+  return channels
+}
+
+/** Run a buffer through external plugins in order, out of process. */
+async function processExternalSegment(
+  buffer: AudioBuffer,
+  instances: PluginInstance[],
+  external: ExternalPluginHost
+): Promise<AudioBuffer> {
+  let channels = bufferChannels(buffer)
+  for (const instance of instances) {
+    const processed = await external.process(instance, channels, buffer.sampleRate)
+    // A failed plugin bypasses rather than aborting the freeze, matching
+    // how a missing plugin behaves everywhere else.
+    if (processed && processed.length > 0) channels = processed
+  }
+  const out = new OfflineAudioContext(
+    channels.length,
+    buffer.length,
+    buffer.sampleRate
+  ).createBuffer(channels.length, buffer.length, buffer.sampleRate)
+  for (let ch = 0; ch < channels.length; ch++) {
+    out.getChannelData(ch).set(channels[ch].subarray(0, buffer.length))
+  }
+  return out
+}
+
+/** Replay a buffer through a run of locally-resolvable inserts. */
+async function renderInsertSegment(
+  buffer: AudioBuffer,
+  instances: PluginInstance[]
+): Promise<AudioBuffer> {
+  const ctx = new OfflineAudioContext(2, buffer.length, buffer.sampleRate)
+  const source = ctx.createBufferSource()
+  source.buffer = buffer
+  let prev: AudioNode = source
+  for (const instance of instances) {
+    const resolved = pluginRegistry.resolve(instance.descriptor)
+    if (!resolved) continue
+    const nodes = resolved.provider.create(ctx)
+    nodes.apply(instance.params, 0)
+    prev.connect(nodes.input)
+    prev = nodes.output
+  }
+  prev.connect(ctx.destination)
+  source.start(0)
+  return ctx.startRendering()
+}
+
+async function applyAutomationPass(
+  buffer: AudioBuffer,
+  state: ProjectState,
+  trackId: TrackId,
+  tps: number
+): Promise<AudioBuffer> {
+  if (automationOf(state, trackId, 'volume').length === 0) return buffer
+  const ctx = new OfflineAudioContext(2, buffer.length, buffer.sampleRate)
+  const source = ctx.createBufferSource()
+  source.buffer = buffer
   const auto = ctx.createGain()
-  buildInserts(ctx, state, trackId, input).connect(auto)
+  source.connect(auto)
   auto.connect(ctx.destination)
   applyVolumeAutomation(auto, state, trackId, tps)
-
-  const inputs = new Map<TrackId, AudioNode>([[trackId, input]])
-  scheduleSources(ctx, state, assets, inputs)
-
+  source.start(0)
   return ctx.startRendering()
 }

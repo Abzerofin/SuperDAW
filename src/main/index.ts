@@ -2,6 +2,7 @@ import { app, BrowserWindow, dialog, ipcMain, Menu, shell } from 'electron'
 import { mkdir, readFile, rename, writeFile } from 'node:fs/promises'
 import { basename, dirname, join } from 'node:path'
 import { registerCollabIpc } from './collabServer'
+import { registerVst3Ipc } from './vst3'
 
 const PROJECT_FILTERS = [{ name: 'SuperDAW Project', extensions: ['sdaw'] }]
 
@@ -243,6 +244,7 @@ app.whenReady().then(() => {
   registerIpc()
   registerAppDataIpc()
   registerCollabIpc()
+  registerVst3Ipc()
   createWindow()
   app.on('activate', () => {
     if (BrowserWindow.getAllWindows().length === 0) createWindow()

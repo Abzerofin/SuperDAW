@@ -165,6 +165,34 @@ on another's — with zero document divergence.
 The built-in synth still lives on MIDI tracks (`Track.synth`); folding it
 into an instrument-plugin instance is a future, separate migration.
 
+### External plugins (VST3) — hosted, but only offline
+
+VST3 hosting lives in a native addon (`native/vst3host`, Node-API so one
+build loads in both Node and Electron) running in the MAIN process. That
+placement is forced: the renderer runs `sandbox: true`, and a sandboxed
+preload cannot `require()` a native addon. It also rules out live
+streaming — `SharedArrayBuffer` does not cross an Electron process
+boundary, so the usual "native thread writes a SAB, an AudioWorklet reads
+it" design is unavailable, and per-block IPC is far too slow (a 128-frame
+block at 48 kHz is 2.7 ms).
+
+So external inserts are **rendered at freeze time**, which is exactly what
+freeze was already for. `renderTrackFreeze` takes an optional
+`ExternalPluginHost` (injected, so `src/audio` stays free of Electron and
+the browser build simply passes nothing). When any insert needs it, the
+chain renders in SEGMENTS: consecutive runs of same-kind inserts, in rank
+order — sources, then each segment through either Web Audio or the native
+host, then volume automation last. Order is the property that matters, and
+`segmentInserts` is unit-tested for it. With no external inserts the old
+single-pass route is untouched.
+
+The payoff is that this needs no new sync machinery: a frozen track is an
+ordinary asset, so **a collaborator who does not own the plugin hears the
+identical audio** through normal asset transfer. Until a track is frozen,
+an external insert shows the same placeholder any unavailable plugin does.
+The renderer never learns a plugin's filesystem path — it sends a
+descriptor uid and main resolves it against its own scan.
+
 ## File Bay & persistence
 
 The bay's folder/asset structure lives IN the project document

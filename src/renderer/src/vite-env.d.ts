@@ -36,5 +36,20 @@ interface Window {
       message(connId: number, data: string): void
       disconnected(connId: number): void
     }): () => void
+    vst3Scan(): Promise<
+      {
+        path: string
+        uid: string
+        name: string
+        vendor: string
+        version: string
+        subCategories: string
+      }[]
+    >
+    vst3Process(args: {
+      uid: string
+      channels: Float32Array[]
+      sampleRate: number
+    }): Promise<{ channels?: Float32Array[]; error?: string }>
   }
 }

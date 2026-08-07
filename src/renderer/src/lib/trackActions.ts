@@ -13,6 +13,7 @@ import { renderTrackFreeze } from '@audio/render'
 import { encodeWavPcm16 } from '@audio/wav'
 import { projectStore } from '@/state/projectStore'
 import { assetStore } from '@/state/audioInstance'
+import { externalPluginHost } from '@/state/externalPlugins'
 
 /**
  * Track-level actions behind the header context menu. Everything persistent
@@ -58,21 +59,23 @@ export async function freezeTrack(trackId: TrackId): Promise<void> {
 
   freezingTracks.add(trackId)
   try {
-    const rendered = await renderTrackFreeze(state, trackId, assetStore)
+    // Freezing is where external (VST3) inserts get their audio: they
+    // cannot run in the renderer's graph, so their processing happens here
+    // and bakes into the asset — which then reaches collaborators who
+    // don't own the plugin through the ordinary asset transfer.
+    const rendered = await renderTrackFreeze(
+      state,
+      trackId,
+      assetStore,
+      externalPluginHost() ?? undefined
+    )
     if (!rendered) return // nothing on the track — nothing to freeze
     const channels: Float32Array[] = []
     for (let ch = 0; ch < rendered.numberOfChannels; ch++) {
       channels.push(rendered.getChannelData(ch))
     }
     const wav = encodeWavPcm16(channels, rendered.sampleRate)
-    const asset = assetStore.restore(
-      newId('ast'),
-      `Frozen — ${track.name}.wav`,
-      'audio',
-      'wav',
-      wav,
-      rendered
-    )
+    const asset = assetStore.addAudio(`Frozen — ${track.name}.wav`, 'wav', wav, rendered)
     projectStore.dispatch({ type: 'track/freeze', trackId, assetId: asset.id })
   } finally {
     freezingTracks.delete(trackId)

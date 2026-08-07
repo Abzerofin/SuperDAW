@@ -94,7 +94,32 @@ const api = {
       ipcRenderer.off('collab:peer-message', onMessage)
       ipcRenderer.off('collab:peer-disconnected', onDisconnected)
     }
-  }
+  },
+
+  /** Installed VST3 plugins, one entry per audio class. */
+  vst3Scan: (): Promise<
+    {
+      path: string
+      uid: string
+      name: string
+      vendor: string
+      version: string
+      subCategories: string
+    }[]
+  > => ipcRenderer.invoke('vst3:scan'),
+
+  /**
+   * Offline-process a buffer through one installed VST3. Whole-buffer, not
+   * streaming — see native/README.md for why live playback needs more than
+   * this. Identified by descriptor uid, never a path: paths are
+   * machine-specific and never enter the document.
+   */
+  vst3Process: (args: {
+    uid: string
+    channels: Float32Array[]
+    sampleRate: number
+  }): Promise<{ channels?: Float32Array[]; error?: string }> =>
+    ipcRenderer.invoke('vst3:process', args)
 }
 
 export type SuperDawApi = typeof api
