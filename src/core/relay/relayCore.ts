@@ -176,11 +176,21 @@ export class RelayCore {
 
     if (message.resumeToken !== undefined) {
       const seat = [...session.guests.values()].find((s) => s.resumeToken === message.resumeToken)
-      if (!seat || seat.conn !== null) {
+      if (!seat) {
         this.error(conn, 'bad-resume', 'That seat cannot be resumed')
         return
       }
+      // A valid resumeToken proves ownership of the seat, so a seat that is
+      // still "attached" here holds a connection we have not reaped yet:
+      // the guest gives up on a dead link sooner than the server's silence
+      // timer fires, so a reconnect lands inside that window. Hand the seat
+      // over rather than refusing — refusing ends a healthy session, and
+      // that window widens with every extra guest.
+      const stale = seat.conn
       seat.conn = conn
+      // Reseated first, so the stale socket's own close is a no-op for the
+      // seat (handleClose only clears a seat it still owns).
+      if (stale !== null && stale !== conn) stale.sink.close()
       session.emptySince = null
       conn.session = session
       conn.role = 'guest'

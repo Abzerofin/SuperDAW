@@ -3,6 +3,7 @@ import type { OpEnvelope } from '../ops/operations'
 import { newId } from '../model/ids'
 import {
   PROTOCOL_VERSION,
+  SESSION_COLOR_COUNT,
   type ClientToHost,
   type HostToClient,
   type MessageSink,
@@ -34,8 +35,12 @@ import {
 export interface HostAssetProvider {
   has(assetId: string): boolean
   get(assetId: string): { meta: TransferMeta; bytes: Uint8Array } | null
-  /** A guest upload completed; decode/register happens app-side. */
-  store(meta: TransferMeta, bytes: Uint8Array): void
+  /**
+   * A guest upload completed; decode/register happens app-side. May be
+   * async — the host waits for it to settle before announcing the asset,
+   * so `has`/`get` never lag behind an `asset-available` it has sent.
+   */
+  store(meta: TransferMeta, bytes: Uint8Array): void | Promise<void>
 }
 
 export interface HostPeer {
@@ -59,7 +64,6 @@ export interface HostSessionOptions {
 export class HostSession {
   private seq = 0
   private peers = new Set<HostPeer>()
-  private nextColorIndex = 1 // 0 is the host's
   private detachStore: () => void
 
   readonly hostUser: SessionUser
@@ -96,17 +100,46 @@ export class HostSession {
     return peer
   }
 
-  removePeer(peer: HostPeer): void {
-    if (!this.peers.delete(peer)) return
+  /** The live connection a person is on, if any. Identity is by userId. */
+  private peerFor(userId: string): HostPeer | null {
+    for (const peer of this.peers) if (peer.user?.userId === userId) return peer
+    return null
+  }
+
+  private releaseTransfers(peer: HostPeer): void {
     for (const transfer of peer.outgoing.values()) transfer.abort()
     for (const transfer of peer.incoming.values()) transfer.abort()
     peer.outgoing.clear()
     peer.incoming.clear()
     peer.expectedUploads.clear()
-    if (peer.user) {
-      this.broadcast({ t: 'user-left', userId: peer.user.userId })
-      this.options.onRosterChange?.(this.users)
-    }
+  }
+
+  /**
+   * Lowest free palette slot, skipping 0 (the host's). Recycled on purpose:
+   * a monotonic counter walks off the end of the palette after eight
+   * (re)joins and wraps a guest onto the host's own colour, so two people
+   * end up wearing one identity. Past a full palette, reuse is unavoidable.
+   */
+  private allocateColorIndex(): number {
+    const taken = new Set<number>([0])
+    for (const peer of this.peers) if (peer.user) taken.add(peer.user.colorIndex)
+    for (let i = 1; i < SESSION_COLOR_COUNT; i++) if (!taken.has(i)) return i
+    return 1 + (this.peers.size % (SESSION_COLOR_COUNT - 1))
+  }
+
+  removePeer(peer: HostPeer): void {
+    if (!this.peers.delete(peer)) return
+    this.releaseTransfers(peer)
+    const user = peer.user
+    peer.user = null
+    if (!user) return
+    // A reconnect may already have re-seated this person on a newer
+    // connection. The dying socket must not then evict them from everyone
+    // else's roster — that is how a live collaborator's name disappears
+    // (or worse, gets re-used) while they are still editing.
+    if (this.peerFor(user.userId)) return
+    this.broadcast({ t: 'user-left', userId: user.userId })
+    this.options.onRosterChange?.(this.users)
   }
 
   /** Stop hosting: the project simply becomes a local project again. */
@@ -125,11 +158,25 @@ export class HostSession {
           })
           return
         }
-        const rejoining = peer.user !== null
-        const user: SessionUser = peer.user ?? {
+        // Identity is keyed by userId, never by connection. A guest that
+        // reconnects (dropped socket, VPN hiccup) arrives on a brand-new
+        // HostPeer, so without this the session holds two entries for one
+        // person: the newcomer takes a fresh colour, and the late user-left
+        // from the dead socket erases the LIVE entry. That is what "names
+        // get mixed up" looks like, and it only becomes visible with a
+        // third peer to receive the broadcasts.
+        const stale = this.peerFor(message.userId)
+        if (stale && stale !== peer) {
+          this.releaseTransfers(stale)
+          this.peers.delete(stale)
+          stale.user = null
+        }
+        const user: SessionUser = {
           userId: message.userId,
           name: message.name,
-          colorIndex: this.nextColorIndex++
+          // Keep the colour they already had, so a reconnect doesn't
+          // repaint them mid-session (and doesn't burn a palette slot).
+          colorIndex: (peer.user ?? stale?.user)?.colorIndex ?? this.allocateColorIndex()
         }
         peer.user = user
         peer.sink.send({
@@ -140,10 +187,11 @@ export class HostSession {
           you: user,
           projectId: this.store.lineage.projectId
         })
-        if (!rejoining) {
-          this.broadcast({ t: 'user-joined', user }, peer)
-          this.options.onRosterChange?.(this.users)
-        }
+        // Sent for rejoins too: the client upserts by userId, so this is
+        // how the rest of the session repairs a roster after a reconnect
+        // and picks up a display name changed since the last hello.
+        this.broadcast({ t: 'user-joined', user }, peer)
+        this.options.onRosterChange?.(this.users)
         return
       }
 
@@ -172,6 +220,14 @@ export class HostSession {
 
       case 'asset-request': {
         if (!peer.user) return
+        // One live transfer per asset per peer. A client re-runs
+        // requestMissingAssets on every welcome (including reconnect
+        // resyncs) and also requests on asset-available, so the same file
+        // gets asked for twice; serving it twice doubles the bytes on the
+        // wire and crowds out op traffic for everyone.
+        for (const live of peer.outgoing.values()) {
+          if (live.meta.assetId === message.assetId) return
+        }
         const asset = this.options.assetProvider?.get(message.assetId)
         if (!asset) return
         const transfer = new OutgoingTransfer(
@@ -231,9 +287,16 @@ export class HostSession {
           {
             onComplete: (bytes) => {
               peer.incoming.delete(message.transferId)
-              provider.store(message.meta, bytes)
               // The uploader has it by definition; everyone else fetches.
-              this.broadcast({ t: 'asset-available', meta: message.meta }, peer)
+              // Announce only once the provider can actually SERVE it —
+              // storing is async app-side (decode), and a guest that
+              // requests too early gets a silently dropped asset-request
+              // and spins forever.
+              const announce = (): void =>
+                this.broadcast({ t: 'asset-available', meta: message.meta }, peer)
+              const stored = provider.store(message.meta, bytes)
+              if (stored instanceof Promise) void stored.then(announce)
+              else announce()
             },
             onError: () => peer.incoming.delete(message.transferId)
           }

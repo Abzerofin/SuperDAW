@@ -14,6 +14,13 @@ import type { AssetTransferMessage, TransferMeta } from './transfer'
 
 export const PROTOCOL_VERSION = 2
 
+/**
+ * Size of the shared presence palette (renderer: state/collab USER_COLORS).
+ * The host allocates within it so two people in one session never wear the
+ * same colour; index 0 is always the host's.
+ */
+export const SESSION_COLOR_COUNT = 8
+
 export interface SessionUser {
   readonly userId: string
   readonly name: string

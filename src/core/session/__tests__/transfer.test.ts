@@ -268,6 +268,64 @@ suite('guest uploads (asset-offer / asset-pull)', () => {
     expect(a.fromHost.filter((x) => x.t === 'asset-pull')).toHaveLength(0)
   })
 
+  test('a repeated request for an in-flight asset does not start a second transfer', () => {
+    const net = new TransferNet()
+    // Bigger than the credit window, so the first transfer is still open
+    // (awaiting credits) when the duplicate request arrives.
+    const data = bytesOf(ASSET_CHUNK_BYTES * (TRANSFER_WINDOW_CHUNKS + 1), 5)
+    net.hostAssets.add(meta('loop', data.length), data)
+
+    const g = net.addGuest('alice')
+    net.flush()
+
+    // A welcome-driven request and an asset-available-driven one can race.
+    g.session.requestAsset('loop')
+    g.session.requestAsset('loop')
+    // Deliver BOTH to the host before it can finish serving either.
+    while (g.toHost.length > 0 && g.peer) net.host.handleMessage(g.peer, g.toHost.shift()!)
+
+    // One announcement, one live transfer — the second request is dropped.
+    // (That the surviving transfer completes is covered by the download
+    // tests above; finishing it here would only re-pay the base64 cost.)
+    expect(g.fromHost.filter((m) => m.t === 'asset-begin')).toHaveLength(1)
+    expect(g.peer!.outgoing.size).toBe(1)
+  })
+
+  test('availability is announced only once an async provider has stored the bytes', async () => {
+    const net = new TransferNet()
+    // App-side storing decodes audio before registering, so it is async.
+    // Announcing before it settles advertises an asset the host cannot
+    // serve yet — the requester's asset-request is dropped and it hangs.
+    let release = (): void => {}
+    const gate = new Promise<void>((resolve) => (release = resolve))
+    const inner = net.hostAssets.store.bind(net.hostAssets)
+    net.hostAssets.store = (m, bytes) => gate.then(() => inner(m, bytes))
+
+    const a = net.addGuest('alice')
+    const b = net.addGuest('bob')
+    net.flush()
+
+    const data = bytesOf(ASSET_CHUNK_BYTES + 9, 11)
+    const m = meta('vocals', data.length)
+    a.assets.add(m, data)
+    a.session.offerAsset(m)
+    net.flush()
+
+    // Upload finished, but the host cannot serve it yet — stay quiet.
+    expect(net.hostAssets.has('vocals')).toBe(false)
+    expect(b.available.some((x) => x.assetId === 'vocals')).toBe(false)
+
+    release()
+    await gate
+    await Promise.resolve()
+    net.flush()
+
+    expect(b.available.some((x) => x.assetId === 'vocals')).toBe(true)
+    b.session.requestAsset('vocals')
+    net.flush()
+    expect(b.received.get('vocals')).toEqual(data)
+  })
+
   test('unsolicited asset-begin (no matching pull) is ignored by the host', () => {
     const net = new TransferNet()
     const a = net.addGuest('alice')

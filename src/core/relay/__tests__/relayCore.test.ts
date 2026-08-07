@@ -187,6 +187,33 @@ suite('lifecycle: host-away, resume, expiry', () => {
     expect(last(again)).toMatchObject({ t: 'error', code: 'bad-resume' })
   })
 
+  test('resuming a seat the relay has not reaped yet takes it over', () => {
+    const core = makeCore()
+    const { host, code } = createSession(core)
+    const a = joinSession(core, code)
+    const other = joinSession(core, code)
+
+    // The guest's link died silently (VPN, sleep). It gives up sooner than
+    // the relay's silence timer, so the reconnect arrives while the relay
+    // still believes the old socket is live.
+    const back = attach(core, 2000)
+    core.handleMessage(back.conn, { t: 'join', v: V, code, resumeToken: a.token }, 2000)
+
+    expect(last(back)).toEqual({ t: 'resumed', role: 'guest', guestId: a.guestId })
+    expect(a.guest.closed).toBe(true) // the stale socket is dropped
+    expect(last(host)).toEqual({ t: 'guest-up', guestId: a.guestId })
+
+    // When the stale socket finally closes it must not unseat the live one.
+    core.handleClose(a.guest.conn, 2500)
+    core.handleMessage(back.conn, { t: 'msg', payload: { ping: 1 } }, 3000)
+    expect(last(host)).toEqual({ t: 'guest-msg', guestId: a.guestId, payload: { ping: 1 } })
+
+    // And the unrelated third peer is untouched throughout.
+    core.handleMessage(host.conn, { t: 'msg', payload: { all: true } }, 3100)
+    expect(last(other.guest)).toEqual({ t: 'host-msg', payload: { all: true } })
+    expect(last(back)).toEqual({ t: 'host-msg', payload: { all: true } })
+  })
+
   test('host leave (deliberate) ends the session with host-left', () => {
     const core = makeCore()
     const { host, code } = createSession(core)

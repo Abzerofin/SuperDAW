@@ -174,9 +174,10 @@ class CollabStore {
           if (!asset) return null
           return { meta: metaOf(asset), bytes: asset.encoded }
         },
-        store: (meta, bytes) => {
-          void this.receiveAsset(meta, bytes)
-        }
+        // Returned, not fired and forgotten: the host announces the asset
+        // only after the decode/register settles, so a guest that requests
+        // it immediately is never met with an empty store.
+        store: (meta, bytes) => this.receiveAsset(meta, bytes)
       },
       clientAssets: {
         get: (assetId) => {

@@ -2,7 +2,7 @@
 import type { Clip, ProjectState, Track } from '../../model/types'
 import { createEmptyProject } from '../../model/types'
 import { PPQ } from '../../model/timebase'
-import type { ClientToHost, HostToClient } from '../protocol'
+import { SESSION_COLOR_COUNT, type ClientToHost, type HostToClient } from '../protocol'
 import { ProjectStore } from '../../state/store'
 import { HostSession, type HostPeer } from '../host'
 import { ClientSession } from '../client'
@@ -491,5 +491,81 @@ suite('session fuzz', () => {
 
       net.expectConverged()
     }
+  })
+})
+
+/**
+ * Roster identity. These only bite with a THIRD peer: every roster
+ * broadcast the host sends excludes the peer that caused it, so with
+ * host + one guest the fan-out paths below never execute at all.
+ */
+suite('session roster identity', () => {
+  test('reconnecting on a fresh connection keeps one entry, one colour', () => {
+    const net = new TestNetwork()
+    const alice = net.addClient('alice')
+    const bob = net.addClient('bob')
+    net.flush()
+
+    const colorBefore = net.host.users.find((u) => u.userId === 'alice')!.colorIndex
+    expect(colorBefore).toBeGreaterThan(0)
+
+    // Alice's socket dies silently (VPN drop, sleep/wake): she reconnects on
+    // a NEW connection while the host still believes the old one is live.
+    const deadPeer = alice.peer!
+    net.connect(alice)
+    net.flush()
+
+    expect(net.host.users.filter((u) => u.userId === 'alice')).toHaveLength(1)
+    expect(net.host.users.find((u) => u.userId === 'alice')!.colorIndex).toBe(colorBefore)
+
+    // The dead socket finally closes. It must not evict the live Alice from
+    // everyone else's roster.
+    net.host.removePeer(deadPeer)
+    expect(bob.fromHost.filter((m) => m.t === 'user-left')).toHaveLength(0)
+    expect(net.host.users.filter((u) => u.userId === 'alice')).toHaveLength(1)
+
+    net.flush()
+    net.expectConverged()
+  })
+
+  test('a genuine departure still leaves, and frees its colour', () => {
+    const net = new TestNetwork()
+    const alice = net.addClient('alice')
+    net.addClient('bob')
+    net.flush()
+    const aliceColor = net.host.users.find((u) => u.userId === 'alice')!.colorIndex
+
+    net.disconnect(alice)
+    expect(net.host.users.some((u) => u.userId === 'alice')).toBe(false)
+
+    const carol = net.addClient('carol')
+    net.flush()
+    expect(net.host.users.find((u) => u.userId === 'carol')!.colorIndex).toBe(aliceColor)
+    expect(carol.store.state).toEqual(net.hostStore.state)
+  })
+
+  test('concurrent guests never share a colour, and none takes the host slot', () => {
+    const net = new TestNetwork()
+    for (let i = 0; i < SESSION_COLOR_COUNT - 1; i++) net.addClient(`g${i}`)
+    net.flush()
+
+    const indices = net.host.users.map((u) => u.colorIndex)
+    expect(new Set(indices).size).toBe(indices.length)
+    expect(indices.filter((i) => i === 0)).toHaveLength(1) // the host, alone
+  })
+
+  test('churn beyond the palette never repaints a guest as the host', () => {
+    const net = new TestNetwork()
+    for (let i = 0; i < SESSION_COLOR_COUNT * 2; i++) {
+      const guest = net.addClient(`churn${i}`)
+      net.flush()
+      net.disconnect(guest)
+    }
+    net.addClient('late')
+    net.flush()
+
+    const user = net.host.users.find((u) => u.userId === 'late')!
+    expect(user.colorIndex).toBeGreaterThan(0)
+    expect(user.colorIndex).toBeLessThan(SESSION_COLOR_COUNT)
   })
 })
