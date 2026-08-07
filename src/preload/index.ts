@@ -118,8 +118,25 @@ const api = {
     uid: string
     channels: Float32Array[]
     sampleRate: number
+    params?: Record<string, number>
   }): Promise<{ channels?: Float32Array[]; error?: string }> =>
-    ipcRenderer.invoke('vst3:process', args)
+    ipcRenderer.invoke('vst3:process', args),
+
+  /** Automatable parameters of an installed VST3. Values are normalized 0..1. */
+  vst3Parameters: (
+    uid: string
+  ): Promise<{
+    parameters?: {
+      id: number
+      title: string
+      units: string
+      defaultNormalized: number
+      stepCount: number
+      defaultDisplay: string
+      isBypass: boolean
+    }[]
+    error?: string
+  }> => ipcRenderer.invoke('vst3:parameters', uid)
 }
 
 export type SuperDawApi = typeof api

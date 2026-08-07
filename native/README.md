@@ -46,9 +46,24 @@ node native/vst3host/smoketest.js
 - `inspect(path): { path, error?, classes: [...] }` — a load failure is
   returned as **data**, never thrown: one broken plugin must not abort a
   scan or take the app down with it.
-- `processBuffer(path, uid, { channels, sampleRate, blockSize? })
+- `processBuffer(path, uid, { channels, sampleRate, blockSize?, params? })
   -> { channels, inputChannels, outputChannels } | { error }` — runs a
-  whole buffer through one plugin, offline.
+  whole buffer through one plugin, offline. `params` maps parameter id to
+  a NORMALIZED 0..1 value, applied at sample 0 of each block.
+- `parameters(path, uid) -> { parameters } | { error }` — the plugin's
+  parameter list from its `IEditController`, including the plugin's own
+  formatted `defaultDisplay` (the plugin owns the mapping from normalized
+  to real units, so we never compute it).
+
+Filter by `canAutomate` for anything user-facing: MSaturator reports 154
+non-read-only parameters but only 24 automatable ones — the rest are
+internal state a generic parameter UI should not surface.
+
+Not every plugin exposes parameters at all. Polyverse Wider reports zero:
+its controls are GUI-only, with settings living in an opaque state chunk.
+Such plugins can be added and processed, but only ever at their default
+state until plugin GUI hosting or `IComponent::getState`/`setState`
+round-tripping exists.
 
 Bus layout is negotiated, not assumed: we request the arrangement matching
 the input we have, then **read back** what the plugin actually accepted

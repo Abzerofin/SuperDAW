@@ -26,8 +26,29 @@ interface Vst3Addon {
   processBuffer(
     path: string,
     uid: string,
-    options: { channels: Float32Array[]; sampleRate: number; blockSize?: number }
+    options: {
+      channels: Float32Array[]
+      sampleRate: number
+      blockSize?: number
+      params?: Record<string, number>
+    }
   ): { error?: string; channels?: Float32Array[] }
+  parameters(
+    path: string,
+    uid: string
+  ): { error?: string; parameters?: Vst3Param[] }
+}
+
+/** One automatable parameter. Values are VST3 NORMALIZED (0..1). */
+export interface Vst3Param {
+  id: number
+  title: string
+  units: string
+  defaultNormalized: number
+  stepCount: number
+  defaultDisplay: string
+  isBypass: boolean
+  canAutomate: boolean
 }
 
 /** A discovered plugin, flattened to one entry per audio class. */
@@ -97,10 +118,37 @@ export function registerVst3Ipc(): void {
   ipcMain.handle('vst3:scan', async (): Promise<Vst3Plugin[]> => scan())
 
   ipcMain.handle(
+    'vst3:parameters',
+    async (_event, uid: string): Promise<{ parameters?: Vst3Param[]; error?: string }> => {
+      const host = loadAddon()
+      if (!host) return { error: loadError ?? 'vst3 host unavailable' }
+      const plugin = scan().find((p) => p.uid === uid)
+      if (!plugin) return { error: `plugin not installed: ${uid}` }
+      try {
+        const result = host.parameters(plugin.path, plugin.uid)
+        if (result.error || !result.parameters) {
+          return { error: result.error ?? 'could not read parameters' }
+        }
+        // Only host-controllable parameters. MSaturator reports 154
+        // non-read-only params but just 24 automatable ones — the rest are
+        // internal state that a generic parameter UI should not surface.
+        return { parameters: result.parameters.filter((p) => p.canAutomate) }
+      } catch (error) {
+        return { error: error instanceof Error ? error.message : String(error) }
+      }
+    }
+  )
+
+  ipcMain.handle(
     'vst3:process',
     async (
       _event,
-      args: { uid: string; channels: Float32Array[]; sampleRate: number }
+      args: {
+        uid: string
+        channels: Float32Array[]
+        sampleRate: number
+        params?: Record<string, number>
+      }
     ): Promise<{ channels?: Float32Array[]; error?: string }> => {
       const host = loadAddon()
       if (!host) return { error: loadError ?? 'vst3 host unavailable' }
@@ -112,7 +160,8 @@ export function registerVst3Ipc(): void {
       try {
         const result = host.processBuffer(plugin.path, plugin.uid, {
           channels: args.channels,
-          sampleRate: args.sampleRate
+          sampleRate: args.sampleRate,
+          params: args.params
         })
         if (result.error || !result.channels) {
           return { error: result.error ?? 'processing failed' }

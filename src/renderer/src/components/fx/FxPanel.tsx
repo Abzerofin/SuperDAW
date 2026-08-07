@@ -12,6 +12,7 @@ import { usePluginRegistry } from '@/state/pluginRegistryHook'
 import { audioEngine } from '@/state/audioInstance'
 import { fxUi } from '@/state/fxUi'
 import {
+  externalParamDefs,
   externalPlugins,
   hasScanned,
   scanExternalPlugins,
@@ -194,15 +195,20 @@ function Vst3Picker({
           key={plugin.uid}
           className="fx-add-btn"
           title={`${plugin.vendor} · ${plugin.version}`}
-          onClick={() =>
+          onClick={async () => {
+            // Snapshot the plugin's parameters into the descriptor at
+            // add-time, so every peer clamps identically — including peers
+            // that do not have the plugin installed at all.
+            const paramDefs = await externalParamDefs(plugin.uid)
             onAdd({
               format: 'vst3',
               uid: plugin.uid,
               name: plugin.name,
               vendor: plugin.vendor,
-              version: plugin.version
+              version: plugin.version,
+              ...(paramDefs && Object.keys(paramDefs).length > 0 ? { paramDefs } : {})
             })
-          }
+          }}
         >
           + {plugin.name}
         </button>
@@ -251,9 +257,13 @@ function SynthSection({ track }: { track: Track }): React.JSX.Element {
 function PluginSection({ instance }: { instance: PluginInstance }): React.JSX.Element {
   usePluginRegistry() // re-render when a plugin gets installed mid-session
   const status = pluginRegistry.status(instance.descriptor)
-  if (status !== 'local') {
+  // 'offline' plugins (VST3) are installed here but hosted out of process:
+  // their params ARE editable, they just cannot be previewed live, so they
+  // get real controls rather than a placeholder.
+  if (status !== 'local' && status !== 'offline') {
     return <PluginPlaceholder instance={instance} status={status} />
   }
+  const offline = status === 'offline'
   const defs = paramDefsOf(instance.descriptor) ?? {}
   return (
     <div className={`fx-section ${instance.enabled ? '' : 'fx-bypassed'}`}>
@@ -272,6 +282,14 @@ function PluginSection({ instance }: { instance: PluginInstance }): React.JSX.El
           ⏻
         </button>
         <span className="fx-section-title">{instance.descriptor.name}</span>
+        {offline && (
+          <span
+            className="fx-offline-tag statusbar-dim"
+            title="Hosted out of process: heard once the track is frozen, not during live playback"
+          >
+            ❄ on freeze
+          </span>
+        )}
         <button
           className="comment-delete fx-remove"
           title="Remove plugin"
@@ -287,7 +305,11 @@ function PluginSection({ instance }: { instance: PluginInstance }): React.JSX.El
           key={key}
           def={paramDef}
           value={instance.params[key] ?? paramDef.default}
-          onPreview={(v) => audioEngine.previewPluginParam(instance.id, key, v)}
+          // No live preview for out-of-process plugins: there are no nodes
+          // in the graph to push a value into.
+          onPreview={
+            offline ? undefined : (v) => audioEngine.previewPluginParam(instance.id, key, v)
+          }
           onCommit={(v) =>
             projectStore.dispatch({
               type: 'plugin/setParam',

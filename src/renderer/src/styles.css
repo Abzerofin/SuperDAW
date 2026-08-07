@@ -1325,6 +1325,16 @@ input {
   font-style: italic;
 }
 
+.fx-offline-tag {
+  font-size: 9px;
+  white-space: nowrap;
+  flex: none;
+}
+
+.fx-status-offline {
+  background: var(--accent, #5b8def);
+}
+
 .fx-add-vst3 {
   margin-top: 2px;
   border-top: 1px solid var(--border);

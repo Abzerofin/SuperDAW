@@ -1,6 +1,8 @@
 import type { PluginInstance } from '@core/model/types'
+import type { ParamDef } from '@core/model/effects'
 import type { PluginDescriptor } from '@core/plugins/descriptor'
 import { descriptorKey } from '@core/plugins/descriptor'
+import { pluginRegistry } from '@audio/pluginRegistry'
 import type { ExternalPluginHost } from '@audio/render'
 
 /**
@@ -47,7 +49,45 @@ export async function scanExternalPlugins(): Promise<void> {
     })
   }
   scanned = true
+  // Teach the registry which descriptors this client can render out of
+  // process, so their status is 'offline' rather than 'missing'.
+  pluginRegistry.setExternalIndex((descriptor) => byKey.has(descriptorKey(descriptor)))
   for (const listener of listeners) listener()
+}
+
+/**
+ * Snapshot a plugin's parameters into the shape the document stores.
+ *
+ * VST3 values are NORMALIZED 0..1 and the plugin owns the mapping to real
+ * units, so these defs are 0..1 with no unit suffix — labelling a 0.50 as
+ * "dB" would be a lie. The parameter's real-world units go in the label so
+ * the control is still identifiable.
+ *
+ * Captured at add-time and stored in the descriptor, per the plugin
+ * architecture: the reducer then clamps identically on every peer,
+ * including peers that do not have the plugin at all.
+ */
+export async function externalParamDefs(
+  uid: string
+): Promise<Record<string, ParamDef> | null> {
+  const api = window.superdaw
+  if (!api?.vst3Parameters) return null
+  const result = await api.vst3Parameters(uid)
+  if (result.error || !result.parameters) return null
+  const defs: Record<string, ParamDef> = {}
+  for (const param of result.parameters) {
+    if (param.isBypass) continue // the chain already has its own bypass
+    const units = param.units.trim()
+    defs[String(param.id)] = {
+      label: units ? `${param.title} (${units})` : param.title,
+      min: 0,
+      max: 1,
+      default: param.defaultNormalized,
+      unit: '',
+      digits: 2
+    }
+  }
+  return defs
 }
 
 export function externalPlugins(): ExternalPluginEntry[] {
@@ -80,7 +120,9 @@ export function externalPluginHost(): ExternalPluginHost | null {
       const result = await api.vst3Process({
         uid: instance.descriptor.uid,
         channels,
-        sampleRate
+        sampleRate,
+        // Param keys are the plugin's own numeric ids, stringified.
+        params: instance.params
       })
       // Failure bypasses rather than aborting the freeze — same rule the
       // reducer follows for ops whose target is gone.

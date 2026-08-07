@@ -33,9 +33,21 @@ export interface Resolution {
 export class PluginRegistry {
   private providers: PluginProvider[] = []
   private listeners = new Set<() => void>()
+  private externalHas: ((descriptor: PluginDescriptor) => boolean) | null = null
 
   register(provider: PluginProvider): void {
     this.providers.push(provider)
+    for (const fn of this.listeners) fn()
+  }
+
+  /**
+   * Availability of OUT-OF-PROCESS plugins (VST3), injected by the app so
+   * this module stays free of Electron. These have no provider — they
+   * cannot join the audio graph — so they never affect `resolve()`; they
+   * only make `status()` answer 'offline' instead of 'missing'.
+   */
+  setExternalIndex(has: ((descriptor: PluginDescriptor) => boolean) | null): void {
+    this.externalHas = has
     for (const fn of this.listeners) fn()
   }
 
@@ -73,7 +85,9 @@ export class PluginRegistry {
    * never need to change for them.
    */
   status(want: PluginDescriptor): PluginRuntimeStatus {
-    return this.resolve(want) ? 'local' : 'missing'
+    if (this.resolve(want)) return 'local'
+    if (this.externalHas?.(want)) return 'offline'
+    return 'missing'
   }
 }
 

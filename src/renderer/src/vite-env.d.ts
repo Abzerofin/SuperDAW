@@ -50,6 +50,19 @@ interface Window {
       uid: string
       channels: Float32Array[]
       sampleRate: number
+      params?: Record<string, number>
     }): Promise<{ channels?: Float32Array[]; error?: string }>
+    vst3Parameters(uid: string): Promise<{
+      parameters?: {
+        id: number
+        title: string
+        units: string
+        defaultNormalized: number
+        stepCount: number
+        defaultDisplay: string
+        isBypass: boolean
+      }[]
+      error?: string
+    }>
   }
 }

@@ -73,8 +73,13 @@ export function matchDescriptor(want: PluginDescriptor, have: PluginDescriptor):
  * computed per user — never stored in the document.
  *
  * local   — provider installed; fully editable.
+ * offline — installed here but hosted OUT OF PROCESS (VST3). Parameters
+ *           are editable and its audio is rendered when the track is
+ *           frozen, but it cannot run during live playback: the renderer
+ *           is sandboxed and shared memory does not cross an Electron
+ *           process boundary (see native/README.md).
  * remote  — missing here; audio streamed from a collaborator who has it.
  * proxy   — missing here; a rendered proxy plays; not editable.
  * missing — unavailable, no proxy; silent (bypassed) until resolved.
  */
-export type PluginRuntimeStatus = 'local' | 'remote' | 'proxy' | 'missing'
+export type PluginRuntimeStatus = 'local' | 'offline' | 'remote' | 'proxy' | 'missing'

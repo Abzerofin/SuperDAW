@@ -225,6 +225,8 @@ Napi::Object Parameters(const Napi::CallbackInfo& info) {
     entry.Set("defaultDisplay", Napi::String::New(env, FromString128(display)));
     entry.Set("isBypass",
               Napi::Boolean::New(env, (pinfo.flags & ParameterInfo::kIsBypass) != 0));
+    entry.Set("canAutomate",
+              Napi::Boolean::New(env, (pinfo.flags & ParameterInfo::kCanAutomate) != 0));
     list.Set(emitted++, entry);
   }
 
@@ -376,7 +378,27 @@ Napi::Object ProcessBuffer(const Napi::CallbackInfo& info) {
   outBuffers.numChannels = outChannels;
   outBuffers.channelBuffers32 = outPtrs.data();
 
-  ParameterChanges emptyChanges;
+  // Parameter values, applied as a change at sample 0 of the first block.
+  // The plugin also needs them set on its controller-facing side via
+  // setParamNormalized, which callers do by passing them here rather than
+  // relying on whatever the plugin's factory default happens to be.
+  ParameterChanges paramChanges;
+  if (options.Has("params") && options.Get("params").IsObject()) {
+    Napi::Object params = options.Get("params").As<Napi::Object>();
+    Napi::Array ids = params.GetPropertyNames();
+    for (uint32_t i = 0; i < ids.Length(); ++i) {
+      Napi::Value key = ids.Get(i);
+      const ParamID id =
+          static_cast<ParamID>(std::stoul(key.ToString().Utf8Value()));
+      const double value = params.Get(key).ToNumber().DoubleValue();
+      int32 queueIndex = 0;
+      if (auto* queue = paramChanges.addParameterData(id, queueIndex)) {
+        int32 pointIndex = 0;
+        queue->addPoint(0, std::min(1.0, std::max(0.0, value)), pointIndex);
+      }
+    }
+  }
+
   ProcessData data{};
   data.processMode = kOffline;
   data.symbolicSampleSize = kSample32;
@@ -384,7 +406,7 @@ Napi::Object ProcessBuffer(const Napi::CallbackInfo& info) {
   data.numOutputs = 1;
   data.inputs = inBusCount > 0 ? &inBuffers : nullptr;
   data.outputs = &outBuffers;
-  data.inputParameterChanges = &emptyChanges;
+  data.inputParameterChanges = &paramChanges;
 
   for (size_t offset = 0; offset < frames; offset += blockSize) {
     const int32 n =
