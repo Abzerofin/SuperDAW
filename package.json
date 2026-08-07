@@ -45,6 +45,7 @@
     "electron": "^43.3.0",
     "electron-builder": "^26.15.3",
     "electron-vite": "^5.0.0",
+    "node-addon-api": "^8.9.1",
     "typescript": "^7.0.2",
     "vite": "^7.3.6",
     "vitest": "^4.1.10"

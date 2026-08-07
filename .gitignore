@@ -5,3 +5,12 @@ release/
 *.log
 .DS_Store
 release-staging/
+
+# Vendored third-party SDK (MIT-licensed, pulled from GitHub — not ours to
+# commit; native/README or setup docs should explain how to fetch it).
+native/vst3sdk/
+
+# node-gyp output. Explicit rather than relying on the `release/` rule
+# above, which only matches build/Release/ by accident of Windows
+# case-insensitivity and would leak on Linux/macOS.
+native/**/build/
