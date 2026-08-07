@@ -55,6 +55,23 @@ node native/vst3host/smoketest.js
   formatted `defaultDisplay` (the plugin owns the mapping from normalized
   to real units, so we never compute it).
 
+For live playback, a plugin must stay alive between chunks:
+
+- `openInstance(path, uid, { sampleRate, blockSize?, channels? })
+  -> { handle, inputChannels, outputChannels } | { error }`
+- `processInstance(handle, { channels, params? }) -> { channels } | { error }`
+- `closeInstance(handle) -> { closed }`
+
+The plugin's internal state CARRIES OVER between `processInstance` calls —
+that is the entire point. Verified: feeding a burst then a chunk of pure
+silence, MCharmVerb's tail bleeds into the silent chunk (rms 0.005129) and
+MDelay's does too (0.000105), where creating the plugin per chunk yields
+exact silence. Without this, live playback would click at every chunk
+boundary as tails and delay lines reset.
+
+Instances are keyed by an opaque handle and live until closed, so callers
+must close them (a leaked instance holds the plugin loaded).
+
 Filter by `canAutomate` for anything user-facing: MSaturator reports 154
 non-read-only parameters but only 24 automatable ones — the rest are
 internal state a generic parameter UI should not surface.
