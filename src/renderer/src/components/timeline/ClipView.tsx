@@ -129,6 +129,29 @@ export function ClipView({
     setFadeDrag(null)
   }
 
+  /**
+   * Double-click the stretch handle for 1× — the same double-click-to-default
+   * convention as the knobs and the volume strip. It undoes the whole gesture,
+   * not just the rate: the clip shrinks back to the material's natural length
+   * (and a looped clip keeps its repeat count), mirroring the drag math in
+   * TimelineView so a stretch and its reset are exact inverses.
+   */
+  const resetStretch = (e: React.MouseEvent): void => {
+    e.stopPropagation()
+    if (!fadesEditable || !(clip.stretch > 0) || clip.stretch === 1) return
+    projectStore.dispatch({
+      type: 'clip/resize',
+      clipId: clip.id,
+      start: clip.start,
+      duration: Math.max(1, Math.round(clip.duration / clip.stretch)),
+      offset: clip.offset,
+      stretch: 1,
+      ...(clip.loopLength > 0
+        ? { loopLength: Math.round(clip.loopLength / clip.stretch) }
+        : {})
+    })
+  }
+
   return (
     <div
       className={`clip ${selected ? 'clip-selected' : ''} ${preview ? 'clip-dragging' : ''} ${
@@ -253,8 +276,13 @@ export function ClipView({
       {clip.assetId !== null && (
         <div
           className="clip-handle clip-handle-stretch"
-          title="Stretch — drag to make the audio play slower (longer) or faster (shorter)"
+          title={
+            clip.stretch === 1
+              ? 'Stretch — drag to make the audio play slower (longer) or faster (shorter)'
+              : `Stretch ×${clip.stretch} — drag to adjust · double-click for 1×`
+          }
           onPointerDown={(e) => onPointerDown(e, 'stretch-r')}
+          onDoubleClick={resetStretch}
         >
           ↔
         </div>

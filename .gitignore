@@ -10,6 +10,10 @@ release-staging/
 # commit; native/README or setup docs should explain how to fetch it).
 native/vst3sdk/
 
+# Saved projects. .sdaw files are DAW output (a zip of state + audio
+# assets), not source — they are large binaries and git handles them badly.
+Songs/
+
 # node-gyp output. Explicit rather than relying on the `release/` rule
 # above, which only matches build/Release/ by accident of Windows
 # case-insensitivity and would leak on Linux/macOS.

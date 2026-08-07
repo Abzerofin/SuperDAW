@@ -129,6 +129,12 @@ function GeneralPane(): React.JSX.Element {
         <input
           id="settings-display-name"
           value={name}
+          maxLength={24}
+          // Locked mid-session, matching the Collaboration panel: the host
+          // stamps your name into the roster at join time and there is no
+          // rename message, so editing it here would leave the old name on
+          // your cursor while chat and comments used the new one.
+          disabled={collab.mode !== 'off'}
           onChange={(e) => setName(e.target.value)}
           onBlur={() => collab.setDisplayName(name)}
           onKeyDown={(e) => {
@@ -136,7 +142,9 @@ function GeneralPane(): React.JSX.Element {
           }}
         />
         <p className="settings-dim">
-          Shown to collaborators in sessions, on your cursor and in chat.
+          {collab.mode === 'off'
+            ? 'Shown to collaborators in sessions, on your cursor and in chat.'
+            : 'Shown to collaborators — leave the session to change it.'}
         </p>
       </div>
       <div className="settings-field">

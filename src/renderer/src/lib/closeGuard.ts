@@ -12,7 +12,9 @@ import { sessionFile } from '@/state/sessionFile'
  */
 window.superdaw?.onSaveRequest(async () => {
   await saveProject()
-  return !sessionFile.dirty // still dirty = the user cancelled the dialog
+  // Still dirty = the user cancelled the dialog, or the save failed
+  // (saveProject reports that itself) — either way, do not close.
+  return !sessionFile.dirty
 })
 
 if (!window.superdaw) {

@@ -1,4 +1,5 @@
 import { useEffect, useState } from 'react'
+import { createPortal } from 'react-dom'
 import type { Track } from '@core/model/types'
 import { childTracksOf } from '@core/model/types'
 import { buildDuplicateTrackOp } from '@core/ops/duplicateTrack'
@@ -243,36 +244,47 @@ export function TrackHeader({
       </div>
       )}
 
-      {menu && (
-        <div
-          className="menu-panel track-context-menu"
-          style={{ left: menu.x, top: menu.y }}
-          onPointerDown={(e) => e.stopPropagation()}
-        >
-          {menuItem(
-            isFolder ? 'Bus effects…' : 'Instruments & effects…',
-            () => fxUi.open(track.id),
-            false
-          )}
-          {canRecord && menuItem('Input, channels & monitoring…', () => trackInputUi.open(track.id))}
-          {menuItem('Volume/pan automation', () => automationUi.toggle(track.id))}
-          {menuItem('Comments…', () => commentUi.open({ kind: 'track', id: track.id }))}
-          {menuItem('Show routing…', () => routingUi.open(track.id))}
-          <div className="menu-sep" />
-          {menuItem('Duplicate', duplicate)}
-          {!isFolder &&
-            (frozen
-              ? menuItem('Unfreeze', () => unfreezeTrack(track.id))
-              : menuItem('Freeze track', () => void freezeTrack(track.id)))}
-          {menuItem('Save track preset…', () => void saveTrackPreset(track.id))}
-          {menuItem('Load track preset…', () => void loadTrackPreset())}
-          <div className="menu-sep" />
-          {menuItem(isFolder ? 'Delete folder' : 'Delete track', () =>
-            projectStore.dispatch({ type: 'track/delete', trackId: track.id })
-          )}
-          {hasFx && <div className="menu-note">This track has effects</div>}
-        </div>
-      )}
+      {/*
+        Portalled to <body>: every track header sits in its own
+        `.header-cell`, which is `position: sticky` WITH a z-index and so
+        opens a stacking context. Rendered in place, the menu's z-index
+        would only rank it inside that one cell, leaving every track below
+        it painting on top. Coordinates are already viewport-based, so
+        `position: fixed` needs no adjustment out here.
+      */}
+      {menu &&
+        createPortal(
+          <div
+            className="menu-panel track-context-menu"
+            style={{ left: menu.x, top: menu.y }}
+            onPointerDown={(e) => e.stopPropagation()}
+          >
+            {menuItem(
+              isFolder ? 'Bus effects…' : 'Instruments & effects…',
+              () => fxUi.open(track.id),
+              false
+            )}
+            {canRecord &&
+              menuItem('Input, channels & monitoring…', () => trackInputUi.open(track.id))}
+            {menuItem('Volume/pan automation', () => automationUi.toggle(track.id))}
+            {menuItem('Comments…', () => commentUi.open({ kind: 'track', id: track.id }))}
+            {menuItem('Show routing…', () => routingUi.open(track.id))}
+            <div className="menu-sep" />
+            {menuItem('Duplicate', duplicate)}
+            {!isFolder &&
+              (frozen
+                ? menuItem('Unfreeze', () => unfreezeTrack(track.id))
+                : menuItem('Freeze track', () => void freezeTrack(track.id)))}
+            {menuItem('Save track preset…', () => void saveTrackPreset(track.id))}
+            {menuItem('Load track preset…', () => void loadTrackPreset())}
+            <div className="menu-sep" />
+            {menuItem(isFolder ? 'Delete folder' : 'Delete track', () =>
+              projectStore.dispatch({ type: 'track/delete', trackId: track.id })
+            )}
+            {hasFx && <div className="menu-note">This track has effects</div>}
+          </div>,
+          document.body
+        )}
     </div>
   )
 }

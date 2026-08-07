@@ -146,7 +146,7 @@ class RecordingStore {
       const wav = encodeWavPcm16(take.channels, take.sampleRate)
 
       const name = `Recording ${this.takeCounter++}.wav`
-      const asset = assetStore.restore(newId('ast'), name, 'audio', 'wav', wav, buffer)
+      const asset = assetStore.addAudio(name, 'wav', wav, buffer)
       const baseName = name.replace(/\.wav$/, '')
 
       projectStore.dispatch({
