@@ -61,26 +61,52 @@ function parseArchive(data: Uint8Array): {
   return { archive, parsed: parseProjectJson(strFromU8(projectJson)) }
 }
 
-/** Decode and restore archive assets; skips ids already in the store. */
-async function restoreArchiveAssets(
+interface DecodedAsset {
+  entry: AssetManifestEntry
+  bytes: Uint8Array
+  buffer: AudioBuffer | null
+  /** Audio whose bytes survived but would not decode (see failedDecodes). */
+  failed: boolean
+}
+
+/**
+ * Decode archive assets WITHOUT touching the store. Decoding a big project
+ * can fail part-way (an allocation failure under memory pressure is the
+ * usual cause), so nothing is committed until every asset is in hand —
+ * otherwise a half-finished open would leave the app holding neither the
+ * old project's audio nor the new one's, which reads as "all my audio
+ * disappeared". `skipExisting` keeps assets we already hold (merge path).
+ */
+async function decodeArchiveAssets(
   archive: Record<string, Uint8Array>,
-  assets: AssetManifestEntry[]
-): Promise<void> {
+  assets: AssetManifestEntry[],
+  { skipExisting }: { skipExisting: boolean }
+): Promise<DecodedAsset[]> {
+  const decoded: DecodedAsset[] = []
   for (const entry of assets) {
-    if (assetStore.get(entry.id)) continue
+    if (skipExisting && assetStore.get(entry.id)) continue
     const bytes = archive[assetPathInArchive(entry)]
     if (!bytes) {
       console.warn(`Project file is missing asset "${entry.name}" (${entry.id})`)
       continue
     }
     let buffer: AudioBuffer | null = null
+    let failed = false
     if (entry.kind === 'audio') {
       try {
         buffer = await audioEngine.decode(bytes.slice().buffer)
       } catch (error) {
         console.error(`Could not decode asset "${entry.name}"`, error)
+        failed = true
       }
     }
+    decoded.push({ entry, bytes, buffer, failed })
+  }
+  return decoded
+}
+
+function registerDecodedAssets(decoded: DecodedAsset[]): void {
+  for (const { entry, bytes, buffer } of decoded) {
     assetStore.restore(entry.id, entry.name, entry.kind, entry.ext, bytes, buffer)
   }
 }
@@ -89,17 +115,29 @@ export async function loadProjectBytes(data: Uint8Array, path: string | null): P
   const { archive, parsed } = parseArchive(data)
   const { state, assets, lineage, opLog } = parsed
 
+  // Decode first, swap second: until this resolves the current project is
+  // untouched, so a failure aborts the open instead of emptying the store.
+  const decoded = await decodeArchiveAssets(archive, assets, { skipExisting: false })
+
   transport.stop()
   selection.select(null)
   // Never carry a live input into another project's tracks.
   void trackInputs.stopAllMonitors()
   assetStore.clear()
-  await restoreArchiveAssets(archive, assets)
+  registerDecodedAssets(decoded)
 
   projectStore.loadProject(state, lineage, opLog)
   transport.setPosition(0)
   sessionFile.markLoaded(path)
   recentProjects.record(state, path)
+
+  const failed = decoded.filter((d) => d.failed).length
+  if (failed > 0) {
+    window.alert(
+      `${failed} audio file${failed === 1 ? '' : 's'} in this project could not be decoded and ` +
+        `will play silent. The file itself is intact — reopening after freeing memory may fix it.`
+    )
+  }
 }
 
 function defaultFileName(): string {
@@ -107,31 +145,51 @@ function defaultFileName(): string {
   return `${base}.${PROJECT_FILE_EXTENSION}`
 }
 
-/** Save. `forceDialog` = "Save As". Resolves when done (or cancelled). */
+/**
+ * Save. `forceDialog` = "Save As". Resolves when done (or cancelled).
+ *
+ * Never fails quietly: packing a large project allocates the whole archive
+ * contiguously, so it CAN throw under memory pressure, and a save the user
+ * believes succeeded is how a session's work gets lost.
+ */
 export async function saveProject(forceDialog = false): Promise<void> {
-  const data = packProject()
-  const bridge = window.superdaw
-  if (bridge) {
-    const path = await bridge.saveProjectFile({
-      data,
-      path: forceDialog ? null : sessionFile.path,
-      defaultName: defaultFileName()
-    })
-    if (path !== null) {
-      sessionFile.markSaved(path)
-      recentProjects.record(projectStore.state, path)
+  try {
+    const data = packProject()
+    const bridge = window.superdaw
+    if (bridge) {
+      const path = await bridge.saveProjectFile({
+        data,
+        path: forceDialog ? null : sessionFile.path,
+        defaultName: defaultFileName()
+      })
+      if (path !== null) {
+        sessionFile.markSaved(path)
+        recentProjects.record(projectStore.state, path)
+      }
+      return
     }
-    return
+    // Browser fallback: download. No stable path, so every save re-downloads.
+    const url = URL.createObjectURL(new Blob([data.buffer as ArrayBuffer]))
+    const anchor = document.createElement('a')
+    anchor.href = url
+    anchor.download = defaultFileName()
+    anchor.click()
+    // Revoking synchronously races the download the click just started and
+    // truncates large archives; let it begin first.
+    setTimeout(() => URL.revokeObjectURL(url), 60_000)
+    sessionFile.markSaved(null)
+    recentProjects.record(projectStore.state, null)
+  } catch (error) {
+    // Deliberately not rethrown: every caller fires this and forgets. The
+    // failure is still legible downstream because markSaved() never ran, so
+    // the project stays dirty and the close guard keeps the window open.
+    console.error('Save failed', error)
+    window.alert(
+      `Could not save the project — it has NOT been written to disk.\n\n${
+        error instanceof Error ? error.message : String(error)
+      }`
+    )
   }
-  // Browser fallback: download. No stable path, so every save re-downloads.
-  const url = URL.createObjectURL(new Blob([data.buffer as ArrayBuffer]))
-  const anchor = document.createElement('a')
-  anchor.href = url
-  anchor.download = defaultFileName()
-  anchor.click()
-  URL.revokeObjectURL(url)
-  sessionFile.markSaved(null)
-  recentProjects.record(projectStore.state, null)
 }
 
 /** Start an empty project. Asks before discarding unsaved changes. */
@@ -263,7 +321,9 @@ export async function mergeProjectBytes(data: Uint8Array): Promise<void> {
   transport.stop()
   selection.select(null)
   pianoRollUi.close()
-  await restoreArchiveAssets(archive, parsed.assets) // keeps what we already have
+  // Additive: keeps what we already have, so decode-then-register needs no
+  // staging here — nothing is cleared.
+  registerDecodedAssets(await decodeArchiveAssets(archive, parsed.assets, { skipExisting: true }))
 
   const merged = mergeForks(ours, theirs)
   projectStore.loadProject(merged.state, merged.lineage, merged.log)

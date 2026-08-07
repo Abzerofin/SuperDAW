@@ -71,12 +71,21 @@ function HealthStatus({ state }: { state: ProjectState }): React.JSX.Element {
     }
   }, [open])
 
-  const missingAssets = [...referencedAssetIds(state)].filter((id) => !assetStore.get(id)).length
+  const referenced = [...referencedAssetIds(state)]
+  const missingAssets = referenced.filter((id) => !assetStore.get(id)).length
+  // Audio that IS loaded but never decoded plays silent and draws no
+  // waveform while looking perfectly healthy — count it, or a project that
+  // lost its audio to memory pressure reports itself fine.
+  const silentAssets = referenced.filter((id) => {
+    const asset = assetStore.get(id)
+    return asset !== undefined && asset.kind === 'audio' && asset.buffer === null
+  }).length
   const manifest = pluginManifest(state)
   const missingPlugins = manifest.filter((e) => pluginRegistry.status(e.descriptor) !== 'local').length
   const transfers = [...collab.assetProgress.values()]
   const lag = healthSampler.loopLagMs
-  const warn = missingAssets > 0 || missingPlugins > 0 || lag > 50 || collab.reconnecting
+  const warn =
+    missingAssets > 0 || silentAssets > 0 || missingPlugins > 0 || lag > 50 || collab.reconnecting
 
   const info = audioEngine.contextInfo()
   const heap = healthSampler.heapMb
@@ -126,6 +135,11 @@ function HealthStatus({ state }: { state: ProjectState }): React.JSX.Element {
                 )}%)`
           )}
           {row('Missing assets', String(missingAssets), missingAssets > 0)}
+          {row(
+            'Undecodable audio',
+            silentAssets === 0 ? 'none' : `${silentAssets} playing silent`,
+            silentAssets > 0
+          )}
           {row(
             'Plugin compatibility',
             manifest.length === 0

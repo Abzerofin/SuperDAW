@@ -124,19 +124,39 @@ export function clipDurationTicks(asset: ProjectAsset, midiTicks = 0): number {
   return barsToTicks(4, projectStore.state.timeSignature)
 }
 
+/**
+ * An import that throws (decoding a large file when memory is already tight
+ * is the common one) used to leave no trace but a console line — the file
+ * simply never appeared, which reads as the app losing audio. Failures are
+ * collected per batch and reported once, so dropping 40 files can't produce
+ * 40 dialogs.
+ */
+function reportFailedImports(failed: string[]): void {
+  if (failed.length === 0) return
+  const list = failed.slice(0, 5).join('\n  ')
+  const more = failed.length > 5 ? `\n  …and ${failed.length - 5} more` : ''
+  window.alert(
+    `Could not import ${failed.length} file${failed.length === 1 ? '' : 's'}:\n  ${list}${more}\n\n` +
+      `Large or numerous files can exhaust memory — importing fewer at a time may help.`
+  )
+}
+
 /** Import OS files into a File Bay folder. */
 export async function importFilesToBay(
   files: readonly File[],
   folderId: FileNodeId | null
 ): Promise<void> {
+  const failed: string[] = []
   for (const file of files) {
     try {
       const asset = await importAsset(file)
       if (asset) dispatchImported(asset, folderId, null)
     } catch (error) {
       console.error(`Failed to import "${file.name}"`, error)
+      failed.push(file.name)
     }
   }
+  reportFailedImports(failed)
 }
 
 /**
@@ -150,6 +170,7 @@ export async function importFilesToTrack(
   startTicks: number
 ): Promise<void> {
   let cursor = Math.max(0, startTicks)
+  const failed: string[] = []
   for (const file of files) {
     const accepts = track.kind === 'audio' ? isAudioFile(file) : isMidiFile(file)
     if (!accepts) continue
@@ -158,8 +179,10 @@ export async function importFilesToTrack(
       if (asset) cursor += dispatchImported(asset, null, { track, startTicks: cursor })
     } catch (error) {
       console.error(`Failed to import "${file.name}"`, error)
+      failed.push(file.name)
     }
   }
+  reportFailedImports(failed)
 }
 
 /** Payload for dragging an asset out of the File Bay (onto a track). */
