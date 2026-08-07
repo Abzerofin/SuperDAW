@@ -32,6 +32,24 @@ export function descriptorKey(d: PluginDescriptor): string {
 }
 
 /**
+ * Where to send a user whose machine lacks this plugin.
+ *
+ * Built LOCALLY from the descriptor's identity, and always a fixed https
+ * origin with the identity as an encoded query. A descriptor reaches this
+ * client from a COLLABORATOR's machine, so a URL carried in the document
+ * would be peer-controlled data flowing into `shell.openExternal` — i.e. an
+ * injection vector (`file:`, custom protocol handlers, phishing). Reading a
+ * URL out of the installed plugin instead doesn't help either: the machine
+ * that needs the link is by definition the one with no plugin to read.
+ */
+export function pluginSearchUrl(d: PluginDescriptor): string {
+  const terms = [d.vendor, d.name, d.format.toUpperCase(), 'plugin'].filter(
+    (term) => term.trim().length > 0
+  )
+  return `https://duckduckgo.com/?q=${encodeURIComponent(terms.join(' '))}`
+}
+
+/**
  * Resolution ladder, best first. 'format' matches (same plugin shipped in
  * a different format) must NEVER be used silently — they exist so the UI
  * can ask the user before substituting.

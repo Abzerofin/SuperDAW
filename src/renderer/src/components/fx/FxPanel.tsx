@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from 'react'
-import type { PluginInstance, Track } from '@core/model/types'
+import type { PluginInstance, PluginInstanceId, Track } from '@core/model/types'
 import { pluginsOfTrack } from '@core/model/types'
 import { SYNTH_DEFS, WAVE_TYPES, synthDefaults, type ParamDef } from '@core/model/effects'
 import type { PluginDescriptor } from '@core/plugins/descriptor'
@@ -22,7 +22,52 @@ import { PluginPlaceholder } from './PluginPlaceholder'
 export function FxPanel({ track }: { track: Track }): React.JSX.Element {
   const state = useProjectState()
   const rootRef = useRef<HTMLDivElement>(null)
+  const insertsRef = useRef<HTMLDivElement>(null)
   const inserts = pluginsOfTrack(state, track.id)
+
+  // Reorder drag: the previewed order lives here and only becomes a
+  // plugin/reorder op on release (one gesture = one operation).
+  const [drag, setDrag] = useState<{ id: PluginInstanceId; order: PluginInstanceId[] } | null>(null)
+  const byId = new Map(inserts.map((p) => [p.id, p]))
+  const shown = drag
+    ? drag.order.map((id) => byId.get(id)).filter((p): p is PluginInstance => p !== undefined)
+    : inserts
+
+  const startDrag = (e: React.PointerEvent, id: PluginInstanceId): void => {
+    if (e.button !== 0) return
+    e.preventDefault()
+    capturePointer(e)
+    setDrag({ id, order: inserts.map((p) => p.id) })
+  }
+
+  const moveDrag = (e: React.PointerEvent): void => {
+    if (!drag || !insertsRef.current) return
+    // Rows are rendered in the previewed order, so crossing a row's
+    // midpoint is what moves the dragged insert into that slot.
+    const rows = Array.from(insertsRef.current.children)
+    let target = rows.length - 1
+    for (let i = 0; i < rows.length; i++) {
+      const rect = rows[i].getBoundingClientRect()
+      if (e.clientY < rect.top + rect.height / 2) {
+        target = i
+        break
+      }
+    }
+    const from = drag.order.indexOf(drag.id)
+    if (from === -1 || from === target) return
+    const order = [...drag.order]
+    order.splice(target, 0, ...order.splice(from, 1))
+    setDrag({ ...drag, order })
+  }
+
+  const endDrag = (): void => {
+    if (!drag) return
+    const before = inserts.map((p) => p.id)
+    if (drag.order.some((id, i) => id !== before[i])) {
+      projectStore.dispatch({ type: 'plugin/reorder', trackId: track.id, order: drag.order })
+    }
+    setDrag(null)
+  }
 
   useEffect(() => {
     const onPointerDown = (e: PointerEvent): void => {
@@ -70,9 +115,28 @@ export function FxPanel({ track }: { track: Track }): React.JSX.Element {
       <div className="fx-body">
         {track.kind === 'midi' && <SynthSection track={track} />}
 
-        {inserts.map((instance) => (
-          <PluginSection key={instance.id} instance={instance} />
-        ))}
+        <div className="fx-inserts" ref={insertsRef}>
+          {shown.map((instance) => (
+            <div
+              key={instance.id}
+              className={`fx-insert ${drag?.id === instance.id ? 'fx-insert-dragging' : ''}`}
+            >
+              <button
+                className="fx-grip"
+                title="Drag to reorder"
+                onPointerDown={(e) => startDrag(e, instance.id)}
+                onPointerMove={moveDrag}
+                onPointerUp={endDrag}
+                onPointerCancel={endDrag}
+              >
+                ⠿
+              </button>
+              <div className="fx-insert-body">
+                <PluginSection instance={instance} />
+              </div>
+            </div>
+          ))}
+        </div>
 
         <div className="fx-add">
           {BUILTIN_EFFECT_DESCRIPTORS.map((descriptor) => (

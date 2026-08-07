@@ -1,5 +1,6 @@
 import type { PluginInstance } from '@core/model/types'
 import type { PluginRuntimeStatus } from '@core/plugins/descriptor'
+import { pluginSearchUrl } from '@core/plugins/descriptor'
 import { projectStore } from '@/state/projectStore'
 
 /**
@@ -41,6 +42,17 @@ export function PluginPlaceholder({
         {d.vendor} · {d.format.toUpperCase()} {d.version}
       </div>
       <div className="fx-placeholder-status">{STATUS_LABELS[status]}</div>
+      {status === 'missing' && (
+        <a
+          className="fx-placeholder-link"
+          href={pluginSearchUrl(d)}
+          target="_blank"
+          rel="noopener noreferrer"
+          title={`Find ${d.name} by ${d.vendor}`}
+        >
+          Find this plugin ↗
+        </a>
+      )}
     </div>
   )
 }

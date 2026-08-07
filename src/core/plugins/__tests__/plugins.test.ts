@@ -4,7 +4,7 @@ import { createEmptyProject } from '../../model/types'
 import { apply } from '../../ops/apply'
 import { invert } from '../../ops/invert'
 import type { PluginDescriptor } from '../descriptor'
-import { descriptorKey, matchDescriptor } from '../descriptor'
+import { descriptorKey, matchDescriptor, pluginSearchUrl } from '../descriptor'
 import { builtinEffectDescriptor, paramDefsOf, pluginDefaults } from '../builtin'
 import { pluginManifest } from '../manifest'
 
@@ -173,5 +173,38 @@ suite('builtin defs', () => {
     expect(paramDefsOf(builtinEffectDescriptor('delay'))?.time).toBeDefined()
     expect(paramDefsOf(VST)?.gain.max).toBe(30)
     expect(paramDefsOf({ ...VST, paramDefs: undefined })).toBeNull()
+  })
+})
+
+suite('pluginSearchUrl', () => {
+  test('builds a search from the plugin identity', () => {
+    const url = new URL(pluginSearchUrl(VST))
+    expect(url.origin).toBe('https://duckduckgo.com')
+    expect(url.searchParams.get('q')).toBe('FabFilter FabFilter Pro-Q 3 VST3 plugin')
+  })
+
+  test('a hostile descriptor cannot escape the query — the origin is fixed', () => {
+    // Descriptors arrive from a collaborator's machine and land in a link
+    // that Electron hands to shell.openExternal, so identity fields are
+    // untrusted input. Every one of these must stay INSIDE the query.
+    const hostile = pluginSearchUrl({
+      ...VST,
+      name: 'evil" onclick="steal()',
+      vendor: 'file:///C:/Windows/System32?&#'
+    })
+    const url = new URL(hostile)
+    expect(url.origin).toBe('https://duckduckgo.com')
+    expect(url.protocol).toBe('https:')
+    expect(hostile.startsWith('https://duckduckgo.com/?q=')).toBe(true)
+    // The whole payload survives as ONE query param, escaped — not as
+    // extra params, a fragment, or a second URL.
+    expect(url.searchParams.get('q')).toContain('file:///C:/Windows/System32?&#')
+    expect([...url.searchParams.keys()]).toEqual(['q'])
+    expect(url.hash).toBe('')
+  })
+
+  test('omits empty identity fields rather than emitting blank terms', () => {
+    const url = new URL(pluginSearchUrl({ ...VST, vendor: '  ' }))
+    expect(url.searchParams.get('q')).toBe('FabFilter Pro-Q 3 VST3 plugin')
   })
 })

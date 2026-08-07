@@ -109,6 +109,10 @@ export function describe(state: ProjectState, op: Operation): string | null {
         instance.trackId
       )}"`
     }
+    case 'plugin/reorder': {
+      if (!state.tracks[op.trackId]) return null
+      return `Reordered effects on "${trackName(state, op.trackId)}"`
+    }
     case 'track/setSynthParam': {
       const def = SYNTH_DEFS[op.param]
       return `Set synth ${def?.label ?? op.param} on "${trackName(state, op.trackId)}"`

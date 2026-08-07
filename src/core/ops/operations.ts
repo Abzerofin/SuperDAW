@@ -73,6 +73,14 @@ export type Operation =
   | { type: 'plugin/remove'; instanceId: PluginInstanceId }
   | { type: 'plugin/setParam'; instanceId: PluginInstanceId; param: string; value: number }
   | { type: 'plugin/setEnabled'; instanceId: PluginInstanceId; enabled: boolean }
+  /**
+   * Whole-chain order for one track, so a reorder drag stays ONE op and
+   * stays idempotent (re-applying assigns identical ranks). Ids that are
+   * unknown or belong to another track are skipped; chain members absent
+   * from `order` keep their relative order at the end, so a concurrent
+   * `plugin/add` on a peer is never dropped.
+   */
+  | { type: 'plugin/reorder'; trackId: TrackId; order: PluginInstanceId[] }
   | { type: 'track/setSynthParam'; trackId: TrackId; param: string; value: number }
   /** `parentId` present = also re-parent in the same gesture (drag into a folder). */
   | { type: 'track/reorder'; trackId: TrackId; index: number; parentId?: TrackId | null }

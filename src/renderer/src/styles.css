@@ -1152,6 +1152,47 @@ input {
   padding: 6px 8px;
 }
 
+/* Insert chain: a grip rail per row so live plugins and placeholders drag alike. */
+.fx-inserts {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.fx-insert {
+  display: flex;
+  align-items: stretch;
+  gap: 4px;
+}
+
+.fx-insert-body {
+  flex: 1;
+  min-width: 0;
+}
+
+.fx-insert-dragging {
+  opacity: 0.6;
+}
+
+.fx-grip {
+  display: flex;
+  align-items: center;
+  padding: 0 1px;
+  font-size: 11px;
+  line-height: 1;
+  color: var(--text-dim);
+  cursor: grab;
+  touch-action: none;
+}
+
+.fx-grip:hover {
+  color: var(--text);
+}
+
+.fx-insert-dragging .fx-grip {
+  cursor: grabbing;
+}
+
 .fx-bypassed .fx-param,
 .fx-bypassed .fx-section-title {
   opacity: 0.45;
@@ -1282,6 +1323,18 @@ input {
   font-size: 10px;
   color: var(--text-dim);
   font-style: italic;
+}
+
+.fx-placeholder-link {
+  display: inline-block;
+  margin-top: 4px;
+  font-size: 10px;
+  color: var(--accent, #5b8def);
+  text-decoration: none;
+}
+
+.fx-placeholder-link:hover {
+  text-decoration: underline;
 }
 
 .fx-status-dot {

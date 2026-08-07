@@ -142,9 +142,25 @@ on another's — with zero document divergence.
   → compatible version (same format+uid) → same vendor/name in another
   format, which `resolve()` never auto-uses — `formatAlternatives()` exists
   so the UI can ask the user first.
+- **Descriptors are untrusted input.** A descriptor reaches this client
+  from a COLLABORATOR's machine, so its fields are peer-controlled. The
+  "Find this plugin" link on a missing insert is therefore built locally
+  by `pluginSearchUrl()` — a fixed https origin with the identity as an
+  encoded query — and never from a URL carried in the document, which
+  would feed attacker-chosen strings (`file:`, protocol handlers,
+  phishing) into Electron's `shell.openExternal`. Reading a URL out of the
+  installed plugin is not an alternative: the machine that needs the link
+  is by definition the one with no plugin to read.
 - **The manifest is derived** (`pluginManifest(state)`): distinct
   descriptors in use, their instances and tracks, joined with local status
   in the status bar — never persisted, so it can't drift.
+- **Chain order is one op.** A reorder drag previews locally and dispatches
+  a single `plugin/reorder` carrying the track's whole insert order. It
+  PERMUTES the chain's existing `rank` values rather than renumbering from
+  zero, so the rank set is preserved and re-applying the previous order is
+  an exact invert. Ids that are unknown or on another track are skipped,
+  and chain members absent from `order` keep their relative place at the
+  end — so an insert a peer added concurrently is never dropped.
 
 The built-in synth still lives on MIDI tracks (`Track.synth`); folding it
 into an instrument-plugin instance is a future, separate migration.
@@ -446,7 +462,7 @@ default).
 Roadmap beyond: VST3 hosting (native module; first consumer of the
 provider/`stateBlob` contracts), collaborator audio streaming + proxy
 renders for remote/missing plugins, autotune/pitch correction (dedicated AudioWorklet DSP
-milestone: pitch detection + PSOLA resynthesis), effect reordering UI,
+milestone: pitch detection + PSOLA resynthesis),
 per-strip metering, packaging polish
 (icon, signing, auto-update), multi-clip/multi-note selection, loop/cycle
 region, master-bus effects, track height adjustment, count-in/punch

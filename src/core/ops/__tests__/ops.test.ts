@@ -1,6 +1,6 @@
 ﻿import { describe as suite, expect, test } from 'vitest'
 import type { Clip, Comment, FileNode, PluginInstance, ProjectState, Track } from '../../model/types'
-import { createEmptyProject } from '../../model/types'
+import { createEmptyProject, pluginsOfTrack } from '../../model/types'
 import { synthDefaults, type EffectType } from '../../model/effects'
 import { builtinEffectDescriptor } from '../../plugins/builtin'
 import { describe as describeOp } from '../describe'
@@ -233,6 +233,59 @@ suite('invert', () => {
       expect(apply(after, inverse!)).toEqual(before)
     })
   }
+})
+
+suite('plugin/reorder', () => {
+  /** baseState's fxA (rank 1) plus fxB, fxC — t1's chain is fxA, fxB, fxC. */
+  function chainState(): ProjectState {
+    let s = baseState()
+    s = apply(s, { type: 'plugin/add', instance: plugin('fxB', 't1', 'delay', {}, 2) })
+    s = apply(s, { type: 'plugin/add', instance: plugin('fxC', 't1', 'reverb', {}, 3) })
+    return s
+  }
+
+  const chain = (s: ProjectState): string[] => pluginsOfTrack(s, 't1').map((p) => p.id)
+
+  test('apply(invert) restores state for plugin/reorder', () => {
+    const before = chainState()
+    const op: Operation = { type: 'plugin/reorder', trackId: 't1', order: ['fxC', 'fxA', 'fxB'] }
+    const inverse = invert(before, op)
+    expect(inverse).not.toBeNull()
+    const after = apply(before, op)
+    expect(after).not.toBe(before)
+    expect(chain(after)).toEqual(['fxC', 'fxA', 'fxB'])
+    expect(apply(after, inverse!)).toEqual(before)
+  })
+
+  test('is idempotent — re-applying yields identical state', () => {
+    const s = apply(chainState(), { type: 'plugin/reorder', trackId: 't1', order: ['fxC', 'fxB', 'fxA'] })
+    expect(apply(s, { type: 'plugin/reorder', trackId: 't1', order: ['fxC', 'fxB', 'fxA'] })).toBe(s)
+  })
+
+  test('permutes existing ranks rather than renumbering from zero', () => {
+    const after = apply(chainState(), { type: 'plugin/reorder', trackId: 't1', order: ['fxC', 'fxA', 'fxB'] })
+    expect([after.plugins['fxC'].rank, after.plugins['fxA'].rank, after.plugins['fxB'].rank]).toEqual([1, 2, 3])
+  })
+
+  test('ids that are unknown, duplicated or on another track are skipped', () => {
+    const after = apply(chainState(), {
+      type: 'plugin/reorder',
+      trackId: 't1',
+      order: ['fxC', 'ghost', 'fxC', 'fxA', 'fxB']
+    })
+    expect(chain(after)).toEqual(['fxC', 'fxA', 'fxB'])
+  })
+
+  test('an insert missing from `order` keeps its place at the end', () => {
+    // Models a peer adding fxC concurrently with a reorder that predates it.
+    const after = apply(chainState(), { type: 'plugin/reorder', trackId: 't1', order: ['fxB', 'fxA'] })
+    expect(chain(after)).toEqual(['fxB', 'fxA', 'fxC'])
+  })
+
+  test('a missing track is dropped, not thrown', () => {
+    const s = chainState()
+    expect(apply(s, { type: 'plugin/reorder', trackId: 'ghost', order: ['fxA'] })).toBe(s)
+  })
 })
 
 suite('file bay ops', () => {
@@ -681,6 +734,55 @@ suite('clip looping', () => {
     expect(s.clips.c1.stretch).toBe(2)
     expect(s.clips.c1.loopLength).toBe(1920)
     expect(s.clips.c1.duration / s.clips.c1.loopLength).toBe(3) // still 3 repeats
+  })
+
+  test('resetting stretch to 1x undoes the whole gesture, plain and looped', () => {
+    // The reset the stretch handle dispatches on double-click (ClipView):
+    // rate AND length together, so it is the exact inverse of a drag.
+    const resetOp = (c: Clip): Operation => ({
+      type: 'clip/resize',
+      clipId: c.id,
+      start: c.start,
+      duration: Math.max(1, Math.round(c.duration / c.stretch)),
+      offset: c.offset,
+      stretch: 1,
+      ...(c.loopLength > 0 ? { loopLength: Math.round(c.loopLength / c.stretch) } : {})
+    })
+
+    const plain = baseState() // c1: duration 960, stretch 1
+    const stretched = apply(plain, {
+      type: 'clip/resize',
+      clipId: 'c1',
+      start: 0,
+      duration: 1920,
+      offset: 0,
+      stretch: 2
+    })
+    expect(apply(stretched, resetOp(stretched.clips.c1))).toEqual(plain)
+
+    // A looped clip comes back to its original period and repeat count.
+    const looped = apply(plain, {
+      type: 'clip/resize',
+      clipId: 'c1',
+      start: 0,
+      duration: 2880, // 3 repeats of 960
+      offset: 0,
+      loopLength: 960
+    })
+    const loopedStretched = apply(looped, {
+      type: 'clip/resize',
+      clipId: 'c1',
+      start: 0,
+      duration: 5760,
+      offset: 0,
+      stretch: 2,
+      loopLength: 1920
+    })
+    expect(apply(loopedStretched, resetOp(loopedStretched.clips.c1))).toEqual(looped)
+
+    // Idempotent: the sync layer may deliver it more than once.
+    const once = apply(stretched, resetOp(stretched.clips.c1))
+    expect(apply(once, resetOp(stretched.clips.c1))).toEqual(once)
   })
 
   test('splitting a looped clip keeps the period and re-anchors the right half in-pattern', () => {

@@ -21,7 +21,8 @@ import {
   MIN_PITCH,
   MIN_STRETCH,
   isClipLooped,
-  normalizeLoop
+  normalizeLoop,
+  pluginsOfTrack
 } from '../model/types'
 import { SYNTH_DEFS, clampParam, type ParamDef } from '../model/effects'
 import { paramDefsOf } from '../plugins/builtin'
@@ -345,6 +346,36 @@ export function apply(state: ProjectState, op: Operation): ProjectState {
         ...state,
         plugins: { ...state.plugins, [op.instanceId]: { ...instance, enabled: op.enabled } }
       }
+    }
+
+    case 'plugin/reorder': {
+      if (!state.tracks[op.trackId]) return state
+      const chain = pluginsOfTrack(state, op.trackId)
+      const byId = new Map(chain.map((p) => [p.id, p]))
+      const ordered: PluginInstance[] = []
+      const placed = new Set<string>()
+      for (const id of op.order) {
+        const instance = byId.get(id)
+        if (!instance || placed.has(id)) continue
+        placed.add(id)
+        ordered.push(instance)
+      }
+      // Inserts a peer added concurrently aren't in `order` — keep them.
+      for (const instance of chain) if (!placed.has(instance.id)) ordered.push(instance)
+
+      // Permute the chain's EXISTING rank values rather than renumbering
+      // from zero: the rank set is preserved, so re-applying the previous
+      // order restores the previous state exactly (a clean invert).
+      const ranks = chain.map((p) => p.rank).sort((a, b) => a - b)
+      let changed = false
+      const plugins = { ...state.plugins }
+      ordered.forEach((instance, index) => {
+        const rank = ranks[index]
+        if (instance.rank === rank) return
+        plugins[instance.id] = { ...instance, rank }
+        changed = true
+      })
+      return changed ? { ...state, plugins } : state
     }
 
     case 'track/setSynthParam': {
