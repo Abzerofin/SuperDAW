@@ -62,6 +62,7 @@ export function SettingsWindow(): React.JSX.Element | null {
           </button>
           {ui.section === 'general' && <GeneralPane />}
           {ui.section === 'audio' && <AudioPane />}
+          {ui.section === 'collaboration' && <CollaborationPane />}
           {!IMPLEMENTED_SECTIONS.has(ui.section) && (
             <div className="settings-pane">
               <h2>{SECTIONS.find((s) => s.id === ui.section)?.label}</h2>
@@ -69,6 +70,48 @@ export function SettingsWindow(): React.JSX.Element | null {
             </div>
           )}
         </div>
+      </div>
+    </div>
+  )
+}
+
+function CollaborationPane(): React.JSX.Element {
+  const collabState = useCollab()
+  const [url, setUrl] = useState(collab.relayUrl)
+  const inSession = collabState.mode !== 'off'
+
+  return (
+    <div className="settings-pane">
+      <h2>Collaboration</h2>
+      <div className="settings-field">
+        <label htmlFor="settings-relay-url">Relay server</label>
+        <input
+          id="settings-relay-url"
+          className="mono"
+          value={url}
+          disabled={inSession}
+          placeholder="ws://localhost:8787"
+          onChange={(e) => setUrl(e.target.value)}
+          onBlur={() => collab.setRelayUrl(url)}
+          onKeyDown={(e) => {
+            if (e.key === 'Enter') collab.setRelayUrl(url)
+          }}
+        />
+        <p className="settings-dim">
+          Where “Start collaboration” and internet join codes connect. Everyone in a session must
+          point at the same relay — run one with <span className="mono">npm run relay</span> and use
+          that machine&apos;s address (a VPN address like Tailscale&apos;s works without touching
+          your router). Leave empty to reset to the default.
+          {inSession && ' Leave the session to change this.'}
+        </p>
+      </div>
+      <div className="settings-field">
+        <label>LAN sessions</label>
+        <p className="settings-dim">
+          “Start LAN-only session” needs no relay: it serves directly from this machine and the join
+          code carries its address. A VPN counts as a LAN — if this machine is on one, the code
+          advertises that address so peers off your physical network can still reach it.
+        </p>
       </div>
     </div>
   )

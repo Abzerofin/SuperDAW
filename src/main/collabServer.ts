@@ -1,7 +1,7 @@
 import { ipcMain, type WebContents } from 'electron'
 import { randomBytes } from 'node:crypto'
-import { networkInterfaces } from 'node:os'
 import { WebSocketServer, type WebSocket } from 'ws'
+import { pickLanAddress } from './lanAddress'
 
 /**
  * Hosting transport: a WebSocket server in the main process acting as a
@@ -26,22 +26,6 @@ let server: WebSocketServer | null = null
 let sessionToken = ''
 let nextConnId = 1
 const sockets = new Map<number, WebSocket>()
-
-function pickLanAddress(): string {
-  const candidates: string[] = []
-  for (const list of Object.values(networkInterfaces())) {
-    for (const iface of list ?? []) {
-      if (iface.family !== 'IPv4' || iface.internal) continue
-      candidates.push(iface.address)
-    }
-  }
-  // Prefer classic private ranges; fall back to anything non-internal.
-  const isPrivate = (ip: string): boolean =>
-    ip.startsWith('192.168.') ||
-    ip.startsWith('10.') ||
-    /^172\.(1[6-9]|2\d|3[01])\./.test(ip)
-  return candidates.find(isPrivate) ?? candidates[0] ?? '127.0.0.1'
-}
 
 function stopServer(): void {
   for (const socket of sockets.values()) socket.close()

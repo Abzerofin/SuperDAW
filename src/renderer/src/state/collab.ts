@@ -122,6 +122,25 @@ class CollabStore {
     this.emit()
   }
 
+  // ---------- relay address (per-machine, never in the project) ----------
+
+  get relayUrl(): string {
+    return (
+      (typeof localStorage !== 'undefined' && localStorage.getItem('superdaw.relayUrl')) ||
+      DEFAULT_RELAY_URL
+    )
+  }
+
+  /** Empty resets to the default. Drops the cached client so the next
+   *  session dials the new address. */
+  setRelayUrl(url: string): void {
+    const trimmed = url.trim()
+    if (trimmed) localStorage.setItem('superdaw.relayUrl', trimmed)
+    else localStorage.removeItem('superdaw.relayUrl')
+    this.relayNet = null
+    this.emit()
+  }
+
   nameFor(userId: string): string {
     if (userId === projectStore.userId) return 'You'
     return this.identities.get(userId)?.name ?? 'Peer'
@@ -218,8 +237,7 @@ class CollabStore {
 
   private relay(): RelayNetworking {
     if (!this.relayNet) {
-      const url = localStorage.getItem('superdaw.relayUrl') || DEFAULT_RELAY_URL
-      this.relayNet = new RelayNetworking(webSocketConnector(url), this.deps())
+      this.relayNet = new RelayNetworking(webSocketConnector(this.relayUrl), this.deps())
     }
     return this.relayNet
   }

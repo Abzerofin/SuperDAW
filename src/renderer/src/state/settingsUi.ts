@@ -14,7 +14,11 @@ export type SettingsSection =
   | 'plugins'
 
 /** Sections that have a real pane today; the rest render as "coming soon". */
-export const IMPLEMENTED_SECTIONS: ReadonlySet<SettingsSection> = new Set(['general', 'audio'])
+export const IMPLEMENTED_SECTIONS: ReadonlySet<SettingsSection> = new Set([
+  'general',
+  'audio',
+  'collaboration'
+])
 
 class SettingsUiStore {
   isOpen = false
