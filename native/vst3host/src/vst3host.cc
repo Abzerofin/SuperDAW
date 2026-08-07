@@ -13,10 +13,12 @@
 
 #include "pluginterfaces/vst/ivstaudioprocessor.h"
 #include "pluginterfaces/vst/ivstcomponent.h"
+#include "pluginterfaces/vst/ivsteditcontroller.h"
 #include "pluginterfaces/vst/vsttypes.h"
 #include "public.sdk/source/vst/hosting/hostclasses.h"
 #include "public.sdk/source/vst/hosting/module.h"
 #include "public.sdk/source/vst/hosting/parameterchanges.h"
+#include "public.sdk/source/vst/utility/stringconvert.h"
 #include "public.sdk/source/vst/utility/uid.h"
 
 namespace {
@@ -132,6 +134,105 @@ bool ReadChannels(const Napi::Array& jsChannels, std::vector<std::vector<float>>
 Napi::Object Fail(Napi::Env env, const std::string& message) {
   Napi::Object result = Napi::Object::New(env);
   result.Set("error", Napi::String::New(env, message));
+  return result;
+}
+
+std::string FromString128(const String128 text) {
+  std::u16string wide;
+  for (int i = 0; i < 128 && text[i] != 0; ++i) {
+    wide.push_back(static_cast<char16_t>(text[i]));
+  }
+  return VST3::StringConvert::convert(wide);
+}
+
+/**
+ * A plugin's edit controller, which owns its parameter list. It may be a
+ * separate class (getControllerClassId) or the component itself for
+ * single-component effects — both shapes are real and must be handled.
+ */
+IPtr<IEditController> MakeController(const VST3::Hosting::PluginFactory& factory,
+                                     IComponent* component, bool& ownsController) {
+  ownsController = false;
+  TUID controllerCid;
+  if (component->getControllerClassId(controllerCid) == kResultOk) {
+    auto controller =
+        factory.createInstance<IEditController>(VST3::UID(controllerCid));
+    if (controller) {
+      if (controller->initialize(&hostContext()) != kResultOk) return nullptr;
+      ownsController = true;
+      return controller;
+    }
+  }
+  // Single-component effect: the component IS the controller, and is
+  // already initialized — do not initialize it a second time.
+  FUnknownPtr<IEditController> embedded(component);
+  return embedded ? IPtr<IEditController>(embedded) : nullptr;
+}
+
+// parameters(path, uid) -> { error? , parameters: [...] }
+//
+// Reads the plugin's parameter list. Values are VST3 NORMALIZED (0..1);
+// the plugin owns the mapping to real units, which is why `display` comes
+// back as the plugin's own formatted string rather than something we
+// compute.
+Napi::Object Parameters(const Napi::CallbackInfo& info) {
+  Napi::Env env = info.Env();
+  if (info.Length() < 2 || !info[0].IsString() || !info[1].IsString()) {
+    return Fail(env, "expected (path, uid)");
+  }
+  const std::string path = info[0].As<Napi::String>().Utf8Value();
+  auto parsedUid = VST3::UID::fromString(info[1].As<Napi::String>().Utf8Value());
+  if (!parsedUid) return Fail(env, "could not parse uid");
+
+  std::string moduleError;
+  auto module = VST3::Hosting::Module::create(path, moduleError);
+  if (!module) return Fail(env, moduleError.empty() ? "failed to load" : moduleError);
+
+  const auto factory = module->getFactory();
+  factory.setHostContext(&hostContext());
+  auto component = factory.createInstance<IComponent>(*parsedUid);
+  if (!component) return Fail(env, "could not create component");
+  if (component->initialize(&hostContext()) != kResultOk) {
+    return Fail(env, "component->initialize failed");
+  }
+
+  bool ownsController = false;
+  auto controller = MakeController(factory, component, ownsController);
+  if (!controller) {
+    component->terminate();
+    return Fail(env, "plugin exposes no IEditController");
+  }
+
+  Napi::Array list = Napi::Array::New(env);
+  uint32_t emitted = 0;
+  const int32 count = controller->getParameterCount();
+  for (int32 i = 0; i < count; ++i) {
+    ParameterInfo pinfo{};
+    if (controller->getParameterInfo(i, pinfo) != kResultOk) continue;
+    // Read-only meters//outputs are not things a user sets.
+    if (pinfo.flags & ParameterInfo::kIsReadOnly) continue;
+
+    String128 display{};
+    controller->getParamStringByValue(pinfo.id, pinfo.defaultNormalizedValue, display);
+
+    Napi::Object entry = Napi::Object::New(env);
+    entry.Set("id", Napi::Number::New(env, static_cast<double>(pinfo.id)));
+    entry.Set("title", Napi::String::New(env, FromString128(pinfo.title)));
+    entry.Set("units", Napi::String::New(env, FromString128(pinfo.units)));
+    entry.Set("defaultNormalized",
+              Napi::Number::New(env, pinfo.defaultNormalizedValue));
+    entry.Set("stepCount", Napi::Number::New(env, pinfo.stepCount));
+    entry.Set("defaultDisplay", Napi::String::New(env, FromString128(display)));
+    entry.Set("isBypass",
+              Napi::Boolean::New(env, (pinfo.flags & ParameterInfo::kIsBypass) != 0));
+    list.Set(emitted++, entry);
+  }
+
+  if (ownsController) controller->terminate();
+  component->terminate();
+
+  Napi::Object result = Napi::Object::New(env);
+  result.Set("parameters", list);
   return result;
 }
 
@@ -334,6 +435,7 @@ Napi::Object Init(Napi::Env env, Napi::Object exports) {
   exports.Set("scanPaths", Napi::Function::New(env, ScanPaths));
   exports.Set("inspect", Napi::Function::New(env, Inspect));
   exports.Set("processBuffer", Napi::Function::New(env, ProcessBuffer));
+  exports.Set("parameters", Napi::Function::New(env, Parameters));
   return exports;
 }
 
