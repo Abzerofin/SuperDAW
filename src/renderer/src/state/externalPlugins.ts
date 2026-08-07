@@ -28,6 +28,17 @@ const byKey = new Map<string, ExternalPluginEntry>()
 const listeners = new Set<() => void>()
 
 let scanned = false
+let scanError: string | null = null
+
+/** Is an out-of-process plugin host reachable at all (i.e. the desktop app)? */
+export function externalHostAvailable(): boolean {
+  return typeof window.superdaw?.vst3Scan === 'function'
+}
+
+/** Why the last scan found nothing, or null if it was fine. */
+export function externalScanError(): string | null {
+  return scanError
+}
 
 /** VST3 uids come off disk as-is; descriptors carry the same string. */
 function keyOf(uid: string): string {
@@ -37,7 +48,18 @@ function keyOf(uid: string): string {
 export async function scanExternalPlugins(): Promise<void> {
   const api = window.superdaw
   if (!api?.vst3Scan) return
-  const found = await api.vst3Scan()
+  scanned = true
+  scanError = null
+  let found: Awaited<ReturnType<NonNullable<typeof api.vst3Scan>>>
+  try {
+    found = await api.vst3Scan()
+  } catch (error) {
+    // A failed scan must SAY so. Silently rendering nothing is
+    // indistinguishable from "you own no plugins".
+    scanError = error instanceof Error ? error.message : String(error)
+    for (const listener of listeners) listener()
+    return
+  }
   byKey.clear()
   for (const plugin of found) {
     byKey.set(keyOf(plugin.uid), {
@@ -48,7 +70,6 @@ export async function scanExternalPlugins(): Promise<void> {
       subCategories: plugin.subCategories
     })
   }
-  scanned = true
   // Teach the registry which descriptors this client can render out of
   // process, so their status is 'offline' rather than 'missing'.
   pluginRegistry.setExternalIndex((descriptor) => byKey.has(descriptorKey(descriptor)))

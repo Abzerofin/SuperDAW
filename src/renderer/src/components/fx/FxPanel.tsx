@@ -12,8 +12,10 @@ import { usePluginRegistry } from '@/state/pluginRegistryHook'
 import { audioEngine } from '@/state/audioInstance'
 import { fxUi } from '@/state/fxUi'
 import {
+  externalHostAvailable,
   externalParamDefs,
   externalPlugins,
+  externalScanError,
   hasScanned,
   scanExternalPlugins,
   subscribeExternalPlugins
@@ -185,7 +187,20 @@ function Vst3Picker({
   // Effects only: instruments ignore audio input, and the insert chain is
   // not where they belong.
   const effects = plugins.filter((p) => p.subCategories.startsWith('Fx'))
-  if (effects.length === 0) return null
+
+  // Say WHY there is nothing to add. Rendering nothing at all is
+  // indistinguishable from "this feature does not exist", which is
+  // exactly how it reads in the browser build.
+  if (effects.length === 0) {
+    const reason = !externalHostAvailable()
+      ? 'VST3 · desktop app only (npm run dev)'
+      : (externalScanError() ?? 'VST3 · no effects found')
+    return (
+      <div className="fx-add fx-add-vst3">
+        <div className="fx-add-label statusbar-dim">{reason}</div>
+      </div>
+    )
+  }
 
   return (
     <div className="fx-add fx-add-vst3">
