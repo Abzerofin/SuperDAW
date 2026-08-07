@@ -51,6 +51,25 @@ export interface ExternalPluginHost {
     channels: Float32Array[],
     sampleRate: number
   ): Promise<Float32Array[] | null>
+  /**
+   * A PERSISTENT plugin for live playback, whose state carries across
+   * calls so consecutive chunks continue each other's tails. Absent on
+   * hosts that only do one-shot work.
+   */
+  open?(
+    descriptor: PluginDescriptor,
+    sampleRate: number,
+    channels: number
+  ): Promise<ExternalInstance | null>
+}
+
+/** A live plugin held open across chunks. Callers MUST close it. */
+export interface ExternalInstance {
+  process(
+    channels: Float32Array[],
+    params: Readonly<Record<string, number>>
+  ): Promise<Float32Array[] | null>
+  close(): void
 }
 
 /** Seconds of reverb/delay tail appended after the last clip ends. */

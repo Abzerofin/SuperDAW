@@ -122,6 +122,29 @@ const api = {
   }): Promise<{ channels?: Float32Array[]; error?: string }> =>
     ipcRenderer.invoke('vst3:process', args),
 
+  /**
+   * Open a PERSISTENT plugin instance for live playback. Its state carries
+   * across processInstance calls, so chunk N+1 continues chunk N's reverb
+   * tail. The caller must close what it opens.
+   */
+  vst3OpenInstance: (args: {
+    uid: string
+    sampleRate: number
+    blockSize?: number
+    channels?: number
+  }): Promise<{ handle?: number; outputChannels?: number; error?: string }> =>
+    ipcRenderer.invoke('vst3:open-instance', args),
+
+  vst3ProcessInstance: (args: {
+    handle: number
+    channels: Float32Array[]
+    params?: Record<string, number>
+  }): Promise<{ channels?: Float32Array[]; error?: string }> =>
+    ipcRenderer.invoke('vst3:process-instance', args),
+
+  vst3CloseInstance: (handle: number): Promise<{ closed: boolean }> =>
+    ipcRenderer.invoke('vst3:close-instance', handle),
+
   /** Automatable parameters of an installed VST3. Values are normalized 0..1. */
   vst3Parameters: (
     uid: string

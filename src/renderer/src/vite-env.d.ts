@@ -52,6 +52,18 @@ interface Window {
       sampleRate: number
       params?: Record<string, number>
     }): Promise<{ channels?: Float32Array[]; error?: string }>
+    vst3OpenInstance(args: {
+      uid: string
+      sampleRate: number
+      blockSize?: number
+      channels?: number
+    }): Promise<{ handle?: number; outputChannels?: number; error?: string }>
+    vst3ProcessInstance(args: {
+      handle: number
+      channels: Float32Array[]
+      params?: Record<string, number>
+    }): Promise<{ channels?: Float32Array[]; error?: string }>
+    vst3CloseInstance(handle: number): Promise<{ closed: boolean }>
     vst3Parameters(uid: string): Promise<{
       parameters?: {
         id: number

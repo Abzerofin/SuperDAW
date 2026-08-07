@@ -149,6 +149,39 @@ export function externalPluginHost(): ExternalPluginHost | null {
       // reducer follows for ops whose target is gone.
       if (result.error || !result.channels) return null
       return result.channels
+    },
+
+    open: async (descriptor, sampleRate, channels) => {
+      if (!api.vst3OpenInstance || !api.vst3ProcessInstance || !api.vst3CloseInstance) {
+        return null
+      }
+      const opened = await api.vst3OpenInstance({
+        uid: descriptor.uid,
+        sampleRate,
+        channels
+      })
+      if (opened.error || opened.handle === undefined) return null
+      const handle = opened.handle
+      let closed = false
+      return {
+        process: async (chunk, params) => {
+          if (closed) return null
+          const result = await api.vst3ProcessInstance!({
+            handle,
+            channels: chunk,
+            params: params as Record<string, number>
+          })
+          if (result.error || !result.channels) return null
+          return result.channels
+        },
+        close: () => {
+          if (closed) return
+          closed = true
+          // Fire and forget: a leaked handle would hold the plugin loaded
+          // for the life of the main process.
+          void api.vst3CloseInstance!(handle)
+        }
+      }
     }
   }
 }

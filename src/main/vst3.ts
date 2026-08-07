@@ -37,6 +37,16 @@ interface Vst3Addon {
     path: string,
     uid: string
   ): { error?: string; parameters?: Vst3Param[] }
+  openInstance(
+    path: string,
+    uid: string,
+    options: { sampleRate: number; blockSize?: number; channels?: number }
+  ): { error?: string; handle?: number; inputChannels?: number; outputChannels?: number }
+  processInstance(
+    handle: number,
+    options: { channels: Float32Array[]; params?: Record<string, number> }
+  ): { error?: string; channels?: Float32Array[] }
+  closeInstance(handle: number): { closed: boolean }
 }
 
 /** One automatable parameter. Values are VST3 NORMALIZED (0..1). */
@@ -135,6 +145,73 @@ export function registerVst3Ipc(): void {
         return { parameters: result.parameters.filter((p) => p.canAutomate) }
       } catch (error) {
         return { error: error instanceof Error ? error.message : String(error) }
+      }
+    }
+  )
+
+  // --- Persistent instances (live playback) ---
+  //
+  // Handles are opaque ints owned by the addon. The renderer must close
+  // what it opens: a leaked handle holds the plugin loaded for the life of
+  // the process.
+  ipcMain.handle(
+    'vst3:open-instance',
+    async (
+      _event,
+      args: { uid: string; sampleRate: number; blockSize?: number; channels?: number }
+    ): Promise<{ handle?: number; outputChannels?: number; error?: string }> => {
+      const host = loadAddon()
+      if (!host) return { error: loadError ?? 'vst3 host unavailable' }
+      const plugin = scan().find((p) => p.uid === args.uid)
+      if (!plugin) return { error: `plugin not installed: ${args.uid}` }
+      try {
+        const result = host.openInstance(plugin.path, plugin.uid, {
+          sampleRate: args.sampleRate,
+          blockSize: args.blockSize,
+          channels: args.channels
+        })
+        if (result.error || result.handle === undefined) {
+          return { error: result.error ?? 'could not open instance' }
+        }
+        return { handle: result.handle, outputChannels: result.outputChannels }
+      } catch (error) {
+        return { error: error instanceof Error ? error.message : String(error) }
+      }
+    }
+  )
+
+  ipcMain.handle(
+    'vst3:process-instance',
+    async (
+      _event,
+      args: { handle: number; channels: Float32Array[]; params?: Record<string, number> }
+    ): Promise<{ channels?: Float32Array[]; error?: string }> => {
+      const host = loadAddon()
+      if (!host) return { error: loadError ?? 'vst3 host unavailable' }
+      try {
+        const result = host.processInstance(args.handle, {
+          channels: args.channels,
+          params: args.params
+        })
+        if (result.error || !result.channels) {
+          return { error: result.error ?? 'processing failed' }
+        }
+        return { channels: result.channels }
+      } catch (error) {
+        return { error: error instanceof Error ? error.message : String(error) }
+      }
+    }
+  )
+
+  ipcMain.handle(
+    'vst3:close-instance',
+    async (_event, handle: number): Promise<{ closed: boolean }> => {
+      const host = loadAddon()
+      if (!host) return { closed: false }
+      try {
+        return host.closeInstance(handle)
+      } catch {
+        return { closed: false }
       }
     }
   )
