@@ -204,7 +204,7 @@ function Vst3Picker({
 
   return (
     <div className="fx-add fx-add-vst3">
-      <div className="fx-add-label statusbar-dim">VST3 · rendered on freeze</div>
+      <div className="fx-add-label statusbar-dim">VST3</div>
       {effects.map((plugin) => (
         <button
           key={plugin.uid}
@@ -300,9 +300,9 @@ function PluginSection({ instance }: { instance: PluginInstance }): React.JSX.El
         {offline && (
           <span
             className="fx-offline-tag statusbar-dim"
-            title="Hosted out of process: heard once the track is frozen, not during live playback"
+            title="Hosted out of process: audible during playback via look-ahead rendering (a knob change takes a moment to be heard). Freeze for exact, low-latency playback."
           >
-            ❄ on freeze
+            VST3
           </span>
         )}
         <button

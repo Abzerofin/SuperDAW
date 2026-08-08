@@ -7,7 +7,9 @@ import {
 } from '@core/model/types'
 import type { AssetStore } from './assets'
 import { applyClipFades } from './fades'
+import { LivePreview } from './livePreview'
 import { pluginRegistry, type PluginNodes } from './pluginRegistry'
+import type { ExternalPluginHost } from './render'
 import { buildSynthVoice } from './synth'
 import {
   beatIndexAt,
@@ -59,6 +61,12 @@ const GAIN_SMOOTHING_SEC = 0.015
 const LOOP_LOOKAHEAD_SEC = 4
 const LOOP_INTERVAL_MS = 250
 
+/** Seconds of finished VST3 audio produced per window. Also the latency. */
+const PREVIEW_WINDOW_SEC = 2
+/** How far ahead of the playhead preview audio is kept queued. */
+const PREVIEW_LOOKAHEAD_SEC = 4
+const PREVIEW_INTERVAL_MS = 250
+
 interface TrackChain {
   /** Where sources and synth voices connect; head of the insert chain. */
   input: GainNode
@@ -85,6 +93,22 @@ export class AudioEngine {
   private fadeNodes = new Set<GainNode>()
   /** Live input monitors feeding track chains, by track. */
   private monitors = new Map<TrackId, AudioNode>()
+
+  /**
+   * Live VST3 preview. Tracks in `previewTracks` have their clips and
+   * synth voices SUPPRESSED — their audio arrives instead as finished
+   * windows produced out of process, injected post-inserts at `auto` (the
+   * builtins are already baked into each window).
+   */
+  private preview: LivePreview | null = null
+  private previewTracks = new Set<TrackId>()
+  /** Next window start, per track: timeline ticks and its clock time. */
+  private previewNextTicks = new Map<TrackId, number>()
+  private previewNextSec = new Map<TrackId, number>()
+  private previewTimer: ReturnType<typeof setInterval> | null = null
+  private previewFilling = false
+  /** Bumped on teardown so an in-flight render cannot schedule stale audio. */
+  private previewGeneration = 0
 
   private anchorTicks = 0
   private anchorSec = 0
@@ -308,6 +332,7 @@ export class AudioEngine {
   private onTransportEvent = (event: 'play' | 'stop' | 'seek'): void => {
     if (event === 'stop') {
       this.stopAllSources()
+      this.teardownPreview()
       this.stopMetronome()
       this.stopLoopScheduler()
       return
@@ -316,15 +341,175 @@ export class AudioEngine {
 
     const ctx = this.ensureContext()
     const go = (): void => {
-      this.stopAllSources()
-      this.reanchor()
-      this.scheduleAll()
-      this.scheduleAutomation()
-      this.startMetronome()
-      this.startLoopScheduler()
+      void this.restart(() => {
+        this.scheduleAutomation()
+        this.startMetronome()
+        this.startLoopScheduler()
+      })
     }
     if (ctx.state === 'suspended') void ctx.resume().then(go)
     else go()
+  }
+
+  /**
+   * Re-queue everything from the current position. Preview audio must be
+   * rendered BEFORE the anchor is taken, because producing the first
+   * window costs real time — the render is then started at an offset so
+   * the previewed track stays in sync with everything else rather than
+   * arriving late by however long it took.
+   */
+  private async restart(after: () => void): Promise<void> {
+    this.stopAllSources()
+    this.teardownPreview()
+    const generation = this.previewGeneration
+    const first = await this.preparePreview()
+    // Stopped or superseded while rendering: drop it on the floor.
+    if (generation !== this.previewGeneration || !this.ctx) return
+    this.reanchor()
+    this.scheduleAll()
+    after()
+    this.emitFirstPreviewWindows(first)
+    this.startPreviewScheduler()
+  }
+
+  // ---------- Live VST3 preview ----------
+
+  /**
+   * Supply the out-of-process plugin host. Injected so this module stays
+   * free of Electron; without it (browser build) external inserts simply
+   * stay silent until the track is frozen, as before.
+   */
+  setExternalHost(host: ExternalPluginHost | null): void {
+    this.teardownPreview()
+    this.preview = host ? new LivePreview(this.store, this.assets, host) : null
+  }
+
+  /**
+   * Open the plugins and render each eligible track's FIRST window, before
+   * an anchor exists. Returns the buffers with the tick they start at, so
+   * the caller can offset them against the anchor it then takes.
+   */
+  private async preparePreview(): Promise<Map<TrackId, { buffer: AudioBuffer; fromTicks: number }>> {
+    const out = new Map<TrackId, { buffer: AudioBuffer; fromTicks: number }>()
+    const ctx = this.ctx
+    this.previewTracks = new Set()
+    if (!ctx || !this.preview || !this.transport.isPlaying) return out
+    // Preview windows advance linearly and cannot wrap, so while the cycle
+    // region is active previewed tracks would sail past the loop end.
+    // They play dry instead (builtins live, VST3 bypassed) — as before
+    // this feature existed.
+    if (this.transport.activeLoop()) return out
+
+    const generation = this.previewGeneration
+    const tracks = this.preview.eligibleTracks()
+    if (tracks.length === 0) return out
+
+    const fromTicks = this.transport.positionTicks()
+    const untilTicks =
+      fromTicks + Math.ceil(PREVIEW_WINDOW_SEC * ticksPerSecond(this.store.state.tempo))
+
+    for (const trackId of tracks) {
+      if (!(await this.preview.open(trackId, ctx.sampleRate))) continue
+      const buffer = await this.preview.renderWindow(trackId, fromTicks, untilTicks)
+      if (generation !== this.previewGeneration) return new Map()
+      if (!buffer) continue
+      // Only now is the track's own audio suppressed — if rendering failed
+      // it must keep playing dry rather than fall silent.
+      this.previewTracks.add(trackId)
+      this.previewNextTicks.set(trackId, untilTicks)
+      out.set(trackId, { buffer, fromTicks })
+    }
+    return out
+  }
+
+  /** Start the prepared windows, skipping whatever elapsed while rendering. */
+  private emitFirstPreviewWindows(
+    first: Map<TrackId, { buffer: AudioBuffer; fromTicks: number }>
+  ): void {
+    const tps = ticksPerSecond(this.store.state.tempo)
+    for (const [trackId, { buffer, fromTicks }] of first) {
+      const skipSec = Math.max(0, (this.anchorTicks - fromTicks) / tps)
+      if (skipSec >= buffer.duration) continue // window entirely in the past
+      this.schedulePreviewBuffer(trackId, buffer, this.anchorSec, skipSec)
+      this.previewNextSec.set(trackId, this.anchorSec + (buffer.duration - skipSec))
+    }
+  }
+
+  private schedulePreviewBuffer(
+    trackId: TrackId,
+    buffer: AudioBuffer,
+    when: number,
+    offsetSec = 0
+  ): void {
+    const ctx = this.ctx
+    if (!ctx) return
+    const source = ctx.createBufferSource()
+    source.buffer = buffer
+    // Injected AFTER the inserts: the builtins are already baked into the
+    // window, while `auto` still applies live volume automation.
+    source.connect(this.chain(trackId).auto)
+    source.onended = () => this.sources.delete(source)
+    source.start(when, offsetSec)
+    this.sources.add(source)
+  }
+
+  private startPreviewScheduler(): void {
+    if (this.previewTimer !== null || this.previewTracks.size === 0) return
+    this.previewTimer = setInterval(() => void this.topUpPreview(), PREVIEW_INTERVAL_MS)
+  }
+
+  /** Render and queue windows until the lookahead horizon is covered. */
+  private async topUpPreview(): Promise<void> {
+    const ctx = this.ctx
+    if (!ctx || !this.preview || !this.transport.isPlaying) return
+    // A loop region appeared mid-play: preview cannot wrap, so restart —
+    // preparePreview will then decline and the tracks fall back to dry.
+    if (this.transport.activeLoop()) {
+      void this.restart(() => this.resyncMetronome())
+      return
+    }
+    // Renders are slow; never let two overlap for the same window.
+    if (this.previewFilling) return
+    this.previewFilling = true
+    const generation = this.previewGeneration
+    try {
+      const tps = ticksPerSecond(this.store.state.tempo)
+      const windowTicks = Math.ceil(PREVIEW_WINDOW_SEC * tps)
+      for (const trackId of this.previewTracks) {
+        let guard = 0
+        while (
+          (this.previewNextSec.get(trackId) ?? 0) < ctx.currentTime + PREVIEW_LOOKAHEAD_SEC &&
+          guard++ < 4
+        ) {
+          const fromTicks = this.previewNextTicks.get(trackId) ?? 0
+          const buffer = await this.preview.renderWindow(
+            trackId,
+            fromTicks,
+            fromTicks + windowTicks
+          )
+          if (generation !== this.previewGeneration || !this.ctx) return
+          if (!buffer) break // past the end of the material
+          const when = this.previewNextSec.get(trackId) ?? ctx.currentTime
+          // Falling behind: drop the window rather than schedule the past.
+          if (when > ctx.currentTime) this.schedulePreviewBuffer(trackId, buffer, when)
+          this.previewNextSec.set(trackId, when + buffer.duration)
+          this.previewNextTicks.set(trackId, fromTicks + windowTicks)
+        }
+      }
+    } finally {
+      this.previewFilling = false
+    }
+  }
+
+  private teardownPreview(): void {
+    this.previewGeneration++
+    if (this.previewTimer !== null) clearInterval(this.previewTimer)
+    this.previewTimer = null
+    this.previewFilling = false
+    this.previewTracks.clear()
+    this.previewNextTicks.clear()
+    this.previewNextSec.clear()
+    this.preview?.closeAll()
   }
 
   /**
@@ -389,7 +574,22 @@ export class AudioEngine {
         if (frozenChanged) this.syncPlugins()
       }
     }
+    // External-plugin edits change what preview windows SOUND like, so
+    // they are audible edits. Builtin edits are not: their nodes apply
+    // params live with smoothing and must not interrupt playback.
+    let externalPluginChanged = false
     if (state.plugins !== this.prevPlugins) {
+      const prev = this.prevPlugins
+      for (const [id, instance] of Object.entries(state.plugins)) {
+        if (instance.descriptor.format !== 'builtin' && prev[id] !== instance) {
+          externalPluginChanged = true
+        }
+      }
+      for (const [id, instance] of Object.entries(prev)) {
+        if (instance.descriptor.format !== 'builtin' && !state.plugins[id]) {
+          externalPluginChanged = true
+        }
+      }
       this.prevPlugins = state.plugins
       if (this.ctx) this.syncPlugins()
     }
@@ -403,27 +603,26 @@ export class AudioEngine {
       state.tempo !== this.prevTempo ||
       state.notes !== this.prevNotes ||
       synthChanged ||
-      frozenChanged
+      frozenChanged ||
+      (externalPluginChanged && this.preview !== null)
     this.prevClips = state.clips
     this.prevTempo = state.tempo
     this.prevNotes = state.notes
     // Reschedule only when something audible changed; unrelated ops
-    // (renames etc.) must never interrupt playback.
+    // (renames etc.) must never interrupt playback. Already-rendered
+    // preview windows bake the OLD state in, so restart() re-renders them.
     if (editedAudio && this.transport.isPlaying && this.ctx) {
-      this.stopAllSources()
-      this.reanchor()
-      this.scheduleAll()
-      if (frozenChanged) this.scheduleAutomation() // baked automation goes neutral
-      this.resyncMetronome()
+      void this.restart(() => {
+        if (frozenChanged) this.scheduleAutomation() // baked automation goes neutral
+        this.resyncMetronome()
+      })
     }
   }
 
   private onAssetsChanged = (): void => {
     // A newly decoded asset may belong to an already-scheduled silent clip.
     if (this.transport.isPlaying && this.ctx) {
-      this.stopAllSources()
-      this.reanchor()
-      this.scheduleAll()
+      void this.restart(() => {})
     }
   }
 
@@ -531,6 +730,9 @@ export class AudioEngine {
       untilTicks
     )
     for (const s of schedules) {
+      // Previewed tracks: their finished audio (inserts included) arrives
+      // as rendered windows — playing the dry clip too would double it.
+      if (this.previewTracks.has(s.trackId)) continue
       const asset = this.assets.get(s.assetId)
       if (!asset?.buffer) continue
       const buffer = s.reverse ? this.reversedBufferFor(ctx, s.assetId) : asset.buffer
@@ -562,6 +764,8 @@ export class AudioEngine {
     const ctx = this.ctx
     if (!ctx) return
     for (const s of scheduleNotes(this.store.state, fromTicks, atSec, untilTicks)) {
+      // Previewed tracks get their audio as rendered windows (synth included).
+      if (this.previewTracks.has(s.trackId)) continue
       // Voices go through the clip's fade envelope, so MIDI tapers too.
       const dest = this.destinationFor(s.clipId, s.trackId, fadeGains, fromTicks, atSec)
       const voices = buildSynthVoice(

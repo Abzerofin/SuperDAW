@@ -12,7 +12,7 @@ import { projectStore } from '@/state/projectStore'
 
 const STATUS_LABELS: Record<PluginRuntimeStatus, string> = {
   local: 'Installed',
-  offline: 'Rendered on freeze — silent during playback',
+  offline: 'Previews with ~2s latency — freeze for exact playback',
   remote: 'Streaming from collaborator',
   proxy: 'Playing rendered proxy',
   missing: 'Not installed — audio bypassed'
