@@ -29,7 +29,7 @@
         "UNICODE",
         "_UNICODE"
       ],
-      "libraries": ["-lole32.lib", "-lshell32.lib"],
+      "libraries": ["-lole32.lib", "-lshell32.lib", "-luser32.lib", "-lgdi32.lib"],
       "msvs_settings": {
         "VCCLCompilerTool": {
           "ExceptionHandling": 1,

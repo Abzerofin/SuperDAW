@@ -15,6 +15,12 @@
 
 #include <napi.h>
 
+#ifdef _WIN32
+#define NOMINMAX
+#define WIN32_LEAN_AND_MEAN
+#include <windows.h>
+#endif
+
 #include <algorithm>
 #include <map>
 #include <memory>
@@ -751,9 +757,22 @@ struct EditorSession {
   bool ownsController = false;
   IPtr<IPlugView> view;
   std::unique_ptr<EditorHost> host;
+#ifdef _WIN32
+  /**
+   * Our own child window inside the Electron frame, which the plugin
+   * paints into. Attaching straight to the BrowserWindow's HWND does not
+   * work: Chromium's compositor child covers the client area and the
+   * plugin's view ends up invisible beneath it. Our child is forced to
+   * the TOP of the sibling z-order instead.
+   */
+  HWND child = nullptr;
+#endif
 
   ~EditorSession() {
     if (view) view->removed();
+#ifdef _WIN32
+    if (child) DestroyWindow(child);
+#endif
     if (controller) {
       controller->setComponentHandler(nullptr);
       FUnknownPtr<IConnectionPoint> compCP(component);
@@ -856,9 +875,40 @@ Napi::Object OpenEditor(const Napi::CallbackInfo& info) {
 
   ViewRect size{};
   session->view->getSize(&size);
+
+#ifdef _WIN32
+  // The plugin paints into OUR child window, forced above Chromium's
+  // compositor sibling — attaching to the frame HWND itself leaves the
+  // view invisible beneath the web content layer.
+  static bool classRegistered = false;
+  static const wchar_t* kClass = L"SuperDAWVst3Editor";
+  if (!classRegistered) {
+    WNDCLASSW wc{};
+    wc.lpfnWndProc = DefWindowProcW;
+    wc.hInstance = GetModuleHandleW(nullptr);
+    wc.lpszClassName = kClass;
+    wc.style = CS_DBLCLKS;
+    wc.hbrBackground = static_cast<HBRUSH>(GetStockObject(BLACK_BRUSH));
+    RegisterClassW(&wc);
+    classRegistered = true;
+  }
+  HWND parent = static_cast<HWND>(hwnd);
+  session->child = CreateWindowExW(
+      0, kClass, L"", WS_CHILD | WS_VISIBLE | WS_CLIPSIBLINGS, 0, 0,
+      size.getWidth(), size.getHeight(), parent, nullptr,
+      GetModuleHandleW(nullptr), nullptr);
+  if (!session->child) return Fail(env, "could not create editor child window");
+  SetWindowPos(session->child, HWND_TOP, 0, 0, 0, 0,
+               SWP_NOMOVE | SWP_NOSIZE | SWP_SHOWWINDOW);
+
+  if (session->view->attached(session->child, kPlatformTypeHWND) != kResultOk) {
+    return Fail(env, "editor refused to attach to the window");
+  }
+#else
   if (session->view->attached(hwnd, kPlatformTypeHWND) != kResultOk) {
     return Fail(env, "editor refused to attach to the window");
   }
+#endif
 
   const int32_t handle = gNextEditor++;
   Napi::Object result = Napi::Object::New(env);
@@ -876,8 +926,14 @@ Napi::Object EditorResized(const Napi::CallbackInfo& info) {
   if (info.Length() < 3 || !info[0].IsNumber()) return Fail(env, "expected (editor, w, h)");
   auto found = gEditors.find(info[0].As<Napi::Number>().Int32Value());
   if (found == gEditors.end()) return Fail(env, "unknown editor");
-  ViewRect rect(0, 0, info[1].As<Napi::Number>().Int32Value(),
-                info[2].As<Napi::Number>().Int32Value());
+  const int width = info[1].As<Napi::Number>().Int32Value();
+  const int height = info[2].As<Napi::Number>().Int32Value();
+#ifdef _WIN32
+  if (found->second->child) {
+    MoveWindow(found->second->child, 0, 0, width, height, TRUE);
+  }
+#endif
+  ViewRect rect(0, 0, width, height);
   found->second->view->onSize(&rect);
   return result;
 }
