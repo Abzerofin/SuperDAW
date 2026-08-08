@@ -1,15 +1,17 @@
 import { useSyncExternalStore } from 'react'
 import type { PluginInstanceId } from '@core/model/types'
-import { wireEditorEvents } from './vst3Editors'
 
 /**
- * Which VST3 inserts have their GUI expanded INSIDE the Effects dock, and
- * how big each plugin says its editor is. Ephemeral per-user UI state.
+ * Docked VST3 editors: every offline insert shows its plugin's own GUI in
+ * its card automatically. This store holds what the renderer needs to lay
+ * that out — each editor's reported size, and which instances FAILED to
+ * open an editor (no GUI, or a broken plugin) and fall back to generic
+ * sliders. Ephemeral per-user UI state.
  *
  * The GUI itself is a borderless native overlay glued over a reserved
  * placeholder (a plugin cannot paint inside a Chromium window). The
  * placeholder component reports its viewport rect through
- * `window.superdaw.vst3DockEditor`; collapsing sends rect: null, which
+ * `window.superdaw.vst3DockEditor`; unmounting sends rect: null, which
  * captures the plugin's state exactly like closing a floating editor.
  */
 
@@ -19,38 +21,31 @@ export interface EditorDims {
 }
 
 class Vst3DockStore {
-  private expanded = new Map<PluginInstanceId, EditorDims>()
+  private sizes = new Map<PluginInstanceId, EditorDims>()
+  private failed = new Set<PluginInstanceId>()
   private version = 0
   private listeners = new Set<() => void>()
 
-  isExpanded(instanceId: PluginInstanceId): boolean {
-    return this.expanded.has(instanceId)
-  }
-
   dims(instanceId: PluginInstanceId): EditorDims | null {
-    return this.expanded.get(instanceId) ?? null
-  }
-
-  toggle(instanceId: PluginInstanceId): void {
-    if (this.expanded.has(instanceId)) {
-      this.expanded.delete(instanceId)
-    } else {
-      // Real dimensions arrive from the plugin once its editor opens.
-      this.expanded.set(instanceId, { width: 480, height: 320 })
-      wireEditorEvents()
-    }
-    this.emit()
-  }
-
-  collapse(instanceId: PluginInstanceId): void {
-    if (this.expanded.delete(instanceId)) this.emit()
+    return this.sizes.get(instanceId) ?? null
   }
 
   setDims(instanceId: PluginInstanceId, dims: EditorDims): void {
-    const current = this.expanded.get(instanceId)
-    if (!current || (current.width === dims.width && current.height === dims.height)) return
-    this.expanded.set(instanceId, dims)
+    const current = this.sizes.get(instanceId)
+    if (current && current.width === dims.width && current.height === dims.height) return
+    this.sizes.set(instanceId, dims)
     this.emit()
+  }
+
+  /** This instance can't host a GUI here — its card shows sliders instead. */
+  markFailed(instanceId: PluginInstanceId): void {
+    if (this.failed.has(instanceId)) return
+    this.failed.add(instanceId)
+    this.emit()
+  }
+
+  isFailed(instanceId: PluginInstanceId): boolean {
+    return this.failed.has(instanceId)
   }
 
   subscribe = (listener: () => void): (() => void) => {

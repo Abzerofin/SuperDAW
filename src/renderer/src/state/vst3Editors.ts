@@ -2,17 +2,19 @@ import { projectStore } from './projectStore'
 import { vst3Dock } from './vst3Dock'
 
 /**
- * Plugin editor windows (main process hosts the GUIs; see src/main/vst3).
- * This module turns their events into ordinary document ops, so GUI edits
- * are undoable, synced, and drive processing exactly like slider edits:
+ * Plugin editors (main process hosts the GUIs; see src/main/vst3). Every
+ * VST3 insert docks its editor automatically — this module turns the
+ * editor's events into ordinary document ops, so GUI edits are undoable,
+ * synced, and drive processing exactly like slider edits:
  *
  * - Knob gestures arrive as begin/edit/end. One gesture = ONE op: values
  *   accumulate during the drag and dispatch on 'end' — a GUI knob streams
  *   dozens of performEdits per second, and each op would restart the
  *   live-preview pipeline.
- * - 'state' arrives when an editor window closes, carrying the plugin's
- *   final component chunk. For GUI-only plugins (zero parameters) this is
- *   the ONLY place their edits exist.
+ * - 'state' arrives when an editor closes (its card unmounts: track
+ *   switch, tab close, plugin removed), carrying the plugin's final
+ *   component chunk. For GUI-only plugins (zero parameters) this is the
+ *   ONLY place their edits exist.
  */
 
 /** In-flight gesture values per instance, keyed by stringified param id. */
@@ -91,12 +93,3 @@ export function wireEditorEvents(): void {
   })
 }
 
-export function openPluginEditor(args: {
-  instanceId: string
-  uid: string
-  stateBlob: string | null
-  title: string
-}): void {
-  wireEditorEvents()
-  void window.superdaw?.vst3OpenEditor?.(args)
-}

@@ -1426,16 +1426,6 @@ input {
   font-style: italic;
 }
 
-.fx-editor-btn {
-  flex: none;
-  padding: 1px 6px;
-}
-
-.fx-editor-btn-on {
-  color: var(--text);
-  background: var(--bg-3);
-}
-
 /* A card whose plugin GUI is docked: sized by the native view. */
 .fx-card-expanded {
   width: auto;

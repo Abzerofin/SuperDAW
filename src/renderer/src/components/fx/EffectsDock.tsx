@@ -23,6 +23,7 @@ import {
   type ExternalPluginEntry
 } from '@/state/externalPlugins'
 import { capturePointer } from '@/lib/pointer'
+import { wireEditorEvents } from '@/state/vst3Editors'
 import { useVst3Dock, vst3Dock } from '@/state/vst3Dock'
 import { PluginPlaceholder } from './PluginPlaceholder'
 
@@ -55,15 +56,19 @@ function TrackEffects({ track }: { track: Track }): React.JSX.Element {
   const inserts = pluginsOfTrack(state, track.id)
   const dock = useVst3Dock()
 
-  // A docked GUI needs more than the dock's 240px: grow to the tallest
-  // expanded editor (capped so the timeline keeps meaningful height).
-  const expandedHeights = inserts
-    .filter((i) => dock.isExpanded(i.id))
-    .map((i) => dock.dims(i.id)?.height ?? 0)
+  /** Does this insert render its plugin's own GUI (vs generic sliders)? */
+  const isGuiInsert = (instance: PluginInstance): boolean =>
+    pluginRegistry.status(instance.descriptor) === 'offline' && !dock.isFailed(instance.id)
+
+  // Docked GUIs need more than the dock's 240px: grow to the tallest one
+  // (capped so the timeline keeps meaningful height).
+  const guiHeights = inserts
+    .map((i) => (isGuiInsert(i) ? (dock.dims(i.id)?.height ?? 0) : 0))
+    .filter((h) => h > 0)
   const dockHeight =
-    expandedHeights.length > 0
+    guiHeights.length > 0
       ? Math.min(
-          Math.max(240, Math.max(...expandedHeights) + 92),
+          Math.max(240, Math.max(...guiHeights) + 92),
           Math.round(window.innerHeight * 0.7)
         )
       : undefined
@@ -135,7 +140,7 @@ function TrackEffects({ track }: { track: Track }): React.JSX.Element {
           <div
             key={instance.id}
             className={`fx-card fx-insert ${drag?.id === instance.id ? 'fx-insert-dragging' : ''} ${
-              dock.isExpanded(instance.id) ? 'fx-card-expanded' : ''
+              isGuiInsert(instance) ? 'fx-card-expanded' : ''
             }`}
           >
             <button
@@ -357,7 +362,7 @@ function SynthSection({ track }: { track: Track }): React.JSX.Element {
 
 function PluginSection({ instance }: { instance: PluginInstance }): React.JSX.Element {
   usePluginRegistry() // re-render when a plugin gets installed mid-session
-  const expanded = useVst3Dock().isExpanded(instance.id)
+  const dock = useVst3Dock()
   const status = pluginRegistry.status(instance.descriptor)
   // 'offline' plugins (VST3) are installed here but hosted out of process:
   // their params ARE editable, they just cannot be previewed live, so they
@@ -366,9 +371,11 @@ function PluginSection({ instance }: { instance: PluginInstance }): React.JSX.El
     return <PluginPlaceholder instance={instance} status={status} />
   }
   const offline = status === 'offline'
-  // While the plugin's own GUI is docked, generic sliders would just
-  // fight it — the head row plus the native view is the whole card.
-  const defs = offline && expanded ? {} : (paramDefsOf(instance.descriptor) ?? {})
+  // Every VST3 shows its own GUI automatically; generic sliders exist for
+  // builtins and as the fallback when a plugin has no editor (or its
+  // editor failed to open).
+  const guiMode = offline && !dock.isFailed(instance.id)
+  const defs = guiMode ? {} : (paramDefsOf(instance.descriptor) ?? {})
   return (
     <div className={`fx-section ${instance.enabled ? '' : 'fx-bypassed'}`}>
       <div className="fx-section-head">
@@ -387,25 +394,12 @@ function PluginSection({ instance }: { instance: PluginInstance }): React.JSX.El
         </button>
         <span className="fx-section-title">{instance.descriptor.name}</span>
         {offline && (
-          <>
-            <button
-              className={`fx-add-btn fx-editor-btn ${expanded ? 'fx-editor-btn-on' : ''}`}
-              title={
-                expanded
-                  ? 'Collapse the plugin interface (saves its settings)'
-                  : "Show the plugin's own interface here"
-              }
-              onClick={() => vst3Dock.toggle(instance.id)}
-            >
-              {expanded ? '▾ GUI' : '▸ GUI'}
-            </button>
-            <span
-              className="fx-offline-tag statusbar-dim"
-              title="Hosted out of process: audible during playback via look-ahead rendering (a knob change takes a moment to be heard). Freeze for exact, low-latency playback."
-            >
-              VST3
-            </span>
-          </>
+          <span
+            className="fx-offline-tag statusbar-dim"
+            title="Hosted out of process: audible during playback via look-ahead rendering (a knob change takes a moment to be heard). Freeze for exact, low-latency playback."
+          >
+            VST3
+          </span>
         )}
         <button
           className="comment-delete fx-remove"
@@ -435,7 +429,7 @@ function PluginSection({ instance }: { instance: PluginInstance }): React.JSX.El
           }
         />
       ))}
-      {offline && expanded && <DockedEditor instance={instance} />}
+      {guiMode && <DockedEditor instance={instance} />}
     </div>
   )
 }
@@ -455,6 +449,9 @@ function DockedEditor({ instance }: { instance: PluginInstance }): React.JSX.Ele
   useEffect(() => {
     const api = window.superdaw
     if (!api?.vst3DockEditor) return
+    // Knob gestures and state captures from the plugin's own GUI arrive on
+    // this channel; docked editors are the only thing that opens one now.
+    wireEditorEvents()
     let raf = 0
     let lastSent = ''
     let cancelled = false
@@ -504,7 +501,8 @@ function DockedEditor({ instance }: { instance: PluginInstance }): React.JSX.Ele
         .then((result) => {
           if (cancelled) return
           if (result.error) {
-            vst3Dock.collapse(instance.id)
+            // No editor (or a broken one): the card falls back to sliders.
+            vst3Dock.markFailed(instance.id)
           } else if (result.width && result.height) {
             vst3Dock.setDims(instance.id, { width: result.width, height: result.height })
           }
