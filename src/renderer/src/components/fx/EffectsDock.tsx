@@ -402,8 +402,8 @@ function PluginSection({ instance }: { instance: PluginInstance }): React.JSX.El
           </span>
         )}
         <button
-          className="comment-delete fx-remove"
-          title="Remove plugin"
+          className="fx-remove"
+          title={`Remove ${instance.descriptor.name} from this track`}
           onClick={() => projectStore.dispatch({ type: 'plugin/remove', instanceId: instance.id })}
         >
           ×

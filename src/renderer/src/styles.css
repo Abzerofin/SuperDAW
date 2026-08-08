@@ -1323,8 +1323,21 @@ input {
   color: var(--solo);
 }
 
+/* Standalone, NOT borrowing .comment-delete: that rule is defined later in
+   this file and hides itself (opacity 0) until a comment row is hovered,
+   which silently made the remove button invisible here. */
 .fx-remove {
-  opacity: 1;
+  flex: none;
+  color: var(--text-dim);
+  font-size: 14px;
+  line-height: 1;
+  padding: 0 5px;
+  border-radius: 3px;
+}
+
+.fx-remove:hover {
+  color: var(--danger);
+  background: var(--bg-3);
 }
 
 .fx-waves {
@@ -1430,6 +1443,25 @@ input {
 .fx-card-expanded {
   width: auto;
   overflow: visible;
+}
+
+/* A GUI card is as wide as the plugin (often 800px+). Left-align its head
+   row and stick it to the chain's left edge, so the name, bypass and
+   remove controls stay together and stay reachable while scrolling —
+   stretching them across the full width put remove off-screen. */
+.fx-card-expanded .fx-section-head {
+  position: sticky;
+  left: 0;
+  width: fit-content;
+  max-width: 100%;
+  padding-right: 6px;
+  background: var(--bg-2);
+  border-radius: 4px;
+  z-index: 1;
+}
+
+.fx-card-expanded .fx-section-title {
+  flex: 0 0 auto;
 }
 
 /* The reserved area the native plugin view sits over. */

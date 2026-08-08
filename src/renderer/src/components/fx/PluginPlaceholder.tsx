@@ -32,7 +32,7 @@ export function PluginPlaceholder({
         <span className={`fx-status-dot fx-status-${status}`} title={STATUS_LABELS[status]} />
         <span className="fx-section-title">{d.name}</span>
         <button
-          className="comment-delete fx-remove"
+          className="fx-remove"
           title="Remove plugin"
           onClick={() => projectStore.dispatch({ type: 'plugin/remove', instanceId: instance.id })}
         >
