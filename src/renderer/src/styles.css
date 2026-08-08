@@ -1325,6 +1325,11 @@ input {
   font-style: italic;
 }
 
+.fx-editor-btn {
+  flex: none;
+  padding: 1px 6px;
+}
+
 .fx-offline-tag {
   font-size: 9px;
   white-space: nowrap;

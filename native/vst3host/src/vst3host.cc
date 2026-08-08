@@ -21,9 +21,11 @@
 #include <string>
 #include <vector>
 
+#include "pluginterfaces/gui/iplugview.h"
 #include "pluginterfaces/vst/ivstaudioprocessor.h"
 #include "pluginterfaces/vst/ivstcomponent.h"
 #include "pluginterfaces/vst/ivsteditcontroller.h"
+#include "pluginterfaces/vst/ivstmessage.h"
 #include "pluginterfaces/vst/vsttypes.h"
 #include "public.sdk/source/common/memorystream.h"
 #include "public.sdk/source/vst/hosting/hostclasses.h"
@@ -674,6 +676,248 @@ Napi::Object CloseInstance(const Napi::CallbackInfo& info) {
   return result;
 }
 
+// ---------------------------------------------------------------------------
+// Plugin editors (GUI hosting)
+// ---------------------------------------------------------------------------
+
+/**
+ * The host half of a plugin editor: receives knob gestures
+ * (IComponentHandler) and resize requests (IPlugFrame) from the plugin's
+ * GUI and forwards them to JS through a ThreadSafeFunction — GUI events
+ * arrive from the window procedure, outside any JS call frame, so they
+ * must be queued onto the event loop rather than called into directly.
+ */
+class EditorHost : public IComponentHandler, public IPlugFrame {
+ public:
+  Napi::ThreadSafeFunction tsfn;
+
+  tresult PLUGIN_API queryInterface(const TUID _iid, void** obj) override {
+    QUERY_INTERFACE(_iid, obj, FUnknown::iid, IComponentHandler)
+    QUERY_INTERFACE(_iid, obj, IComponentHandler::iid, IComponentHandler)
+    QUERY_INTERFACE(_iid, obj, IPlugFrame::iid, IPlugFrame)
+    *obj = nullptr;
+    return kNoInterface;
+  }
+  // Owned by its EditorSession, never by the plugin — refcounting is moot.
+  uint32 PLUGIN_API addRef() override { return 1000; }
+  uint32 PLUGIN_API release() override { return 1000; }
+
+  tresult PLUGIN_API beginEdit(ParamID id) override {
+    emit("begin", static_cast<double>(id), 0);
+    return kResultOk;
+  }
+  tresult PLUGIN_API performEdit(ParamID id, ParamValue value) override {
+    emit("edit", static_cast<double>(id), value);
+    return kResultOk;
+  }
+  tresult PLUGIN_API endEdit(ParamID id) override {
+    emit("end", static_cast<double>(id), 0);
+    return kResultOk;
+  }
+  tresult PLUGIN_API restartComponent(int32) override { return kResultOk; }
+
+  tresult PLUGIN_API resizeView(IPlugView*, ViewRect* rect) override {
+    if (!rect) return kInvalidArgument;
+    // Per spec the HOST resizes the window, then calls onSize — JS resizes
+    // the BrowserWindow and calls editorResized(), which does the onSize.
+    emit("resize", rect->getWidth(), rect->getHeight());
+    return kResultOk;
+  }
+
+ private:
+  void emit(const char* type, double a, double b) {
+    if (!tsfn) return;
+    std::string kind(type);
+    tsfn.NonBlockingCall([kind, a, b](Napi::Env env, Napi::Function cb) {
+      Napi::Object event = Napi::Object::New(env);
+      event.Set("type", Napi::String::New(env, kind));
+      event.Set("a", Napi::Number::New(env, a));
+      event.Set("b", Napi::Number::New(env, b));
+      cb.Call({event});
+    });
+  }
+};
+
+/**
+ * One open plugin editor: its own component + controller, independent of
+ * any processing instance. Settings round-trip through the document's
+ * stateBlob instead of sharing objects — param edits flow out as ops, and
+ * the final component chunk is captured at close.
+ */
+struct EditorSession {
+  VST3::Hosting::Module::Ptr module;
+  IPtr<IComponent> component;
+  IPtr<IEditController> controller;
+  bool ownsController = false;
+  IPtr<IPlugView> view;
+  std::unique_ptr<EditorHost> host;
+
+  ~EditorSession() {
+    if (view) view->removed();
+    if (controller) {
+      controller->setComponentHandler(nullptr);
+      FUnknownPtr<IConnectionPoint> compCP(component);
+      FUnknownPtr<IConnectionPoint> ctrlCP(controller);
+      if (compCP && ctrlCP) {
+        compCP->disconnect(ctrlCP);
+        ctrlCP->disconnect(compCP);
+      }
+      if (ownsController) controller->terminate();
+    }
+    if (component) component->terminate();
+    if (host && host->tsfn) host->tsfn.Release();
+  }
+};
+
+std::map<int32_t, std::unique_ptr<EditorSession>> gEditors;
+int32_t gNextEditor = 1;
+
+// openEditor(path, uid, { hwnd: Buffer, state?: Buffer, onEvent: fn })
+//   -> { editor, width, height } | { error }
+//
+// Attaches the plugin's own IPlugView to a native window the caller owns.
+// onEvent receives { type: 'begin'|'edit'|'end', a: paramId, b: value }
+// and { type: 'resize', a: width, b: height }.
+Napi::Object OpenEditor(const Napi::CallbackInfo& info) {
+  Napi::Env env = info.Env();
+  if (info.Length() < 3 || !info[0].IsString() || !info[1].IsString() ||
+      !info[2].IsObject()) {
+    return Fail(env, "expected (path, uid, options)");
+  }
+  const std::string path = info[0].As<Napi::String>().Utf8Value();
+  auto parsedUid = VST3::UID::fromString(info[1].As<Napi::String>().Utf8Value());
+  if (!parsedUid) return Fail(env, "could not parse uid");
+
+  Napi::Object options = info[2].As<Napi::Object>();
+  if (!options.Has("hwnd") || !options.Get("hwnd").IsBuffer()) {
+    return Fail(env, "options.hwnd must be a native window handle Buffer");
+  }
+  if (!options.Has("onEvent") || !options.Get("onEvent").IsFunction()) {
+    return Fail(env, "options.onEvent must be a function");
+  }
+  Napi::Buffer<char> hwndBuf = options.Get("hwnd").As<Napi::Buffer<char>>();
+  if (hwndBuf.Length() < sizeof(void*)) return Fail(env, "bad hwnd buffer");
+  void* hwnd = *reinterpret_cast<void* const*>(hwndBuf.Data());
+
+  auto session = std::make_unique<EditorSession>();
+  std::string error;
+  session->module = VST3::Hosting::Module::create(path, error);
+  if (!session->module) {
+    return Fail(env, error.empty() ? "failed to load module" : error);
+  }
+  const auto factory = session->module->getFactory();
+  factory.setHostContext(&hostContext());
+
+  session->component = factory.createInstance<IComponent>(*parsedUid);
+  if (!session->component) return Fail(env, "could not create component");
+  if (session->component->initialize(&hostContext()) != kResultOk) {
+    session->component = nullptr;
+    return Fail(env, "component->initialize failed");
+  }
+
+  session->controller =
+      MakeController(factory, session->component, session->ownsController);
+  if (!session->controller) return Fail(env, "plugin exposes no IEditController");
+
+  // Component ↔ controller connection points: GUI-only plugins move their
+  // settings over this private channel, which is how edits made in the
+  // editor end up inside the component chunk we capture at close.
+  {
+    FUnknownPtr<IConnectionPoint> compCP(session->component);
+    FUnknownPtr<IConnectionPoint> ctrlCP(session->controller);
+    if (compCP && ctrlCP) {
+      compCP->connect(ctrlCP);
+      ctrlCP->connect(compCP);
+    }
+  }
+
+  // Restore the document's saved settings, and mirror them into the
+  // controller so the GUI opens showing what the user actually hears.
+  const std::vector<char> chunk = ReadStateOption(options);
+  if (!chunk.empty()) {
+    ApplyState(session->component, chunk.data(), chunk.size());
+    MemoryStream forController(const_cast<char*>(chunk.data()),
+                               static_cast<TSize>(chunk.size()));
+    int64 pos = 0;
+    forController.seek(0, IBStream::kIBSeekSet, &pos);
+    session->controller->setComponentState(&forController);
+  }
+
+  session->host = std::make_unique<EditorHost>();
+  session->host->tsfn = Napi::ThreadSafeFunction::New(
+      env, options.Get("onEvent").As<Napi::Function>(), "vst3-editor", 0, 1);
+  // The TSFN must not keep the process alive after the app quits.
+  session->host->tsfn.Unref(env);
+  session->controller->setComponentHandler(session->host.get());
+
+  session->view = owned(session->controller->createView(Vst::ViewType::kEditor));
+  if (!session->view) return Fail(env, "plugin has no editor view");
+  session->view->setFrame(session->host.get());
+
+  ViewRect size{};
+  session->view->getSize(&size);
+  if (session->view->attached(hwnd, kPlatformTypeHWND) != kResultOk) {
+    return Fail(env, "editor refused to attach to the window");
+  }
+
+  const int32_t handle = gNextEditor++;
+  Napi::Object result = Napi::Object::New(env);
+  result.Set("editor", Napi::Number::New(env, handle));
+  result.Set("width", Napi::Number::New(env, size.getWidth()));
+  result.Set("height", Napi::Number::New(env, size.getHeight()));
+  gEditors.emplace(handle, std::move(session));
+  return result;
+}
+
+// editorResized(editor, width, height) — completes a resizeView handshake.
+Napi::Object EditorResized(const Napi::CallbackInfo& info) {
+  Napi::Env env = info.Env();
+  Napi::Object result = Napi::Object::New(env);
+  if (info.Length() < 3 || !info[0].IsNumber()) return Fail(env, "expected (editor, w, h)");
+  auto found = gEditors.find(info[0].As<Napi::Number>().Int32Value());
+  if (found == gEditors.end()) return Fail(env, "unknown editor");
+  ViewRect rect(0, 0, info[1].As<Napi::Number>().Int32Value(),
+                info[2].As<Napi::Number>().Int32Value());
+  found->second->view->onSize(&rect);
+  return result;
+}
+
+// setEditorParam(editor, paramId, normalized) — our sliders → the GUI.
+Napi::Object SetEditorParam(const Napi::CallbackInfo& info) {
+  Napi::Env env = info.Env();
+  Napi::Object result = Napi::Object::New(env);
+  if (info.Length() < 3 || !info[0].IsNumber()) {
+    return Fail(env, "expected (editor, paramId, value)");
+  }
+  auto found = gEditors.find(info[0].As<Napi::Number>().Int32Value());
+  if (found == gEditors.end()) return Fail(env, "unknown editor");
+  found->second->controller->setParamNormalized(
+      static_cast<ParamID>(info[1].As<Napi::Number>().Uint32Value()),
+      std::min(1.0, std::max(0.0, info[2].As<Napi::Number>().DoubleValue())));
+  return result;
+}
+
+// closeEditor(editor) -> { component?: Buffer }
+//
+// Captures the final component chunk BEFORE teardown — for GUI-only
+// plugins this chunk is the only place their edits exist.
+Napi::Object CloseEditor(const Napi::CallbackInfo& info) {
+  Napi::Env env = info.Env();
+  Napi::Object result = Napi::Object::New(env);
+  if (info.Length() < 1 || !info[0].IsNumber()) return result;
+  auto found = gEditors.find(info[0].As<Napi::Number>().Int32Value());
+  if (found == gEditors.end()) return result;
+
+  MemoryStream stream;
+  if (found->second->component->getState(&stream) == kResultOk) {
+    result.Set("component",
+               Napi::Buffer<char>::Copy(env, stream.getData(),
+                                        static_cast<size_t>(stream.getSize())));
+  }
+  gEditors.erase(found);
+  return result;
+}
+
 Napi::Object Init(Napi::Env env, Napi::Object exports) {
   exports.Set("scanPaths", Napi::Function::New(env, ScanPaths));
   exports.Set("inspect", Napi::Function::New(env, Inspect));
@@ -681,6 +925,10 @@ Napi::Object Init(Napi::Env env, Napi::Object exports) {
   exports.Set("processBuffer", Napi::Function::New(env, ProcessBuffer));
   exports.Set("openInstance", Napi::Function::New(env, OpenInstance));
   exports.Set("getInstanceState", Napi::Function::New(env, GetInstanceState));
+  exports.Set("openEditor", Napi::Function::New(env, OpenEditor));
+  exports.Set("closeEditor", Napi::Function::New(env, CloseEditor));
+  exports.Set("editorResized", Napi::Function::New(env, EditorResized));
+  exports.Set("setEditorParam", Napi::Function::New(env, SetEditorParam));
   exports.Set("processInstance", Napi::Function::New(env, ProcessInstance));
   exports.Set("closeInstance", Napi::Function::New(env, CloseInstance));
   return exports;

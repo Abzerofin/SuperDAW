@@ -12,6 +12,7 @@
         "../vst3sdk/public.sdk/source/vst/utility/stringconvert.cpp",
         "../vst3sdk/public.sdk/source/common/commonstringconvert.cpp",
         "../vst3sdk/public.sdk/source/common/memorystream.cpp",
+        "../vst3sdk/public.sdk/source/common/commoniids.cpp",
         "../vst3sdk/public.sdk/source/vst/vstinitiids.cpp",
         "../vst3sdk/pluginterfaces/base/conststringtable.cpp",
         "../vst3sdk/pluginterfaces/base/coreiids.cpp",

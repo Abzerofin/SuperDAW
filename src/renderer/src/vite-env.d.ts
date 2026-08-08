@@ -61,6 +61,22 @@ interface Window {
       stateBlob?: string | null
     }): Promise<{ handle?: number; outputChannels?: number; error?: string }>
     vst3InstanceState(handle: number): Promise<{ stateBlob?: string; error?: string }>
+    vst3OpenEditor(args: {
+      instanceId: string
+      uid: string
+      stateBlob?: string | null
+      title?: string
+    }): Promise<{ opened?: boolean; error?: string }>
+    vst3CloseEditor(instanceId: string): Promise<void>
+    onVst3EditorEvent(
+      handler: (event: {
+        instanceId: string
+        kind: string
+        paramId?: number
+        value?: number
+        stateBlob?: string
+      }) => void
+    ): () => void
     vst3ProcessInstance(args: {
       handle: number
       channels: Float32Array[]

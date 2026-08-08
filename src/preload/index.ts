@@ -137,6 +137,38 @@ const api = {
   }): Promise<{ handle?: number; outputChannels?: number; error?: string }> =>
     ipcRenderer.invoke('vst3:open-instance', args),
 
+  /** Open a plugin's own GUI in a floating window (one per insert). */
+  vst3OpenEditor: (args: {
+    instanceId: string
+    uid: string
+    stateBlob?: string | null
+    title?: string
+  }): Promise<{ opened?: boolean; error?: string }> =>
+    ipcRenderer.invoke('vst3:open-editor', args),
+
+  vst3CloseEditor: (instanceId: string): Promise<void> =>
+    ipcRenderer.invoke('vst3:close-editor', instanceId),
+
+  /**
+   * Events from open plugin editors: knob gestures
+   * (kind begin/edit/end, paramId+value normalized 0..1) and the final
+   * state chunk when an editor window closes (kind 'state').
+   */
+  onVst3EditorEvent: (
+    handler: (event: {
+      instanceId: string
+      kind: string
+      paramId?: number
+      value?: number
+      stateBlob?: string
+    }) => void
+  ): (() => void) => {
+    const listener = (_e: unknown, payload: Parameters<typeof handler>[0]): void =>
+      handler(payload)
+    ipcRenderer.on('vst3:editor-event', listener)
+    return () => ipcRenderer.off('vst3:editor-event', listener)
+  },
+
   /** Capture a live instance's state as a document-ready blob. */
   vst3InstanceState: (handle: number): Promise<{ stateBlob?: string; error?: string }> =>
     ipcRenderer.invoke('vst3:instance-state', handle),

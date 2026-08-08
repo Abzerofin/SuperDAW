@@ -20,6 +20,7 @@ import {
   scanExternalPlugins,
   subscribeExternalPlugins
 } from '@/state/externalPlugins'
+import { openPluginEditor } from '@/state/vst3Editors'
 import { capturePointer } from '@/lib/pointer'
 import { PluginPlaceholder } from './PluginPlaceholder'
 
@@ -298,12 +299,28 @@ function PluginSection({ instance }: { instance: PluginInstance }): React.JSX.El
         </button>
         <span className="fx-section-title">{instance.descriptor.name}</span>
         {offline && (
-          <span
-            className="fx-offline-tag statusbar-dim"
-            title="Hosted out of process: audible during playback via look-ahead rendering (a knob change takes a moment to be heard). Freeze for exact, low-latency playback."
-          >
-            VST3
-          </span>
+          <>
+            <button
+              className="fx-add-btn fx-editor-btn"
+              title="Open the plugin's own interface"
+              onClick={() =>
+                openPluginEditor({
+                  instanceId: instance.id,
+                  uid: instance.descriptor.uid,
+                  stateBlob: instance.stateBlob,
+                  title: instance.descriptor.name
+                })
+              }
+            >
+              GUI
+            </button>
+            <span
+              className="fx-offline-tag statusbar-dim"
+              title="Hosted out of process: audible during playback via look-ahead rendering (a knob change takes a moment to be heard). Freeze for exact, low-latency playback."
+            >
+              VST3
+            </span>
+          </>
         )}
         <button
           className="comment-delete fx-remove"
