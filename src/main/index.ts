@@ -1,30 +1,11 @@
 import { app, BrowserWindow, dialog, ipcMain, Menu, shell } from 'electron'
-import { mkdir, readFile, rename, writeFile } from 'node:fs/promises'
-import { basename, dirname, join } from 'node:path'
+import { readFile, writeFile } from 'node:fs/promises'
+import { basename, join } from 'node:path'
+import { readAppData, setAppData } from './appData'
 import { registerCollabIpc } from './collabServer'
 import { registerVst3Ipc } from './vst3'
 
 const PROJECT_FILTERS = [{ name: 'SuperDAW Project', extensions: ['sdaw'] }]
-
-/**
- * App-level key/value storage (settings, recent-project index) as one JSON
- * file in userData — independent of any project file. Values are opaque
- * JSON owned by the renderer; main only persists them.
- */
-const appDataPath = (): string => join(app.getPath('userData'), 'superdaw-appdata.json')
-let appDataCache: Record<string, unknown> | null = null
-
-async function readAppData(): Promise<Record<string, unknown>> {
-  if (appDataCache) return appDataCache
-  try {
-    appDataCache = JSON.parse(await readFile(appDataPath(), 'utf8')) as Record<string, unknown>
-  } catch {
-    appDataCache = {} // first run, or an unreadable file — start fresh
-  }
-  return appDataCache
-}
-
-let appDataWrite = Promise.resolve()
 
 function registerAppDataIpc(): void {
   ipcMain.handle('appdata:get', async (_event, key: string): Promise<unknown> => {
@@ -32,17 +13,7 @@ function registerAppDataIpc(): void {
   })
 
   ipcMain.handle('appdata:set', async (_event, key: string, value: unknown): Promise<void> => {
-    const data = await readAppData()
-    data[key] = value
-    // Serialize writes (atomic via temp file) so concurrent sets can't interleave.
-    appDataWrite = appDataWrite.then(async () => {
-      const path = appDataPath()
-      await mkdir(dirname(path), { recursive: true })
-      const tmp = `${path}.tmp`
-      await writeFile(tmp, JSON.stringify(data, null, 2))
-      await rename(tmp, path)
-    })
-    await appDataWrite
+    await setAppData(key, value)
   })
 }
 

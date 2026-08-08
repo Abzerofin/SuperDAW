@@ -940,9 +940,25 @@ Napi::Object OpenEditor(const Napi::CallbackInfo& info) {
   const DWORD style = WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU | WS_MINIMIZEBOX;
   RECT frame{0, 0, size.getWidth(), size.getHeight()};
   AdjustWindowRect(&frame, style, FALSE);
+
+  // A remembered position is only honored while it is still on a live
+  // monitor — display setups change, and a window restored to a detached
+  // screen is simply lost.
+  int x = CW_USEDEFAULT;
+  int y = CW_USEDEFAULT;
+  if (options.Has("x") && options.Get("x").IsNumber() && options.Has("y") &&
+      options.Get("y").IsNumber()) {
+    POINT p{options.Get("x").As<Napi::Number>().Int32Value(),
+            options.Get("y").As<Napi::Number>().Int32Value()};
+    if (MonitorFromPoint(p, MONITOR_DEFAULTTONULL) != nullptr) {
+      x = p.x;
+      y = p.y;
+    }
+  }
+
   session->top = CreateWindowExW(
-      WS_EX_APPWINDOW, kClass, Utf8ToWide(title).c_str(), style, CW_USEDEFAULT,
-      CW_USEDEFAULT, frame.right - frame.left, frame.bottom - frame.top, nullptr,
+      WS_EX_APPWINDOW, kClass, Utf8ToWide(title).c_str(), style, x, y,
+      frame.right - frame.left, frame.bottom - frame.top, nullptr,
       nullptr, GetModuleHandleW(nullptr), nullptr);
   if (!session->top) return Fail(env, "could not create editor window");
   gWndHosts[session->top] = session->host.get();
@@ -1012,6 +1028,16 @@ Napi::Object CloseEditor(const Napi::CallbackInfo& info) {
                Napi::Buffer<char>::Copy(env, stream.getData(),
                                         static_cast<size_t>(stream.getSize())));
   }
+#ifdef _WIN32
+  // Where the user left the window, so the next open can return there.
+  if (found->second->top) {
+    RECT where{};
+    if (GetWindowRect(found->second->top, &where)) {
+      result.Set("x", Napi::Number::New(env, where.left));
+      result.Set("y", Napi::Number::New(env, where.top));
+    }
+  }
+#endif
   gEditors.erase(found);
   return result;
 }

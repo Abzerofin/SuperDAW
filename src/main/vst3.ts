@@ -1,5 +1,6 @@
 import { app, ipcMain } from 'electron'
 import type { WebContents } from 'electron'
+import { readAppData, setAppData } from './appData'
 import { existsSync } from 'node:fs'
 import { join } from 'node:path'
 
@@ -56,10 +57,12 @@ interface Vst3Addon {
     options: {
       title?: string
       state?: Buffer
+      x?: number
+      y?: number
       onEvent: (event: { type: string; a: number; b: number }) => void
     }
   ): { error?: string; editor?: number; width?: number; height?: number }
-  closeEditor(editor: number): { component?: Buffer }
+  closeEditor(editor: number): { component?: Buffer; x?: number; y?: number }
   editorResized(editor: number, width: number, height: number): { error?: string }
   setEditorParam(editor: number, paramId: number, value: number): { error?: string }
 }
@@ -166,13 +169,44 @@ function scan(): Vst3Plugin[] {
  */
 const editors = new Map<string, number>()
 
+/** Editors reopen where the user last left them, per PLUGIN (all inserts
+ * of one plugin share a spot). Machine-local by nature — monitor layouts
+ * differ — so this lives in appData, never the document. */
+const POSITIONS_KEY = 'vst3EditorPositions'
+
+async function savedPosition(uid: string): Promise<{ x: number; y: number } | null> {
+  const all = (await readAppData())[POSITIONS_KEY] as
+    | Record<string, { x?: unknown; y?: unknown }>
+    | undefined
+  const pos = all?.[uid]
+  if (!pos || typeof pos.x !== 'number' || typeof pos.y !== 'number') return null
+  return { x: pos.x, y: pos.y }
+}
+
+async function savePosition(uid: string, x: number, y: number): Promise<void> {
+  const all = { ...((await readAppData())[POSITIONS_KEY] as object | undefined) } as Record<
+    string,
+    { x: number; y: number }
+  >
+  all[uid] = { x, y }
+  await setAppData(POSITIONS_KEY, all)
+}
+
+/** uid of each open editor, for position saving at close. */
+const editorUids = new Map<string, string>()
+
 /** Capture the final chunk and tear the editor down. Idempotent. */
 function finalizeEditor(host: Vst3Addon, instanceId: string, sender: WebContents): void {
   const editorHandle = editors.get(instanceId)
   if (editorHandle === undefined) return
   editors.delete(instanceId)
+  const uid = editorUids.get(instanceId)
+  editorUids.delete(instanceId)
   try {
     const final = host.closeEditor(editorHandle)
+    if (uid && typeof final.x === 'number' && typeof final.y === 'number') {
+      void savePosition(uid, final.x, final.y)
+    }
     // The chunk becomes document state — for GUI-only plugins it is the
     // only place their edits exist.
     if (final.component && !sender.isDestroyed()) {
@@ -202,9 +236,11 @@ export function registerVst3Ipc(): void {
 
       const sender = event.sender
       try {
+        const remembered = await savedPosition(plugin.uid)
         const opened = host.openEditor(plugin.path, plugin.uid, {
           title: args.title ?? plugin.name,
           state: chunkFromBlob(args.stateBlob),
+          ...(remembered ?? {}),
           onEvent: (e) => {
             // The user closed the editor window: capture state, then die.
             if (e.type === 'close') {
@@ -227,6 +263,7 @@ export function registerVst3Ipc(): void {
           return { error: opened.error ?? 'could not open editor' }
         }
         editors.set(args.instanceId, opened.editor)
+        editorUids.set(args.instanceId, plugin.uid)
         return { opened: true }
       } catch (error) {
         return { error: error instanceof Error ? error.message : String(error) }
