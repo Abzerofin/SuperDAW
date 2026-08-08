@@ -81,7 +81,11 @@ function HealthStatus({ state }: { state: ProjectState }): React.JSX.Element {
     return asset !== undefined && asset.kind === 'audio' && asset.buffer === null
   }).length
   const manifest = pluginManifest(state)
-  const missingPlugins = manifest.filter((e) => pluginRegistry.status(e.descriptor) !== 'local').length
+  // 'offline' is INSTALLED (out-of-process VST3) — only truly absent
+  // plugins count as missing.
+  const missingPlugins = manifest.filter(
+    (e) => !['local', 'offline'].includes(pluginRegistry.status(e.descriptor))
+  ).length
   const transfers = [...collab.assetProgress.values()]
   const lag = healthSampler.loopLagMs
   const warn =
@@ -192,7 +196,9 @@ function PluginManifestStatus({ state }: { state: ProjectState }): React.JSX.Ele
 
   const entries = pluginManifest(state)
   if (entries.length === 0) return null
-  const missing = entries.filter((e) => pluginRegistry.status(e.descriptor) !== 'local').length
+  const missing = entries.filter(
+    (e) => !['local', 'offline'].includes(pluginRegistry.status(e.descriptor))
+  ).length
 
   return (
     <span className="statusbar-plugins" ref={rootRef}>
