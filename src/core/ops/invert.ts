@@ -172,6 +172,16 @@ export function invert(state: ProjectState, op: Operation): Operation | null {
       return { type: 'plugin/reorder', trackId: op.trackId, order }
     }
 
+    case 'plugin/setState': {
+      const instance = state.plugins[op.instanceId]
+      if (!instance) return null
+      return {
+        type: 'plugin/setState',
+        instanceId: op.instanceId,
+        stateBlob: instance.stateBlob
+      }
+    }
+
     case 'track/setSynthParam': {
       const track = state.tracks[op.trackId]
       if (!track) return null

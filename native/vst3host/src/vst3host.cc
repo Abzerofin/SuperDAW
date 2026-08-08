@@ -25,6 +25,7 @@
 #include "pluginterfaces/vst/ivstcomponent.h"
 #include "pluginterfaces/vst/ivsteditcontroller.h"
 #include "pluginterfaces/vst/vsttypes.h"
+#include "public.sdk/source/common/memorystream.h"
 #include "public.sdk/source/vst/hosting/hostclasses.h"
 #include "public.sdk/source/vst/hosting/module.h"
 #include "public.sdk/source/vst/hosting/parameterchanges.h"
@@ -253,11 +254,33 @@ struct Instance {
   }
 };
 
+/**
+ * Restore a previously captured component state chunk. Applied after
+ * setupProcessing and before activation, the safest point in the VST3
+ * setup sequence. Failure is non-fatal: a plugin that rejects an old or
+ * foreign chunk keeps its defaults, which is what every other host does.
+ */
+void ApplyState(IComponent* component, const char* data, size_t size) {
+  if (!data || size == 0) return;
+  MemoryStream stream(const_cast<char*>(data), static_cast<TSize>(size));
+  int64 pos = 0;
+  stream.seek(0, IBStream::kIBSeekSet, &pos);
+  component->setState(&stream);
+}
+
+/** The optional `state` Buffer out of an options object, or empty. */
+std::vector<char> ReadStateOption(const Napi::Object& options) {
+  if (!options.Has("state") || !options.Get("state").IsBuffer()) return {};
+  Napi::Buffer<char> buf = options.Get("state").As<Napi::Buffer<char>>();
+  return std::vector<char>(buf.Data(), buf.Data() + buf.Length());
+}
+
 /** Instantiate, negotiate buses, and activate. Null on failure. */
 std::unique_ptr<Instance> CreateInstance(const std::string& path,
                                          const VST3::UID& uid, double sampleRate,
                                          int32 blockSize, int32 wantChannels,
-                                         int32 processMode, std::string& error) {
+                                         int32 processMode, std::string& error,
+                                         const std::vector<char>& stateChunk = {}) {
   auto state = std::make_unique<Instance>();
   state->blockSize = blockSize;
   state->processMode = processMode;
@@ -333,6 +356,8 @@ std::unique_ptr<Instance> CreateInstance(const std::string& path,
     error = "setupProcessing failed";
     return nullptr;
   }
+
+  ApplyState(state->component, stateChunk.data(), stateChunk.size());
 
   // Main buses only; sidechains/aux stay silent for now.
   for (int32 bus = 0; bus < state->inBusCount; ++bus) {
@@ -513,7 +538,8 @@ Napi::Object ProcessBuffer(const Napi::CallbackInfo& info) {
 
   std::string error;
   auto state = CreateInstance(path, *parsedUid, sampleRate, blockSize,
-                              static_cast<int32>(input.size()), kOffline, error);
+                              static_cast<int32>(input.size()), kOffline, error,
+                              ReadStateOption(options));
   if (!state) return Fail(env, error);
 
   ParameterChanges changes;
@@ -562,7 +588,7 @@ Napi::Object OpenInstance(const Napi::CallbackInfo& info) {
 
   std::string error;
   auto state = CreateInstance(path, *parsedUid, sampleRate, blockSize, channels,
-                              kRealtime, error);
+                              kRealtime, error, ReadStateOption(options));
   if (!state) return Fail(env, error);
 
   const int32_t handle = gNextHandle++;
@@ -609,6 +635,31 @@ Napi::Object ProcessInstance(const Napi::CallbackInfo& info) {
   return result;
 }
 
+// getInstanceState(handle) -> { component: Buffer } | { error }
+//
+// Captures the component's state chunk — the same bytes a .vst3 preset
+// stores. Parameter changes applied during processing land in here, so a
+// chunk captured from one instance and passed as `state` when opening
+// another reproduces its settings exactly.
+Napi::Object GetInstanceState(const Napi::CallbackInfo& info) {
+  Napi::Env env = info.Env();
+  if (info.Length() < 1 || !info[0].IsNumber()) {
+    return Fail(env, "expected (handle)");
+  }
+  auto found = gInstances.find(info[0].As<Napi::Number>().Int32Value());
+  if (found == gInstances.end()) return Fail(env, "unknown instance handle");
+
+  MemoryStream stream;
+  if (found->second->component->getState(&stream) != kResultOk) {
+    return Fail(env, "plugin refused to serialize its state");
+  }
+  Napi::Object result = Napi::Object::New(env);
+  result.Set("component",
+             Napi::Buffer<char>::Copy(env, stream.getData(),
+                                      static_cast<size_t>(stream.getSize())));
+  return result;
+}
+
 // closeInstance(handle) -> { closed: boolean }
 Napi::Object CloseInstance(const Napi::CallbackInfo& info) {
   Napi::Env env = info.Env();
@@ -629,6 +680,7 @@ Napi::Object Init(Napi::Env env, Napi::Object exports) {
   exports.Set("parameters", Napi::Function::New(env, Parameters));
   exports.Set("processBuffer", Napi::Function::New(env, ProcessBuffer));
   exports.Set("openInstance", Napi::Function::New(env, OpenInstance));
+  exports.Set("getInstanceState", Napi::Function::New(env, GetInstanceState));
   exports.Set("processInstance", Napi::Function::New(env, ProcessInstance));
   exports.Set("closeInstance", Napi::Function::New(env, CloseInstance));
   return exports;

@@ -81,6 +81,13 @@ export type Operation =
    * `plugin/add` on a peer is never dropped.
    */
   | { type: 'plugin/reorder'; trackId: TrackId; order: PluginInstanceId[] }
+  /**
+   * Opaque serialized plugin state (external formats: the component's
+   * state chunk, base64 inside a small JSON envelope). Captured when a
+   * plugin's own editor closes; peers WITHOUT the plugin still carry the
+   * blob intact, so nothing diverges. Null clears it.
+   */
+  | { type: 'plugin/setState'; instanceId: PluginInstanceId; stateBlob: string | null }
   | { type: 'track/setSynthParam'; trackId: TrackId; param: string; value: number }
   /** `parentId` present = also re-parent in the same gesture (drag into a folder). */
   | { type: 'track/reorder'; trackId: TrackId; index: number; parentId?: TrackId | null }

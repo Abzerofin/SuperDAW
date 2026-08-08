@@ -143,7 +143,8 @@ export function externalPluginHost(): ExternalPluginHost | null {
         channels,
         sampleRate,
         // Param keys are the plugin's own numeric ids, stringified.
-        params: instance.params
+        params: instance.params,
+        stateBlob: instance.stateBlob
       })
       // Failure bypasses rather than aborting the freeze — same rule the
       // reducer follows for ops whose target is gone.
@@ -151,14 +152,15 @@ export function externalPluginHost(): ExternalPluginHost | null {
       return result.channels
     },
 
-    open: async (descriptor, sampleRate, channels) => {
+    open: async (instance, sampleRate, channels) => {
       if (!api.vst3OpenInstance || !api.vst3ProcessInstance || !api.vst3CloseInstance) {
         return null
       }
       const opened = await api.vst3OpenInstance({
-        uid: descriptor.uid,
+        uid: instance.descriptor.uid,
         sampleRate,
-        channels
+        channels,
+        stateBlob: instance.stateBlob
       })
       if (opened.error || opened.handle === undefined) return null
       const handle = opened.handle

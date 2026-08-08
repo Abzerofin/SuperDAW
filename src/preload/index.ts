@@ -119,6 +119,7 @@ const api = {
     channels: Float32Array[]
     sampleRate: number
     params?: Record<string, number>
+    stateBlob?: string | null
   }): Promise<{ channels?: Float32Array[]; error?: string }> =>
     ipcRenderer.invoke('vst3:process', args),
 
@@ -132,8 +133,13 @@ const api = {
     sampleRate: number
     blockSize?: number
     channels?: number
+    stateBlob?: string | null
   }): Promise<{ handle?: number; outputChannels?: number; error?: string }> =>
     ipcRenderer.invoke('vst3:open-instance', args),
+
+  /** Capture a live instance's state as a document-ready blob. */
+  vst3InstanceState: (handle: number): Promise<{ stateBlob?: string; error?: string }> =>
+    ipcRenderer.invoke('vst3:instance-state', handle),
 
   vst3ProcessInstance: (args: {
     handle: number

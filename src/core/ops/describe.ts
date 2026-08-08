@@ -113,6 +113,14 @@ export function describe(state: ProjectState, op: Operation): string | null {
       if (!state.tracks[op.trackId]) return null
       return `Reordered effects on "${trackName(state, op.trackId)}"`
     }
+    case 'plugin/setState': {
+      const instance = state.plugins[op.instanceId]
+      if (!instance) return null
+      return `Adjusted ${instance.descriptor.name} settings on "${trackName(
+        state,
+        instance.trackId
+      )}"`
+    }
     case 'track/setSynthParam': {
       const def = SYNTH_DEFS[op.param]
       return `Set synth ${def?.label ?? op.param} on "${trackName(state, op.trackId)}"`

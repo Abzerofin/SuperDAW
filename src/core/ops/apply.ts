@@ -378,6 +378,18 @@ export function apply(state: ProjectState, op: Operation): ProjectState {
       return changed ? { ...state, plugins } : state
     }
 
+    case 'plugin/setState': {
+      const instance = state.plugins[op.instanceId]
+      if (!instance || instance.stateBlob === op.stateBlob) return state
+      return {
+        ...state,
+        plugins: {
+          ...state.plugins,
+          [op.instanceId]: { ...instance, stateBlob: op.stateBlob }
+        }
+      }
+    }
+
     case 'track/setSynthParam': {
       const track = state.tracks[op.trackId]
       if (!track || track.kind !== 'midi') return state

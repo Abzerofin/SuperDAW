@@ -31,6 +31,7 @@ interface Vst3Addon {
       sampleRate: number
       blockSize?: number
       params?: Record<string, number>
+      state?: Buffer
     }
   ): { error?: string; channels?: Float32Array[] }
   parameters(
@@ -40,8 +41,9 @@ interface Vst3Addon {
   openInstance(
     path: string,
     uid: string,
-    options: { sampleRate: number; blockSize?: number; channels?: number }
+    options: { sampleRate: number; blockSize?: number; channels?: number; state?: Buffer }
   ): { error?: string; handle?: number; inputChannels?: number; outputChannels?: number }
+  getInstanceState(handle: number): { error?: string; component?: Buffer }
   processInstance(
     handle: number,
     options: { channels: Float32Array[]; params?: Record<string, number> }
@@ -93,6 +95,25 @@ function loadAddon(): Vst3Addon | null {
   } catch (error) {
     loadError = error instanceof Error ? error.message : String(error)
     return null
+  }
+}
+
+/**
+ * The component chunk out of a document stateBlob, or undefined. The blob
+ * is a small JSON envelope ({"component": base64}) so controller state and
+ * versioning can join it later without another format change. Arrives from
+ * the DOCUMENT (possibly authored by a collaborator), so anything
+ * malformed is ignored rather than trusted.
+ */
+function chunkFromBlob(stateBlob: string | null | undefined): Buffer | undefined {
+  if (!stateBlob) return undefined
+  try {
+    const parsed: unknown = JSON.parse(stateBlob)
+    const component = (parsed as { component?: unknown })?.component
+    if (typeof component !== 'string' || component.length === 0) return undefined
+    return Buffer.from(component, 'base64')
+  } catch {
+    return undefined
   }
 }
 
@@ -158,7 +179,13 @@ export function registerVst3Ipc(): void {
     'vst3:open-instance',
     async (
       _event,
-      args: { uid: string; sampleRate: number; blockSize?: number; channels?: number }
+      args: {
+        uid: string
+        sampleRate: number
+        blockSize?: number
+        channels?: number
+        stateBlob?: string | null
+      }
     ): Promise<{ handle?: number; outputChannels?: number; error?: string }> => {
       const host = loadAddon()
       if (!host) return { error: loadError ?? 'vst3 host unavailable' }
@@ -168,7 +195,8 @@ export function registerVst3Ipc(): void {
         const result = host.openInstance(plugin.path, plugin.uid, {
           sampleRate: args.sampleRate,
           blockSize: args.blockSize,
-          channels: args.channels
+          channels: args.channels,
+          state: chunkFromBlob(args.stateBlob)
         })
         if (result.error || result.handle === undefined) {
           return { error: result.error ?? 'could not open instance' }
@@ -204,6 +232,25 @@ export function registerVst3Ipc(): void {
   )
 
   ipcMain.handle(
+    'vst3:instance-state',
+    async (_event, handle: number): Promise<{ stateBlob?: string; error?: string }> => {
+      const host = loadAddon()
+      if (!host) return { error: loadError ?? 'vst3 host unavailable' }
+      try {
+        const result = host.getInstanceState(handle)
+        if (result.error || !result.component) {
+          return { error: result.error ?? 'could not capture state' }
+        }
+        return {
+          stateBlob: JSON.stringify({ component: result.component.toString('base64') })
+        }
+      } catch (error) {
+        return { error: error instanceof Error ? error.message : String(error) }
+      }
+    }
+  )
+
+  ipcMain.handle(
     'vst3:close-instance',
     async (_event, handle: number): Promise<{ closed: boolean }> => {
       const host = loadAddon()
@@ -225,6 +272,7 @@ export function registerVst3Ipc(): void {
         channels: Float32Array[]
         sampleRate: number
         params?: Record<string, number>
+        stateBlob?: string | null
       }
     ): Promise<{ channels?: Float32Array[]; error?: string }> => {
       const host = loadAddon()
@@ -238,7 +286,8 @@ export function registerVst3Ipc(): void {
         const result = host.processBuffer(plugin.path, plugin.uid, {
           channels: args.channels,
           sampleRate: args.sampleRate,
-          params: args.params
+          params: args.params,
+          state: chunkFromBlob(args.stateBlob)
         })
         if (result.error || !result.channels) {
           return { error: result.error ?? 'processing failed' }

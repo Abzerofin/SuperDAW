@@ -65,7 +65,7 @@ export class LivePreview {
       if (!instance.enabled) continue
       if (pluginRegistry.resolve(instance.descriptor)) continue // a builtin: baked in
       if (!this.host.has(instance.descriptor)) continue // missing: bypassed
-      const live = await this.host.open(instance.descriptor, sampleRate, 2)
+      const live = await this.host.open(instance, sampleRate, 2)
       if (!live) {
         // Partial failure must not leave half a chain open.
         for (const held of opened) held.close()

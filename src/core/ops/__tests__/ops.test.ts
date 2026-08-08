@@ -176,6 +176,7 @@ suite('invert', () => {
     { type: 'plugin/remove', instanceId: 'fxA' },
     { type: 'plugin/setParam', instanceId: 'fxA', param: 'low', value: 6 },
     { type: 'plugin/setEnabled', instanceId: 'fxA', enabled: false },
+    { type: 'plugin/setState', instanceId: 'fxA', stateBlob: '{"component":"AAECAw=="}' },
     { type: 'track/setSynthParam', trackId: 'tm', param: 'cutoff', value: 3 },
     { type: 'note/add', note: { id: 'n1', clipId: 'c1', pitch: 64, start: 240, duration: 240, velocity: 90 } },
     { type: 'note/addMany', notes: [

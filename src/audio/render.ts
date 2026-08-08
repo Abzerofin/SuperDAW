@@ -53,11 +53,13 @@ export interface ExternalPluginHost {
   ): Promise<Float32Array[] | null>
   /**
    * A PERSISTENT plugin for live playback, whose state carries across
-   * calls so consecutive chunks continue each other's tails. Absent on
-   * hosts that only do one-shot work.
+   * calls so consecutive chunks continue each other's tails. Takes the
+   * whole PluginInstance because the document's stateBlob must be
+   * restored into the plugin at open time. Absent on hosts that only do
+   * one-shot work.
    */
   open?(
-    descriptor: PluginDescriptor,
+    instance: PluginInstance,
     sampleRate: number,
     channels: number
   ): Promise<ExternalInstance | null>
