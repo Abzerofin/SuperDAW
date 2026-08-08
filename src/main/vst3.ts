@@ -237,11 +237,19 @@ function placeDocked(host: Vst3Addon, win: BrowserWindow, instanceId: string): v
   if (!rect || editorHandle === undefined) return
   const content = win.getContentBounds()
   const scale = screen.getDisplayMatching(win.getBounds()).scaleFactor
+  // dipToScreenPoint is the authoritative DIP→physical mapping and stays
+  // correct across mixed-DPI monitors, where multiplying global DIP
+  // coords by one display's factor drifts (Windows-only API).
+  const dip = { x: content.x + rect.x, y: content.y + rect.y }
+  const phys =
+    typeof screen.dipToScreenPoint === 'function'
+      ? screen.dipToScreenPoint(dip)
+      : { x: Math.round(dip.x * scale), y: Math.round(dip.y * scale) }
   try {
     host.moveEditor(editorHandle, {
       visible: rect.visible,
-      x: Math.round((content.x + rect.x) * scale),
-      y: Math.round((content.y + rect.y) * scale),
+      x: phys.x,
+      y: phys.y,
       clipLeft: Math.round(rect.clipLeft * scale),
       clipTop: Math.round(rect.clipTop * scale),
       clipRight: Math.round(rect.clipRight * scale),

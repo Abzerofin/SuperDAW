@@ -465,7 +465,18 @@ function DockedEditor({ instance }: { instance: PluginInstance }): React.JSX.Ele
       const chain = holder?.closest('.fx-dock-chain')
       if (!holder || !chain) return
       const r = holder.getBoundingClientRect()
-      const viewport = chain.getBoundingClientRect()
+      // The chain's CLIENT box: its border box includes padding and the
+      // horizontal scrollbar strip, and clipping to that lets the overlay
+      // sit past the visual edge and cover the scrollbar. Clamp to the
+      // window viewport too, so a shrunken window still cuts the GUI off.
+      const cRect = chain.getBoundingClientRect()
+      const el = chain as HTMLElement
+      const viewport = {
+        left: Math.max(cRect.left + el.clientLeft, 0),
+        top: Math.max(cRect.top + el.clientTop, 0),
+        right: Math.min(cRect.left + el.clientLeft + el.clientWidth, window.innerWidth),
+        bottom: Math.min(cRect.top + el.clientTop + el.clientHeight, window.innerHeight)
+      }
       const rect = {
         x: Math.round(r.left),
         y: Math.round(r.top),
@@ -473,7 +484,12 @@ function DockedEditor({ instance }: { instance: PluginInstance }): React.JSX.Ele
         clipTop: Math.round(Math.max(0, viewport.top - r.top)),
         clipRight: Math.round(Math.max(0, r.right - viewport.right)),
         clipBottom: Math.round(Math.max(0, r.bottom - viewport.bottom)),
-        visible: r.right > viewport.left && r.left < viewport.right && r.width > 0
+        visible:
+          r.width > 0 &&
+          r.right > viewport.left &&
+          r.left < viewport.right &&
+          r.bottom > viewport.top &&
+          r.top < viewport.bottom
       }
       const key = JSON.stringify(rect)
       if (key === lastSent) return
