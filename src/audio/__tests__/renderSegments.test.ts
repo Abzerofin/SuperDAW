@@ -4,7 +4,7 @@ import { createEmptyProject } from '@core/model/types'
 import type { PluginDescriptor } from '@core/plugins/descriptor'
 import { builtinEffectDescriptor } from '@core/plugins/builtin'
 import { apply } from '@core/ops/apply'
-import { segmentInserts, type ExternalPluginHost } from '../render'
+import { canLivePreview, segmentInserts, type ExternalPluginHost } from '../render'
 
 /**
  * Chain ORDER is the property that matters here: an EQ before a saturator
@@ -142,5 +142,58 @@ suite('segmentInserts', () => {
 
   test('a track with no inserts yields no segments', () => {
     expect(shape(stateWith(), hostWith('sat'))).toEqual([])
+  })
+})
+
+/**
+ * Live preview renders leading builtins offline per window and hands the
+ * result to HELD external instances. A builtin after an external would
+ * have to be windowed too, and would lose its tail at every boundary — so
+ * that shape is refused rather than played subtly wrong.
+ */
+suite('canLivePreview', () => {
+  const can = (state: ProjectState, host: ExternalPluginHost): boolean =>
+    canLivePreview(state, 't1', host)
+
+  test('builtins before an external is the previewable shape', () => {
+    const state = stateWith(
+      instance('a', EQ, 1),
+      instance('b', DELAY, 2),
+      instance('c', VST3('sat'), 3)
+    )
+    expect(can(state, hostWith('sat'))).toBe(true)
+  })
+
+  test('externals only is previewable', () => {
+    const state = stateWith(instance('a', VST3('sat'), 1), instance('b', VST3('verb'), 2))
+    expect(can(state, hostWith('sat', 'verb'))).toBe(true)
+  })
+
+  test('a builtin AFTER an external is refused', () => {
+    const state = stateWith(instance('a', VST3('sat'), 1), instance('b', EQ, 2))
+    expect(can(state, hostWith('sat'))).toBe(false)
+  })
+
+  test('refusal follows rank, not insertion order', () => {
+    // EQ was added first but ranks AFTER the external.
+    const state = stateWith(instance('eq', EQ, 90), instance('sat', VST3('sat'), 10))
+    expect(can(state, hostWith('sat'))).toBe(false)
+  })
+
+  test('a track with no external inserts needs no preview', () => {
+    const state = stateWith(instance('a', EQ, 1), instance('b', DELAY, 2))
+    expect(can(state, hostWith('sat'))).toBe(false)
+  })
+
+  test('a disabled builtin after an external does not block preview', () => {
+    const state = stateWith(instance('a', VST3('sat'), 1), instance('b', EQ, 2, false))
+    expect(can(state, hostWith('sat'))).toBe(true)
+  })
+
+  test('an external the host lacks is not external — it is just bypassed', () => {
+    // 'ghost' is uninstalled, so the trailing EQ is not "after an
+    // external" at all; there is also then nothing to preview.
+    const state = stateWith(instance('a', VST3('ghost'), 1), instance('b', EQ, 2))
+    expect(can(state, hostWith('sat'))).toBe(false)
   })
 })

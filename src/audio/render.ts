@@ -106,12 +106,22 @@ function applyVolumeAutomation(auto: GainNode, state: ProjectState, trackId: Tra
   }
 }
 
-/** Schedule clip sources (with fades) and synth notes into per-track inputs. */
+/**
+ * Schedule clip sources (with fades) and synth notes into per-track inputs.
+ *
+ * `fromTicks`/`atSec`/`untilTicks` describe a WINDOW of the timeline, so
+ * the same code renders a whole track (0, 0, ∞) and a two-second slice for
+ * live preview. Sources are stateless, which is why a window can be
+ * rendered independently and still be sample-exact.
+ */
 function scheduleSources(
   ctx: BaseAudioContext,
   state: ProjectState,
   assets: AssetSourceLike,
-  inputs: Map<TrackId, AudioNode>
+  inputs: Map<TrackId, AudioNode>,
+  fromTicks = 0,
+  atSec = 0,
+  untilTicks?: number
 ): void {
   // One fade envelope per clip, shared by its audio source and its synth
   // voices so MIDI and audio taper identically (and identically to playback).
@@ -124,13 +134,19 @@ function scheduleSources(
     if (!gain) {
       gain = ctx.createGain()
       gain.connect(chainInput)
-      applyClipFades(gain.gain, clip, state.tempo, 0, 0)
+      applyClipFades(gain.gain, clip, state.tempo, fromTicks, atSec)
       fadeGains.set(clipId, gain)
     }
     return gain
   }
 
-  for (const s of scheduleClips(state, (id) => assets.getSeconds(id), 0, 0)) {
+  for (const s of scheduleClips(
+    state,
+    (id) => assets.getSeconds(id),
+    fromTicks,
+    atSec,
+    untilTicks
+  )) {
     const plain = assets.get(s.assetId)?.buffer
     // Reversed clips read the mirrored copy, exactly as in live playback.
     const buffer = s.reverse
@@ -148,7 +164,7 @@ function scheduleSources(
     source.connect(dest)
     source.start(s.when, s.offsetSec, s.durationSec)
   }
-  for (const s of scheduleNotes(state, 0, 0)) {
+  for (const s of scheduleNotes(state, fromTicks, atSec, untilTicks)) {
     const dest = destinationFor(s.clipId, s.trackId)
     if (!dest) continue
     buildSynthVoice(ctx, dest, s, state.tracks[s.trackId]?.synth ?? {})
@@ -281,6 +297,103 @@ export async function renderTrackFreeze(
   // Volume automation sits after the inserts, so it lands in its own
   // final pass rather than being folded into an arbitrary segment.
   return applyAutomationPass(buffer, state, trackId, tps)
+}
+
+/**
+ * Leading audio rendered before a live-preview window and then discarded,
+ * so time-based builtin effects (delay, reverb, compressor envelopes) have
+ * warmed up by the time the kept region starts. Web Audio nodes cannot
+ * carry state between OfflineAudioContexts the way a held VST3 instance
+ * can, so this is how a window boundary avoids an audible discontinuity.
+ */
+export const PREVIEW_PREROLL_SEC = 0.5
+
+/**
+ * Can this track be previewed live?
+ *
+ * Only when every locally-resolvable insert comes BEFORE every external
+ * one. Live preview renders the leading builtins offline and hands the
+ * result to held VST3 instances; a builtin sitting AFTER an external would
+ * have to be rendered per-window too, and would lose its tail at every
+ * boundary. Rather than sound subtly wrong, such a track simply is not
+ * previewed — freezing still renders it exactly.
+ *
+ * The common case passes: adding a plugin appends it at the end of the
+ * chain, so VST3s naturally land last.
+ */
+export function canLivePreview(
+  state: ProjectState,
+  trackId: TrackId,
+  external: ExternalPluginHost
+): boolean {
+  let seenExternal = false
+  let anyExternal = false
+  for (const instance of pluginsOfTrack(state, trackId)) {
+    if (!instance.enabled) continue
+    const local = pluginRegistry.resolve(instance.descriptor) !== null
+    const isExternal = !local && external.has(instance.descriptor)
+    if (isExternal) {
+      seenExternal = true
+      anyExternal = true
+    } else if (local && seenExternal) {
+      return false // a builtin after an external: cannot window it cleanly
+    }
+  }
+  return anyExternal
+}
+
+/**
+ * Render ONE window of a track's sources plus its locally-resolvable
+ * inserts, ready to hand to held external instances. Includes
+ * PREVIEW_PREROLL_SEC of warm-up ahead of `fromTicks`, which is trimmed
+ * off before returning, so the caller gets exactly the window it asked
+ * for. Returns null if the window is empty.
+ */
+export async function renderPreviewWindow(
+  state: ProjectState,
+  trackId: TrackId,
+  assets: AssetSourceLike,
+  fromTicks: number,
+  untilTicks: number
+): Promise<AudioBuffer | null> {
+  const tps = ticksPerSecond(state.tempo)
+  const windowSec = (untilTicks - fromTicks) / tps
+  if (windowSec <= 0) return null
+
+  const preRollTicks = Math.min(fromTicks, Math.ceil(PREVIEW_PREROLL_SEC * tps))
+  const preRollSec = preRollTicks / tps
+  const totalFrames = Math.ceil((preRollSec + windowSec) * SAMPLE_RATE)
+  const ctx = new OfflineAudioContext(2, totalFrames, SAMPLE_RATE)
+
+  const input = ctx.createGain()
+  // Only the LOCAL inserts here; externals are applied afterwards by held
+  // instances, which is the whole reason their state survives windows.
+  buildInserts(ctx, state, trackId, input).connect(ctx.destination)
+  scheduleSources(
+    ctx,
+    state,
+    assets,
+    new Map([[trackId, input]]),
+    fromTicks - preRollTicks,
+    0,
+    untilTicks
+  )
+
+  const rendered = await ctx.startRendering()
+  const skip = Math.round(preRollSec * SAMPLE_RATE)
+  if (skip <= 0) return rendered
+
+  const frames = rendered.length - skip
+  if (frames <= 0) return null
+  const trimmed = new OfflineAudioContext(
+    rendered.numberOfChannels,
+    frames,
+    rendered.sampleRate
+  ).createBuffer(rendered.numberOfChannels, frames, rendered.sampleRate)
+  for (let ch = 0; ch < rendered.numberOfChannels; ch++) {
+    trimmed.getChannelData(ch).set(rendered.getChannelData(ch).subarray(skip))
+  }
+  return trimmed
 }
 
 /** One run of consecutive inserts that can be processed the same way. */
