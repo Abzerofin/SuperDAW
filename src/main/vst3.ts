@@ -1,4 +1,4 @@
-import { app, ipcMain } from 'electron'
+import { app, BrowserWindow, ipcMain, screen } from 'electron'
 import type { WebContents } from 'electron'
 import { readAppData, setAppData } from './appData'
 import { existsSync } from 'node:fs'
@@ -59,12 +59,37 @@ interface Vst3Addon {
       state?: Buffer
       x?: number
       y?: number
+      borderless?: boolean
+      owner?: Buffer
       onEvent: (event: { type: string; a: number; b: number }) => void
     }
   ): { error?: string; editor?: number; width?: number; height?: number }
   closeEditor(editor: number): { component?: Buffer; x?: number; y?: number }
   editorResized(editor: number, width: number, height: number): { error?: string }
+  moveEditor(
+    editor: number,
+    options: {
+      x?: number
+      y?: number
+      visible?: boolean
+      clipLeft?: number
+      clipTop?: number
+      clipRight?: number
+      clipBottom?: number
+    }
+  ): { error?: string }
   setEditorParam(editor: number, paramId: number, value: number): { error?: string }
+}
+
+/** A docked overlay's placement, in the renderer's CSS viewport coords. */
+export interface DockRect {
+  x: number
+  y: number
+  clipLeft: number
+  clipTop: number
+  clipRight: number
+  clipBottom: number
+  visible: boolean
 }
 
 /** One automatable parameter. Values are VST3 NORMALIZED (0..1). */
@@ -195,6 +220,48 @@ async function savePosition(uid: string, x: number, y: number): Promise<void> {
 /** uid of each open editor, for position saving at close. */
 const editorUids = new Map<string, string>()
 
+/** Instance ids whose editor is a DOCKED overlay rather than a floating
+ * window. Their coordinates are dock geometry, not a user choice — never
+ * saved as a remembered position. */
+const dockedEditors = new Set<string>()
+
+/** Last reported dock rect per instance, re-applied when the app window
+ * itself moves — viewport coords don't change then, so the renderer has
+ * no way to know. */
+const lastDockRects = new Map<string, DockRect>()
+const watchedWindows = new WeakSet<BrowserWindow>()
+
+function placeDocked(host: Vst3Addon, win: BrowserWindow, instanceId: string): void {
+  const rect = lastDockRects.get(instanceId)
+  const editorHandle = editors.get(instanceId)
+  if (!rect || editorHandle === undefined) return
+  const content = win.getContentBounds()
+  const scale = screen.getDisplayMatching(win.getBounds()).scaleFactor
+  try {
+    host.moveEditor(editorHandle, {
+      visible: rect.visible,
+      x: Math.round((content.x + rect.x) * scale),
+      y: Math.round((content.y + rect.y) * scale),
+      clipLeft: Math.round(rect.clipLeft * scale),
+      clipTop: Math.round(rect.clipTop * scale),
+      clipRight: Math.round(rect.clipRight * scale),
+      clipBottom: Math.round(rect.clipBottom * scale)
+    })
+  } catch {
+    // a dying plugin must not break window moves
+  }
+}
+
+function watchWindow(host: Vst3Addon, win: BrowserWindow): void {
+  if (watchedWindows.has(win)) return
+  watchedWindows.add(win)
+  const reposition = (): void => {
+    for (const instanceId of dockedEditors) placeDocked(host, win, instanceId)
+  }
+  win.on('move', reposition)
+  win.on('resize', reposition)
+}
+
 /** Capture the final chunk and tear the editor down. Idempotent. */
 function finalizeEditor(host: Vst3Addon, instanceId: string, sender: WebContents): void {
   const editorHandle = editors.get(instanceId)
@@ -202,9 +269,11 @@ function finalizeEditor(host: Vst3Addon, instanceId: string, sender: WebContents
   editors.delete(instanceId)
   const uid = editorUids.get(instanceId)
   editorUids.delete(instanceId)
+  const wasDocked = dockedEditors.delete(instanceId)
+  lastDockRects.delete(instanceId)
   try {
     const final = host.closeEditor(editorHandle)
-    if (uid && typeof final.x === 'number' && typeof final.y === 'number') {
+    if (!wasDocked && uid && typeof final.x === 'number' && typeof final.y === 'number') {
       void savePosition(uid, final.x, final.y)
     }
     // The chunk becomes document state — for GUI-only plugins it is the
@@ -275,6 +344,85 @@ export function registerVst3Ipc(): void {
     const host = loadAddon()
     if (host) finalizeEditor(host, instanceId, event.sender)
   })
+
+  /**
+   * DOCKED editors: a borderless native overlay glued over a reserved
+   * area of the app window (a plugin cannot paint inside a Chromium
+   * window — see the native-window commit). The renderer reports the
+   * reserved area's CSS-viewport rect on every change; rect: null
+   * collapses the editor, which captures its state exactly like closing
+   * a floating window does.
+   */
+  ipcMain.handle(
+    'vst3:dock-editor',
+    async (
+      event,
+      args: {
+        instanceId: string
+        uid: string
+        stateBlob?: string | null
+        rect: DockRect | null
+      }
+    ): Promise<{ width?: number; height?: number; error?: string }> => {
+      const host = loadAddon()
+      if (!host) return { error: loadError ?? 'vst3 host unavailable' }
+      const sender = event.sender
+      const win = BrowserWindow.fromWebContents(sender)
+      if (!win) return { error: 'no window' }
+
+      if (args.rect === null) {
+        finalizeEditor(host, args.instanceId, sender)
+        return {}
+      }
+
+      let editorHandle = editors.get(args.instanceId)
+      let dims: { width?: number; height?: number } = {}
+      if (editorHandle === undefined) {
+        const plugin = scan().find((p) => p.uid === args.uid)
+        if (!plugin) return { error: `plugin not installed: ${args.uid}` }
+        try {
+          const opened = host.openEditor(plugin.path, plugin.uid, {
+            borderless: true,
+            owner: win.getNativeWindowHandle(),
+            state: chunkFromBlob(args.stateBlob),
+            onEvent: (e) => {
+              if (e.type === 'close') {
+                finalizeEditor(host, args.instanceId, sender)
+                return
+              }
+              if (!sender.isDestroyed()) {
+                sender.send('vst3:editor-event', {
+                  instanceId: args.instanceId,
+                  kind: e.type,
+                  paramId: e.a,
+                  value: e.b
+                })
+              }
+            }
+          })
+          if (opened.error || opened.editor === undefined) {
+            return { error: opened.error ?? 'could not open editor' }
+          }
+          editorHandle = opened.editor
+          dims = { width: opened.width, height: opened.height }
+          editors.set(args.instanceId, editorHandle)
+          editorUids.set(args.instanceId, plugin.uid)
+          dockedEditors.add(args.instanceId)
+        } catch (error) {
+          return { error: error instanceof Error ? error.message : String(error) }
+        }
+      }
+
+      // CSS-viewport → physical screen pixels happens in placeDocked. DIP
+      // coords scale by the window's display factor; correct on
+      // single-display placement, approximate while the window straddles
+      // mixed-DPI monitors.
+      lastDockRects.set(args.instanceId, args.rect)
+      watchWindow(host, win)
+      placeDocked(host, win, args.instanceId)
+      return dims
+    }
+  )
 
   ipcMain.handle('vst3:scan', async (): Promise<Vst3Plugin[]> => scan())
 

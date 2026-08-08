@@ -741,6 +741,9 @@ class EditorHost : public IComponentHandler, public IPlugFrame {
     }
 #endif
     if (view) view->onSize(rect);
+    // Docked overlays reserve space in the app's layout, so the renderer
+    // needs to know the plugin changed its own size.
+    emit("resize", rect->getWidth(), rect->getHeight());
     return kResultOk;
   }
 
@@ -863,6 +866,18 @@ Napi::Object OpenEditor(const Napi::CallbackInfo& info) {
   const std::string title = options.Has("title") && options.Get("title").IsString()
                                 ? options.Get("title").As<Napi::String>().Utf8Value()
                                 : std::string("Plugin");
+  // Borderless mode: no caption, positioned by the caller (the renderer
+  // "docks" it over a reserved area of the app window). An `owner` HWND
+  // keeps it above that window and minimizes with it.
+  const bool borderless =
+      options.Has("borderless") && options.Get("borderless").ToBoolean().Value();
+  void* ownerHwnd = nullptr;
+  if (options.Has("owner") && options.Get("owner").IsBuffer()) {
+    Napi::Buffer<char> ownerBuf = options.Get("owner").As<Napi::Buffer<char>>();
+    if (ownerBuf.Length() >= sizeof(void*)) {
+      ownerHwnd = *reinterpret_cast<void* const*>(ownerBuf.Data());
+    }
+  }
 
   auto session = std::make_unique<EditorSession>();
   std::string error;
@@ -935,9 +950,11 @@ Napi::Object OpenEditor(const Napi::CallbackInfo& info) {
     RegisterClassW(&wc);
     classRegistered = true;
   }
-  // Fixed-size caption window: plugins drive their size; resizeView is the
-  // only resize path.
-  const DWORD style = WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU | WS_MINIMIZEBOX;
+  // Fixed-size window: plugins drive their size; resizeView is the only
+  // resize path. Docked overlays are bare popups; floating editors get a
+  // caption.
+  const DWORD style =
+      borderless ? WS_POPUP : (WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU | WS_MINIMIZEBOX);
   RECT frame{0, 0, size.getWidth(), size.getHeight()};
   AdjustWindowRect(&frame, style, FALSE);
 
@@ -957,9 +974,10 @@ Napi::Object OpenEditor(const Napi::CallbackInfo& info) {
   }
 
   session->top = CreateWindowExW(
-      WS_EX_APPWINDOW, kClass, Utf8ToWide(title).c_str(), style, x, y,
-      frame.right - frame.left, frame.bottom - frame.top, nullptr,
-      nullptr, GetModuleHandleW(nullptr), nullptr);
+      borderless ? WS_EX_TOOLWINDOW : WS_EX_APPWINDOW, kClass,
+      Utf8ToWide(title).c_str(), style, x, y, frame.right - frame.left,
+      frame.bottom - frame.top, static_cast<HWND>(ownerHwnd), nullptr,
+      GetModuleHandleW(nullptr), nullptr);
   if (!session->top) return Fail(env, "could not create editor window");
   gWndHosts[session->top] = session->host.get();
   session->host->window = session->top;
@@ -967,8 +985,14 @@ Napi::Object OpenEditor(const Napi::CallbackInfo& info) {
   if (session->view->attached(session->top, kPlatformTypeHWND) != kResultOk) {
     return Fail(env, "editor refused to attach to the window");
   }
-  ShowWindow(session->top, SW_SHOW);
-  SetForegroundWindow(session->top);
+  if (borderless) {
+    // The caller positions it before showing; SW_SHOWNA avoids stealing
+    // focus from the app window it overlays.
+    ShowWindow(session->top, SW_SHOWNA);
+  } else {
+    ShowWindow(session->top, SW_SHOW);
+    SetForegroundWindow(session->top);
+  }
 #else
   return Fail(env, "editor hosting is Windows-only for now");
 #endif
@@ -993,6 +1017,56 @@ Napi::Object EditorResized(const Napi::CallbackInfo& info) {
   const int height = info[2].As<Napi::Number>().Int32Value();
   ViewRect rect(0, 0, width, height);
   found->second->view->onSize(&rect);
+  return result;
+}
+
+// moveEditor(editor, { x, y, visible, clipTop?, clipBottom? })
+//
+// Positions a docked overlay in PHYSICAL screen pixels. clipTop/clipBottom
+// (pixels of the window to hide, from its own top/bottom) let the overlay
+// respect the dock's scroll viewport instead of overhanging it.
+Napi::Object MoveEditor(const Napi::CallbackInfo& info) {
+  Napi::Env env = info.Env();
+  Napi::Object result = Napi::Object::New(env);
+  if (info.Length() < 2 || !info[0].IsNumber() || !info[1].IsObject()) {
+    return Fail(env, "expected (editor, options)");
+  }
+  auto found = gEditors.find(info[0].As<Napi::Number>().Int32Value());
+  if (found == gEditors.end()) return Fail(env, "unknown editor");
+#ifdef _WIN32
+  HWND hwnd = found->second->top;
+  if (!hwnd) return Fail(env, "editor has no window");
+  Napi::Object options = info[1].As<Napi::Object>();
+  const bool visible =
+      !options.Has("visible") || options.Get("visible").ToBoolean().Value();
+  if (!visible) {
+    ShowWindow(hwnd, SW_HIDE);
+    return result;
+  }
+  const int x = options.Get("x").ToNumber().Int32Value();
+  const int y = options.Get("y").ToNumber().Int32Value();
+  SetWindowPos(hwnd, HWND_TOP, x, y, 0, 0,
+               SWP_NOSIZE | SWP_NOACTIVATE | SWP_SHOWWINDOW);
+
+  RECT bounds{};
+  GetWindowRect(hwnd, &bounds);
+  const int width = bounds.right - bounds.left;
+  const int height = bounds.bottom - bounds.top;
+  const auto clip = [&](const char* key) {
+    return options.Has(key) ? std::max(0, options.Get(key).ToNumber().Int32Value()) : 0;
+  };
+  const int clipLeft = clip("clipLeft");
+  const int clipTop = clip("clipTop");
+  const int clipRight = clip("clipRight");
+  const int clipBottom = clip("clipBottom");
+  if (clipLeft > 0 || clipTop > 0 || clipRight > 0 || clipBottom > 0) {
+    HRGN region = CreateRectRgn(clipLeft, clipTop, std::max(clipLeft, width - clipRight),
+                                std::max(clipTop, height - clipBottom));
+    SetWindowRgn(hwnd, region, TRUE); // the window owns the region now
+  } else {
+    SetWindowRgn(hwnd, nullptr, TRUE);
+  }
+#endif
   return result;
 }
 
@@ -1052,6 +1126,7 @@ Napi::Object Init(Napi::Env env, Napi::Object exports) {
   exports.Set("openEditor", Napi::Function::New(env, OpenEditor));
   exports.Set("closeEditor", Napi::Function::New(env, CloseEditor));
   exports.Set("editorResized", Napi::Function::New(env, EditorResized));
+  exports.Set("moveEditor", Napi::Function::New(env, MoveEditor));
   exports.Set("setEditorParam", Napi::Function::New(env, SetEditorParam));
   exports.Set("processInstance", Napi::Function::New(env, ProcessInstance));
   exports.Set("closeInstance", Napi::Function::New(env, CloseInstance));

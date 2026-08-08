@@ -1431,6 +1431,25 @@ input {
   padding: 1px 6px;
 }
 
+.fx-editor-btn-on {
+  color: var(--text);
+  background: var(--bg-3);
+}
+
+/* A card whose plugin GUI is docked: sized by the native view. */
+.fx-card-expanded {
+  width: auto;
+  overflow: visible;
+}
+
+/* The reserved area the native plugin view sits over. */
+.fx-docked-editor {
+  flex-shrink: 0;
+  margin-top: 4px;
+  border-radius: 3px;
+  background: #000;
+}
+
 .fx-offline-tag {
   font-size: 9px;
   white-space: nowrap;

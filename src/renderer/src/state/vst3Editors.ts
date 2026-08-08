@@ -1,4 +1,5 @@
 import { projectStore } from './projectStore'
+import { vst3Dock } from './vst3Dock'
 
 /**
  * Plugin editor windows (main process hosts the GUIs; see src/main/vst3).
@@ -38,6 +39,16 @@ export function wireEditorEvents(): void {
     }
 
     if (event.paramId === undefined) return
+
+    // A docked plugin resized its own editor: grow/shrink its placeholder.
+    if (event.kind === 'resize') {
+      vst3Dock.setDims(event.instanceId, {
+        width: Math.round(event.paramId),
+        height: Math.round(event.value ?? 0)
+      })
+      return
+    }
+
     const param = String(event.paramId)
 
     if (event.kind === 'begin') {

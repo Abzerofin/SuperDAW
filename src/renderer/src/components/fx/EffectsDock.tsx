@@ -22,8 +22,8 @@ import {
   subscribeExternalPlugins,
   type ExternalPluginEntry
 } from '@/state/externalPlugins'
-import { openPluginEditor } from '@/state/vst3Editors'
 import { capturePointer } from '@/lib/pointer'
+import { useVst3Dock, vst3Dock } from '@/state/vst3Dock'
 import { PluginPlaceholder } from './PluginPlaceholder'
 
 /**
@@ -53,6 +53,20 @@ function TrackEffects({ track }: { track: Track }): React.JSX.Element {
   const state = useProjectState()
   const chainRef = useRef<HTMLDivElement>(null)
   const inserts = pluginsOfTrack(state, track.id)
+  const dock = useVst3Dock()
+
+  // A docked GUI needs more than the dock's 240px: grow to the tallest
+  // expanded editor (capped so the timeline keeps meaningful height).
+  const expandedHeights = inserts
+    .filter((i) => dock.isExpanded(i.id))
+    .map((i) => dock.dims(i.id)?.height ?? 0)
+  const dockHeight =
+    expandedHeights.length > 0
+      ? Math.min(
+          Math.max(240, Math.max(...expandedHeights) + 92),
+          Math.round(window.innerHeight * 0.7)
+        )
+      : undefined
 
   // Reorder drag: the previewed order lives here and only becomes a
   // plugin/reorder op on release (one gesture = one operation).
@@ -100,7 +114,7 @@ function TrackEffects({ track }: { track: Track }): React.JSX.Element {
   }
 
   return (
-    <div className="fx-dock">
+    <div className="fx-dock" style={dockHeight !== undefined ? { height: dockHeight } : undefined}>
       <div className="fx-dock-head">
         <span className="proll-dot" style={{ background: track.color }} />
         <span className="fx-dock-title">{track.name}</span>
@@ -120,7 +134,9 @@ function TrackEffects({ track }: { track: Track }): React.JSX.Element {
         {shown.map((instance) => (
           <div
             key={instance.id}
-            className={`fx-card fx-insert ${drag?.id === instance.id ? 'fx-insert-dragging' : ''}`}
+            className={`fx-card fx-insert ${drag?.id === instance.id ? 'fx-insert-dragging' : ''} ${
+              dock.isExpanded(instance.id) ? 'fx-card-expanded' : ''
+            }`}
           >
             <button
               className="fx-grip"
@@ -341,6 +357,7 @@ function SynthSection({ track }: { track: Track }): React.JSX.Element {
 
 function PluginSection({ instance }: { instance: PluginInstance }): React.JSX.Element {
   usePluginRegistry() // re-render when a plugin gets installed mid-session
+  const expanded = useVst3Dock().isExpanded(instance.id)
   const status = pluginRegistry.status(instance.descriptor)
   // 'offline' plugins (VST3) are installed here but hosted out of process:
   // their params ARE editable, they just cannot be previewed live, so they
@@ -349,7 +366,9 @@ function PluginSection({ instance }: { instance: PluginInstance }): React.JSX.El
     return <PluginPlaceholder instance={instance} status={status} />
   }
   const offline = status === 'offline'
-  const defs = paramDefsOf(instance.descriptor) ?? {}
+  // While the plugin's own GUI is docked, generic sliders would just
+  // fight it — the head row plus the native view is the whole card.
+  const defs = offline && expanded ? {} : (paramDefsOf(instance.descriptor) ?? {})
   return (
     <div className={`fx-section ${instance.enabled ? '' : 'fx-bypassed'}`}>
       <div className="fx-section-head">
@@ -370,18 +389,15 @@ function PluginSection({ instance }: { instance: PluginInstance }): React.JSX.El
         {offline && (
           <>
             <button
-              className="fx-add-btn fx-editor-btn"
-              title="Open the plugin's own interface"
-              onClick={() =>
-                openPluginEditor({
-                  instanceId: instance.id,
-                  uid: instance.descriptor.uid,
-                  stateBlob: instance.stateBlob,
-                  title: instance.descriptor.name
-                })
+              className={`fx-add-btn fx-editor-btn ${expanded ? 'fx-editor-btn-on' : ''}`}
+              title={
+                expanded
+                  ? 'Collapse the plugin interface (saves its settings)'
+                  : "Show the plugin's own interface here"
               }
+              onClick={() => vst3Dock.toggle(instance.id)}
             >
-              GUI
+              {expanded ? '▾ GUI' : '▸ GUI'}
             </button>
             <span
               className="fx-offline-tag statusbar-dim"
@@ -419,7 +435,88 @@ function PluginSection({ instance }: { instance: PluginInstance }): React.JSX.El
           }
         />
       ))}
+      {offline && expanded && <DockedEditor instance={instance} />}
     </div>
+  )
+}
+
+/**
+ * The reserved area a docked plugin GUI sits over. The native overlay is
+ * positioned by tracking this div's viewport rect every frame (window
+ * moves are handled main-side; this covers dock scroll, layout shifts and
+ * resizes), clipped to the chain's scroll viewport so it cannot overhang.
+ * Unmounting — collapse, track switch, tab close — collapses the editor,
+ * which captures the plugin's state.
+ */
+function DockedEditor({ instance }: { instance: PluginInstance }): React.JSX.Element {
+  const dims = useVst3Dock().dims(instance.id) ?? { width: 480, height: 320 }
+  const holderRef = useRef<HTMLDivElement>(null)
+
+  useEffect(() => {
+    const api = window.superdaw
+    if (!api?.vst3DockEditor) return
+    let raf = 0
+    let lastSent = ''
+    let cancelled = false
+
+    const report = (): void => {
+      raf = requestAnimationFrame(report)
+      const holder = holderRef.current
+      const chain = holder?.closest('.fx-dock-chain')
+      if (!holder || !chain) return
+      const r = holder.getBoundingClientRect()
+      const viewport = chain.getBoundingClientRect()
+      const rect = {
+        x: Math.round(r.left),
+        y: Math.round(r.top),
+        clipLeft: Math.round(Math.max(0, viewport.left - r.left)),
+        clipTop: Math.round(Math.max(0, viewport.top - r.top)),
+        clipRight: Math.round(Math.max(0, r.right - viewport.right)),
+        clipBottom: Math.round(Math.max(0, r.bottom - viewport.bottom)),
+        visible: r.right > viewport.left && r.left < viewport.right && r.width > 0
+      }
+      const key = JSON.stringify(rect)
+      if (key === lastSent) return
+      lastSent = key
+      void api
+        .vst3DockEditor({
+          instanceId: instance.id,
+          uid: instance.descriptor.uid,
+          stateBlob: instance.stateBlob,
+          rect
+        })
+        .then((result) => {
+          if (cancelled) return
+          if (result.error) {
+            vst3Dock.collapse(instance.id)
+          } else if (result.width && result.height) {
+            vst3Dock.setDims(instance.id, { width: result.width, height: result.height })
+          }
+        })
+    }
+    raf = requestAnimationFrame(report)
+
+    return () => {
+      cancelled = true
+      cancelAnimationFrame(raf)
+      // Collapse captures state (plugin/setState arrives via editor events).
+      void api.vst3DockEditor({
+        instanceId: instance.id,
+        uid: instance.descriptor.uid,
+        rect: null
+      })
+    }
+    // stateBlob deliberately absent from deps: it changes as a RESULT of
+    // collapsing, and reopening on every state capture would loop.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [instance.id, instance.descriptor.uid])
+
+  return (
+    <div
+      className="fx-docked-editor"
+      ref={holderRef}
+      style={{ width: dims.width, height: dims.height }}
+    />
   )
 }
 

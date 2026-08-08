@@ -150,6 +150,27 @@ const api = {
     ipcRenderer.invoke('vst3:close-editor', instanceId),
 
   /**
+   * Dock a plugin's GUI over a reserved area of the app window (CSS
+   * viewport coords). Call with rect: null to collapse — that captures
+   * the plugin's state, exactly like closing a floating editor.
+   */
+  vst3DockEditor: (args: {
+    instanceId: string
+    uid: string
+    stateBlob?: string | null
+    rect: {
+      x: number
+      y: number
+      clipLeft: number
+      clipTop: number
+      clipRight: number
+      clipBottom: number
+      visible: boolean
+    } | null
+  }): Promise<{ width?: number; height?: number; error?: string }> =>
+    ipcRenderer.invoke('vst3:dock-editor', args),
+
+  /**
    * Events from open plugin editors: knob gestures
    * (kind begin/edit/end, paramId+value normalized 0..1) and the final
    * state chunk when an editor window closes (kind 'state').

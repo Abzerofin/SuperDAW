@@ -68,6 +68,20 @@ interface Window {
       title?: string
     }): Promise<{ opened?: boolean; error?: string }>
     vst3CloseEditor(instanceId: string): Promise<void>
+    vst3DockEditor(args: {
+      instanceId: string
+      uid: string
+      stateBlob?: string | null
+      rect: {
+        x: number
+        y: number
+        clipLeft: number
+        clipTop: number
+        clipRight: number
+        clipBottom: number
+        visible: boolean
+      } | null
+    }): Promise<{ width?: number; height?: number; error?: string }>
     onVst3EditorEvent(
       handler: (event: {
         instanceId: string
