@@ -1188,11 +1188,12 @@ input {
   background: var(--bg-3);
 }
 
-/* Plugin browser popover: opens UPWARD out of the dock. */
+/* Plugin browser popover. Portalled to <body> and fixed-positioned: the
+   dock chain is an overflow scroller, which would CLIP an absolutely
+   positioned panel trying to escape upward out of it. */
 .fx-browser {
-  position: absolute;
-  bottom: calc(100% + 4px);
-  left: 0;
+  position: fixed;
+  z-index: 1000;
   width: 280px;
   max-height: 320px;
   display: flex;

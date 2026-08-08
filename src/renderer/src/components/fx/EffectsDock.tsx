@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState } from 'react'
+import { createPortal } from 'react-dom'
 import type { PluginInstance, PluginInstanceId, Track } from '@core/model/types'
 import { pluginsOfTrack } from '@core/model/types'
 import { SYNTH_DEFS, WAVE_TYPES, synthDefaults, type ParamDef } from '@core/model/effects'
@@ -150,9 +151,12 @@ function AddPluginCard({
   track: Track
   inserts: PluginInstance[]
 }): React.JSX.Element {
-  const [open, setOpen] = useState(false)
   const [query, setQuery] = useState('')
   const rootRef = useRef<HTMLDivElement>(null)
+  const browserRef = useRef<HTMLDivElement>(null)
+  /** Where the popover anchors (viewport coords); null = closed. */
+  const [anchor, setAnchor] = useState<{ left: number; bottom: number } | null>(null)
+  const open = anchor !== null
   const [external, setExternal] = useState(externalPlugins)
 
   useEffect(() => {
@@ -163,11 +167,17 @@ function AddPluginCard({
 
   useEffect(() => {
     if (!open) return
+    // The popover is PORTALLED to <body> (an overflow ancestor would clip
+    // it inside the dock), so "outside" means outside the card AND the
+    // portalled panel.
     const onPointerDown = (e: PointerEvent): void => {
-      if (rootRef.current && !rootRef.current.contains(e.target as Node)) setOpen(false)
+      const target = e.target as Node
+      if (!rootRef.current?.contains(target) && !browserRef.current?.contains(target)) {
+        setAnchor(null)
+      }
     }
     const onKeyDown = (e: KeyboardEvent): void => {
-      if (e.key === 'Escape') setOpen(false)
+      if (e.key === 'Escape') setAnchor(null)
     }
     window.addEventListener('pointerdown', onPointerDown, true)
     window.addEventListener('keydown', onKeyDown)
@@ -191,7 +201,7 @@ function AddPluginCard({
         stateBlob: null
       }
     })
-    setOpen(false)
+    setAnchor(null)
     setQuery('')
   }
 
@@ -224,13 +234,33 @@ function AddPluginCard({
     ? 'VST3 · desktop app only (npm run dev)'
     : (externalScanError() ?? (external.length === 0 ? 'VST3 · no effects found' : null))
 
+  const toggle = (e: React.MouseEvent): void => {
+    if (open) {
+      setAnchor(null)
+      return
+    }
+    const rect = (e.currentTarget as HTMLElement).getBoundingClientRect()
+    setAnchor({
+      // Keep the 280px panel on screen even when the + card sits at the
+      // right edge of the chain.
+      left: Math.max(8, Math.min(rect.left, window.innerWidth - 288)),
+      bottom: window.innerHeight - rect.top + 4
+    })
+  }
+
   return (
     <div className="fx-card fx-add-card" ref={rootRef}>
-      <button className="fx-add-open" title="Add an effect" onClick={() => setOpen((v) => !v)}>
+      <button className="fx-add-open" title="Add an effect" onClick={toggle}>
         +
       </button>
-      {open && (
-        <div className="fx-browser" onPointerDown={(e) => e.stopPropagation()}>
+      {anchor &&
+        createPortal(
+          <div
+            className="fx-browser"
+            ref={browserRef}
+            style={{ left: anchor.left, bottom: anchor.bottom }}
+            onPointerDown={(e) => e.stopPropagation()}
+          >
           <input
             className="fx-browser-search"
             placeholder="Search plugins…"
@@ -270,8 +300,9 @@ function AddPluginCard({
               <div className="bay-empty">No plugins match “{query}”</div>
             )}
           </div>
-        </div>
-      )}
+        </div>,
+          document.body
+        )}
     </div>
   )
 }
