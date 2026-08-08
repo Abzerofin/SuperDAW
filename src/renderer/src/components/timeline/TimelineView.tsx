@@ -431,6 +431,9 @@ export function TimelineView(): React.JSX.Element {
     }
     if (!drag) return
     const dxTicks = (e.clientX - drag.originX) / pxPerTick
+    // Holding Shift bypasses grid snapping for the duration of the drag
+    // (grid 1 = free movement at tick resolution).
+    const snapGrid = e.shiftKey ? 1 : gridTicks
     setDrag((prev) => {
       if (!prev) return prev
       let { start, duration, offset, loopLength, stretch, trackIndex } = prev
@@ -439,14 +442,14 @@ export function TimelineView(): React.JSX.Element {
         // period is the clip's length when the drag began (or its existing
         // period); pulling back to one repeat or less turns looping off.
         const base = prev.origLoop > 0 ? prev.origLoop : prev.origDuration
-        duration = Math.max(gridTicks, snapTicks(prev.origDuration + dxTicks, gridTicks))
+        duration = Math.max(gridTicks, snapTicks(prev.origDuration + dxTicks, snapGrid))
         loopLength = duration > base ? base : 0
       } else if (prev.mode === 'stretch-r') {
         // The stretch handle: the same material fills the new length, so
         // longer = slower and lower, shorter = faster and higher (tape).
         // Duration re-derives from the clamped factor so the visual edge
         // never overshoots what playback will actually do.
-        const wanted = Math.max(gridTicks, snapTicks(prev.origDuration + dxTicks, gridTicks))
+        const wanted = Math.max(gridTicks, snapTicks(prev.origDuration + dxTicks, snapGrid))
         const factor = (prev.origStretch * wanted) / prev.origDuration
         stretch = Math.min(MAX_STRETCH, Math.max(MIN_STRETCH, factor))
         duration = Math.max(1, Math.round((prev.origDuration * stretch) / prev.origStretch))
@@ -455,7 +458,7 @@ export function TimelineView(): React.JSX.Element {
         loopLength =
           prev.origLoop > 0 ? Math.round((prev.origLoop * stretch) / prev.origStretch) : 0
       } else if (prev.mode === 'move') {
-        start = Math.max(0, snapTicks(prev.origStart + dxTicks, gridTicks))
+        start = Math.max(0, snapTicks(prev.origStart + dxTicks, snapGrid))
         const yCenter =
           trackTops[prev.origTrackIndex] + laneH / 2 + (e.clientY - prev.originY)
         trackIndex = trackIndexAtY(yCenter)
@@ -465,13 +468,13 @@ export function TimelineView(): React.JSX.Element {
         const minStart = prev.hasAsset ? prev.origStart - prev.origOffset : 0
         start = Math.min(
           maxStart,
-          Math.max(minStart, Math.max(0, snapTicks(prev.origStart + dxTicks, gridTicks)))
+          Math.max(minStart, Math.max(0, snapTicks(prev.origStart + dxTicks, snapGrid)))
         )
         duration = prev.origStart + prev.origDuration - start
         offset =
           prev.hasAsset ? prev.origOffset + (start - prev.origStart) : prev.origOffset
       } else {
-        duration = Math.max(gridTicks, snapTicks(prev.origDuration + dxTicks, gridTicks))
+        duration = Math.max(gridTicks, snapTicks(prev.origDuration + dxTicks, snapGrid))
       }
       const moved =
         start !== prev.origStart ||

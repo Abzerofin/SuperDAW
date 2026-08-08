@@ -29,13 +29,25 @@ export interface LoopRegion {
   readonly end: number
 }
 
+/** Timeline end of the current project, in ticks (0 = empty project). */
+function songEndTicks(): number {
+  let end = 0
+  for (const clip of Object.values(projectStore.state.clips)) {
+    end = Math.max(end, clip.start + clip.duration)
+  }
+  return end
+}
+
 export class Transport {
   private playing = false
   private baseTicks = 0
   private startedAt = 0 // TimeSource seconds at play start
+  /** Where the playhead stood when play was pressed — stop returns here. */
+  private playStartTicks = 0
   private tempo = projectStore.state.tempo
   private loop: LoopRegion | null = null
   private loopOn = false
+  private songLoopOn = false
   private timeSource: TimeSource = { now: () => performance.now() / 1000 }
   private frameListeners = new Set<() => void>()
   private eventListeners = new Set<(event: TransportEvent) => void>()
@@ -70,7 +82,26 @@ export class Transport {
 
   /** The region ONLY when it should actually cycle playback. */
   activeLoop(): LoopRegion | null {
-    return this.loopOn && this.loop && this.loop.end > this.loop.start ? this.loop : null
+    if (this.loopOn && this.loop && this.loop.end > this.loop.start) return this.loop
+    // Song loop: cycle the whole project. Computed fresh each call so
+    // edits that lengthen the song extend the cycle without ceremony. An
+    // explicit region wins — it is the more deliberate gesture.
+    if (this.songLoopOn) {
+      const end = songEndTicks()
+      if (end > 0) return { start: 0, end }
+    }
+    return null
+  }
+
+  get songLoopEnabled(): boolean {
+    return this.songLoopOn
+  }
+
+  /** Loop the entire song: reaching the end wraps back to the start. */
+  setSongLoop(enabled: boolean): void {
+    if (this.songLoopOn === enabled) return
+    this.songLoopOn = enabled
+    this.reanchorForLoopChange()
   }
 
   setLoopRegion(start: number, end: number): void {
@@ -138,6 +169,7 @@ export class Transport {
   play(): void {
     if (this.playing) return
     this.playing = true
+    this.playStartTicks = this.baseTicks
     this.startedAt = this.timeSource.now()
     this.tick()
     this.emitEvent('play')
@@ -162,6 +194,30 @@ export class Transport {
 
   toggle(): void {
     this.playing ? this.stop() : this.play()
+  }
+
+  /**
+   * The DAW stop gesture: stop AND return the playhead to where it stood
+   * when play was pressed. A second stop goes to the song start.
+   */
+  stopReturn(): void {
+    if (this.playing) {
+      this.stop()
+      this.setPosition(this.playStartTicks)
+    } else {
+      this.setPosition(0)
+    }
+  }
+
+  /** Space: play from here, or stop-and-return. */
+  toggleReturn(): void {
+    this.playing ? this.stopReturn() : this.play()
+  }
+
+  /** Shift+Space: stop (if playing) and go to the very beginning. */
+  returnToStart(): void {
+    if (this.playing) this.stop()
+    this.setPosition(0)
   }
 
   setPosition(ticks: number): void {

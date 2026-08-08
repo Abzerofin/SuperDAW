@@ -15,6 +15,7 @@ import { routingUi } from '@/state/routingUi'
 import { trackInputs, useTrackInputs } from '@/state/trackInputs'
 import { trackInputUi, useTrackInputUi } from '@/state/trackInputUi'
 import { freezeTrack, loadTrackPreset, saveTrackPreset, unfreezeTrack } from '@/lib/trackActions'
+import { exportTrackAudio } from '@/lib/exportAudio'
 import { CommentThread } from '../comments/CommentThread'
 import { TrackInputPanel } from '../track/TrackInputPanel'
 import { TrackStripControls } from './TrackStripControls'
@@ -217,7 +218,19 @@ export function TrackHeader({
                 }
                 onClick={() => void trackInputs.toggleMonitor(track.id)}
               >
-                ◉
+                <svg
+                  width="13"
+                  height="11"
+                  viewBox="0 0 13 11"
+                  fill="none"
+                  stroke="currentColor"
+                  strokeWidth="1.3"
+                  strokeLinecap="round"
+                >
+                  <path d="M2.6 9a5.5 5.5 0 0 1 0-7" />
+                  <path d="M10.4 2a5.5 5.5 0 0 1 0 7" />
+                  <circle cx="6.5" cy="5.5" r="1.4" fill="currentColor" stroke="none" />
+                </svg>
               </button>
               <ArmToggle trackId={track.id} />
             </>
@@ -278,6 +291,8 @@ export function TrackHeader({
               (frozen
                 ? menuItem('Unfreeze', () => unfreezeTrack(track.id))
                 : menuItem('Freeze track', () => void freezeTrack(track.id)))}
+            {menuItem('Export track as WAV…', () => void exportTrackAudio(track.id, 'wav'))}
+            {menuItem('Export track as MP3…', () => void exportTrackAudio(track.id, 'mp3'))}
             {menuItem('Save track preset…', () => void saveTrackPreset(track.id))}
             {menuItem('Load track preset…', () => void loadTrackPreset())}
             <div className="menu-sep" />

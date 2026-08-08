@@ -1246,6 +1246,16 @@ input {
   box-shadow: inset 2px 0 0 var(--accent, #5b8def);
 }
 
+/* The track's audio is peaking: painted by the meter's rAF loop, never
+   through React. Held ~350ms so single-sample spikes register. */
+.track-peak-flash {
+  background: rgba(224, 108, 117, 0.22);
+}
+
+.track-peak-flash .track-vol-meter {
+  background: var(--danger, #e06c75);
+}
+
 .fx-section {
   background: var(--bg-1);
   border: 1px solid var(--border);

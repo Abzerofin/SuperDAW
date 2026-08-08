@@ -45,7 +45,10 @@ export function useGlobalShortcuts(): void {
 
       if (e.code === 'Space') {
         e.preventDefault()
-        transport.toggle()
+        // Space stops-and-returns to where play began; Shift+Space goes
+        // to the very beginning of the song.
+        if (e.shiftKey) transport.returnToStart()
+        else transport.toggleReturn()
         return
       }
       if (mod && e.key.toLowerCase() === 's') {

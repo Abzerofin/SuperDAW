@@ -54,18 +54,28 @@ function VolumeSlider({ track }: { track: Track }): React.JSX.Element {
   useEffect(() => {
     let raf = 0
     let level = 0
+    let flashUntil = 0
     const draw = (): void => {
+      const raw = audioEngine.trackLevel(track.id)
       // Decay toward zero, but snap to it: an asymptote would otherwise keep
       // writing denormal widths into the DOM forever on a silent track.
-      level = Math.max(audioEngine.trackLevel(track.id), level * 0.9)
+      level = Math.max(raw, level * 0.9)
       if (level < 0.001) level = 0
       if (meterRef.current) {
         meterRef.current.style.width = `${Math.min(100, level * 100)}%`
       }
+      // Peaking (the analyser clamps at 1.0): flash the whole header red,
+      // held briefly so a single-sample spike is still visible.
+      if (raw >= 0.999) flashUntil = performance.now() + 350
+      const header = meterRef.current?.closest('.track-header')
+      header?.classList.toggle('track-peak-flash', performance.now() < flashUntil)
       raf = requestAnimationFrame(draw)
     }
     draw()
-    return () => cancelAnimationFrame(raf)
+    return () => {
+      cancelAnimationFrame(raf)
+      meterRef.current?.closest('.track-header')?.classList.remove('track-peak-flash')
+    }
   }, [track.id])
 
   const gainAt = (clientX: number): number => {

@@ -46,6 +46,8 @@ function keyOf(uid: string): string {
 }
 
 export async function scanExternalPlugins(): Promise<void> {
+  // Module-scope callers run under vitest too, where there is no window.
+  if (typeof window === 'undefined') return
   const api = window.superdaw
   if (!api?.vst3Scan) return
   scanned = true

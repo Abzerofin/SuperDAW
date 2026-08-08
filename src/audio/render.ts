@@ -173,10 +173,20 @@ function scheduleSources(
   }
 }
 
+/** Offline mixdown to encoded 16-bit WAV bytes. */
 export async function renderMixdown(
   state: ProjectState,
   assets: AssetSourceLike
 ): Promise<Uint8Array | null> {
+  const mixed = await renderMixdownChannels(state, assets)
+  return mixed ? encodeWavPcm16(mixed.channels, mixed.sampleRate) : null
+}
+
+/** Offline mixdown to raw per-channel samples (for non-WAV encoders). */
+export async function renderMixdownChannels(
+  state: ProjectState,
+  assets: AssetSourceLike
+): Promise<{ channels: Float32Array[]; sampleRate: number } | null> {
   const endTicks = projectEndTicks(state)
   if (endTicks <= 0) return null
   const tps = ticksPerSecond(state.tempo)
@@ -235,7 +245,28 @@ export async function renderMixdown(
   for (let ch = 0; ch < rendered.numberOfChannels; ch++) {
     channels.push(rendered.getChannelData(ch))
   }
-  return encodeWavPcm16(channels, rendered.sampleRate)
+  return { channels, sampleRate: rendered.sampleRate }
+}
+
+/**
+ * One track's contribution to the master, rendered offline: the mixdown
+ * of the project with the track SOLOED (and nothing muted), so its folder
+ * buses, automation and the master volume all apply exactly as heard.
+ * Null for an empty project or an unknown track.
+ */
+export function renderTrackChannels(
+  state: ProjectState,
+  trackId: TrackId,
+  assets: AssetSourceLike
+): Promise<{ channels: Float32Array[]; sampleRate: number } | null> {
+  if (!state.tracks[trackId]) return Promise.resolve(null)
+  const tracks = Object.fromEntries(
+    Object.entries(state.tracks).map(([id, track]) => [
+      id,
+      { ...track, soloed: id === trackId, muted: false }
+    ])
+  )
+  return renderMixdownChannels({ ...state, tracks }, assets)
 }
 
 /**

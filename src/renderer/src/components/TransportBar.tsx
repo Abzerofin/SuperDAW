@@ -43,7 +43,9 @@ export function TransportBar(): React.JSX.Element {
           ⏮
         </button>
         <PlayButton />
+        <StopButton />
         <RecordButton />
+        <SongLoopButton />
         <PositionDisplay />
         <TempoField tempo={state.tempo} />
         <TimeSignatureField signature={state.timeSignature} />
@@ -93,10 +95,43 @@ function PlayButton(): React.JSX.Element {
   return (
     <button
       className={`tbtn tbtn-play ${transport.isPlaying ? 'tbtn-active' : ''}`}
-      title="Play/Stop (Space)"
-      onClick={() => transport.toggle()}
+      title="Play / stop and return (Space) · Shift+Space stops at the beginning"
+      onClick={() => transport.toggleReturn()}
     >
-      {transport.isPlaying ? '■' : '▶'}
+      ▶
+    </button>
+  )
+}
+
+function StopButton(): React.JSX.Element {
+  const [, force] = useReducer((c: number) => c + 1, 0)
+  useEffect(() => transport.subscribe(force), [])
+  return (
+    <button
+      className="tbtn"
+      title="Stop and return to where play began · press again for the song start"
+      onClick={() => transport.stopReturn()}
+    >
+      ■
+    </button>
+  )
+}
+
+function SongLoopButton(): React.JSX.Element {
+  const [, force] = useReducer((c: number) => c + 1, 0)
+  useEffect(() => transport.subscribe(force), [])
+  const on = transport.songLoopEnabled
+  return (
+    <button
+      className={`tbtn ${on ? 'tbtn-active' : ''}`}
+      title={
+        on
+          ? 'Song loop ON — playback wraps to the start at the end of the song'
+          : 'Loop the whole song: wrap to the start when the end is reached'
+      }
+      onClick={() => transport.setSongLoop(!on)}
+    >
+      ⟲
     </button>
   )
 }
