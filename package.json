@@ -25,6 +25,12 @@
       "out/**",
       "package.json"
     ],
+    "extraResources": [
+      {
+        "from": "native/vst3host/build/Release/vst3host.node",
+        "to": "native/vst3host/build/Release/vst3host.node"
+      }
+    ],
     "win": {
       "target": "dir",
       "signAndEditExecutable": false
