@@ -1,4 +1,5 @@
-import { app, BrowserWindow, ipcMain } from 'electron'
+import { app, ipcMain } from 'electron'
+import type { WebContents } from 'electron'
 import { existsSync } from 'node:fs'
 import { join } from 'node:path'
 
@@ -53,7 +54,7 @@ interface Vst3Addon {
     path: string,
     uid: string,
     options: {
-      hwnd: Buffer
+      title?: string
       state?: Buffer
       onEvent: (event: { type: string; a: number; b: number }) => void
     }
@@ -157,8 +158,34 @@ function scan(): Vst3Plugin[] {
   return plugins
 }
 
-/** Open editor windows by plugin-instance id (one editor per insert). */
-const editors = new Map<string, { win: BrowserWindow; editor: number }>()
+/**
+ * Open editors by plugin-instance id. The WINDOW is the addon's own native
+ * top-level (an Electron window cannot display a plugin's GL/GDI painting
+ * — Chromium windows have no classic paint surface); main only routes
+ * events and owns the close/capture sequence.
+ */
+const editors = new Map<string, number>()
+
+/** Capture the final chunk and tear the editor down. Idempotent. */
+function finalizeEditor(host: Vst3Addon, instanceId: string, sender: WebContents): void {
+  const editorHandle = editors.get(instanceId)
+  if (editorHandle === undefined) return
+  editors.delete(instanceId)
+  try {
+    const final = host.closeEditor(editorHandle)
+    // The chunk becomes document state — for GUI-only plugins it is the
+    // only place their edits exist.
+    if (final.component && !sender.isDestroyed()) {
+      sender.send('vst3:editor-event', {
+        instanceId,
+        kind: 'state',
+        stateBlob: JSON.stringify({ component: final.component.toString('base64') })
+      })
+    }
+  } catch {
+    // The plugin failing during teardown must not take the app down.
+  }
+}
 
 export function registerVst3Ipc(): void {
   ipcMain.handle(
@@ -169,42 +196,19 @@ export function registerVst3Ipc(): void {
     ): Promise<{ opened?: boolean; error?: string }> => {
       const host = loadAddon()
       if (!host) return { error: loadError ?? 'vst3 host unavailable' }
-      const existing = editors.get(args.instanceId)
-      if (existing) {
-        existing.win.focus()
-        return { opened: true }
-      }
+      if (editors.has(args.instanceId)) return { opened: true } // already open
       const plugin = scan().find((p) => p.uid === args.uid)
       if (!plugin) return { error: `plugin not installed: ${args.uid}` }
 
       const sender = event.sender
-      const win = new BrowserWindow({
-        width: 480,
-        height: 360,
-        useContentSize: true,
-        resizable: false,
-        minimizable: false,
-        maximizable: false,
-        fullscreenable: false,
-        autoHideMenuBar: true,
-        title: args.title ?? plugin.name,
-        backgroundColor: '#141518',
-        show: false
-      })
-
-      let editorHandle: number | null = null
       try {
         const opened = host.openEditor(plugin.path, plugin.uid, {
-          hwnd: win.getNativeWindowHandle(),
+          title: args.title ?? plugin.name,
           state: chunkFromBlob(args.stateBlob),
           onEvent: (e) => {
-            if (e.type === 'resize') {
-              // Spec handshake: host resizes the window, THEN tells the
-              // view its new size.
-              if (!win.isDestroyed()) win.setContentSize(Math.round(e.a), Math.round(e.b))
-              if (editorHandle !== null) {
-                host.editorResized(editorHandle, Math.round(e.a), Math.round(e.b))
-              }
+            // The user closed the editor window: capture state, then die.
+            if (e.type === 'close') {
+              finalizeEditor(host, args.instanceId, sender)
               return
             }
             // begin/edit/end knob gestures → the renderer turns them into
@@ -220,42 +224,19 @@ export function registerVst3Ipc(): void {
           }
         })
         if (opened.error || opened.editor === undefined) {
-          win.destroy()
           return { error: opened.error ?? 'could not open editor' }
         }
-        editorHandle = opened.editor
-        if (opened.width && opened.height) win.setContentSize(opened.width, opened.height)
+        editors.set(args.instanceId, opened.editor)
+        return { opened: true }
       } catch (error) {
-        win.destroy()
         return { error: error instanceof Error ? error.message : String(error) }
       }
-
-      editors.set(args.instanceId, { win, editor: editorHandle })
-      // Closing the window is where GUI-only plugins' edits get saved:
-      // capture the final chunk and hand it to the renderer as document
-      // state.
-      win.on('closed', () => {
-        editors.delete(args.instanceId)
-        try {
-          const final = host.closeEditor(editorHandle!)
-          if (final.component && !sender.isDestroyed()) {
-            sender.send('vst3:editor-event', {
-              instanceId: args.instanceId,
-              kind: 'state',
-              stateBlob: JSON.stringify({ component: final.component.toString('base64') })
-            })
-          }
-        } catch {
-          // The plugin failing during teardown must not take the app down.
-        }
-      })
-      win.show()
-      return { opened: true }
     }
   )
 
-  ipcMain.handle('vst3:close-editor', async (_event, instanceId: string): Promise<void> => {
-    editors.get(instanceId)?.win.close()
+  ipcMain.handle('vst3:close-editor', async (event, instanceId: string): Promise<void> => {
+    const host = loadAddon()
+    if (host) finalizeEditor(host, instanceId, event.sender)
   })
 
   ipcMain.handle('vst3:scan', async (): Promise<Vst3Plugin[]> => scan())

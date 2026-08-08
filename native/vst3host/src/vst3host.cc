@@ -696,6 +696,10 @@ Napi::Object CloseInstance(const Napi::CallbackInfo& info) {
 class EditorHost : public IComponentHandler, public IPlugFrame {
  public:
   Napi::ThreadSafeFunction tsfn;
+#ifdef _WIN32
+  /** The editor's own top-level window (ours, not Electron's). */
+  HWND window = nullptr;
+#endif
 
   tresult PLUGIN_API queryInterface(const TUID _iid, void** obj) override {
     QUERY_INTERFACE(_iid, obj, FUnknown::iid, IComponentHandler)
@@ -722,15 +726,24 @@ class EditorHost : public IComponentHandler, public IPlugFrame {
   }
   tresult PLUGIN_API restartComponent(int32) override { return kResultOk; }
 
-  tresult PLUGIN_API resizeView(IPlugView*, ViewRect* rect) override {
+  tresult PLUGIN_API resizeView(IPlugView* view, ViewRect* rect) override {
     if (!rect) return kInvalidArgument;
-    // Per spec the HOST resizes the window, then calls onSize — JS resizes
-    // the BrowserWindow and calls editorResized(), which does the onSize.
-    emit("resize", rect->getWidth(), rect->getHeight());
+    // Per spec the HOST resizes the window, then tells the view. The
+    // window is ours, so the whole handshake happens right here.
+#ifdef _WIN32
+    if (window) {
+      RECT frame{0, 0, rect->getWidth(), rect->getHeight()};
+      AdjustWindowRect(&frame, static_cast<DWORD>(GetWindowLongW(window, GWL_STYLE)),
+                       FALSE);
+      SetWindowPos(window, nullptr, 0, 0, frame.right - frame.left,
+                   frame.bottom - frame.top,
+                   SWP_NOMOVE | SWP_NOZORDER | SWP_NOACTIVATE);
+    }
+#endif
+    if (view) view->onSize(rect);
     return kResultOk;
   }
 
- private:
   void emit(const char* type, double a, double b) {
     if (!tsfn) return;
     std::string kind(type);
@@ -743,6 +756,36 @@ class EditorHost : public IComponentHandler, public IPlugFrame {
     });
   }
 };
+
+#ifdef _WIN32
+/** Editor hosts by their window, for the WndProc. Main-thread only. */
+std::map<HWND, EditorHost*> gWndHosts;
+
+/**
+ * Closing the window must NOT destroy it here: the final state chunk has
+ * to be captured first, so WM_CLOSE only tells JS, and JS comes back
+ * through closeEditor (capture, then teardown destroys the window).
+ */
+LRESULT CALLBACK EditorWndProc(HWND hwnd, UINT msg, WPARAM w, LPARAM l) {
+  if (msg == WM_CLOSE) {
+    auto found = gWndHosts.find(hwnd);
+    if (found != gWndHosts.end()) found->second->emit("close", 0, 0);
+    return 0;
+  }
+  return DefWindowProcW(hwnd, msg, w, l);
+}
+
+std::wstring Utf8ToWide(const std::string& utf8) {
+  if (utf8.empty()) return L"";
+  const int needed =
+      MultiByteToWideChar(CP_UTF8, 0, utf8.data(), static_cast<int>(utf8.size()),
+                          nullptr, 0);
+  std::wstring wide(needed, L'\0');
+  MultiByteToWideChar(CP_UTF8, 0, utf8.data(), static_cast<int>(utf8.size()),
+                      wide.data(), needed);
+  return wide;
+}
+#endif
 
 /**
  * One open plugin editor: its own component + controller, independent of
@@ -759,19 +802,23 @@ struct EditorSession {
   std::unique_ptr<EditorHost> host;
 #ifdef _WIN32
   /**
-   * Our own child window inside the Electron frame, which the plugin
-   * paints into. Attaching straight to the BrowserWindow's HWND does not
-   * work: Chromium's compositor child covers the client area and the
-   * plugin's view ends up invisible beneath it. Our child is forced to
-   * the TOP of the sibling z-order instead.
+   * The editor's own TOP-LEVEL native window. Electron windows are out of
+   * the picture entirely: Chromium creates its windows with
+   * WS_EX_NOREDIRECTIONBITMAP (no classic paint surface — everything goes
+   * through DirectComposition), so a plugin rendering GL/GDI into any
+   * child of one draws into a surface DWM never displays. A plain Win32
+   * top-level window — what classic DAW hosts use — composites normally.
    */
-  HWND child = nullptr;
+  HWND top = nullptr;
 #endif
 
   ~EditorSession() {
     if (view) view->removed();
 #ifdef _WIN32
-    if (child) DestroyWindow(child);
+    if (top) {
+      gWndHosts.erase(top);
+      DestroyWindow(top);
+    }
 #endif
     if (controller) {
       controller->setComponentHandler(nullptr);
@@ -791,12 +838,14 @@ struct EditorSession {
 std::map<int32_t, std::unique_ptr<EditorSession>> gEditors;
 int32_t gNextEditor = 1;
 
-// openEditor(path, uid, { hwnd: Buffer, state?: Buffer, onEvent: fn })
+// openEditor(path, uid, { title?, state?: Buffer, onEvent: fn })
 //   -> { editor, width, height } | { error }
 //
-// Attaches the plugin's own IPlugView to a native window the caller owns.
-// onEvent receives { type: 'begin'|'edit'|'end', a: paramId, b: value }
-// and { type: 'resize', a: width, b: height }.
+// Opens the plugin's own IPlugView in a native top-level window WE create
+// (see EditorSession.top for why it cannot live inside an Electron
+// window). onEvent receives { type: 'begin'|'edit'|'end', a: paramId,
+// b: value } and { type: 'close' } when the user closes the window —
+// the caller must then call closeEditor to capture state and tear down.
 Napi::Object OpenEditor(const Napi::CallbackInfo& info) {
   Napi::Env env = info.Env();
   if (info.Length() < 3 || !info[0].IsString() || !info[1].IsString() ||
@@ -808,15 +857,12 @@ Napi::Object OpenEditor(const Napi::CallbackInfo& info) {
   if (!parsedUid) return Fail(env, "could not parse uid");
 
   Napi::Object options = info[2].As<Napi::Object>();
-  if (!options.Has("hwnd") || !options.Get("hwnd").IsBuffer()) {
-    return Fail(env, "options.hwnd must be a native window handle Buffer");
-  }
   if (!options.Has("onEvent") || !options.Get("onEvent").IsFunction()) {
     return Fail(env, "options.onEvent must be a function");
   }
-  Napi::Buffer<char> hwndBuf = options.Get("hwnd").As<Napi::Buffer<char>>();
-  if (hwndBuf.Length() < sizeof(void*)) return Fail(env, "bad hwnd buffer");
-  void* hwnd = *reinterpret_cast<void* const*>(hwndBuf.Data());
+  const std::string title = options.Has("title") && options.Get("title").IsString()
+                                ? options.Get("title").As<Napi::String>().Utf8Value()
+                                : std::string("Plugin");
 
   auto session = std::make_unique<EditorSession>();
   std::string error;
@@ -877,14 +923,11 @@ Napi::Object OpenEditor(const Napi::CallbackInfo& info) {
   session->view->getSize(&size);
 
 #ifdef _WIN32
-  // The plugin paints into OUR child window, forced above Chromium's
-  // compositor sibling — attaching to the frame HWND itself leaves the
-  // view invisible beneath the web content layer.
   static bool classRegistered = false;
   static const wchar_t* kClass = L"SuperDAWVst3Editor";
   if (!classRegistered) {
     WNDCLASSW wc{};
-    wc.lpfnWndProc = DefWindowProcW;
+    wc.lpfnWndProc = EditorWndProc;
     wc.hInstance = GetModuleHandleW(nullptr);
     wc.lpszClassName = kClass;
     wc.style = CS_DBLCLKS;
@@ -892,22 +935,26 @@ Napi::Object OpenEditor(const Napi::CallbackInfo& info) {
     RegisterClassW(&wc);
     classRegistered = true;
   }
-  HWND parent = static_cast<HWND>(hwnd);
-  session->child = CreateWindowExW(
-      0, kClass, L"", WS_CHILD | WS_VISIBLE | WS_CLIPSIBLINGS, 0, 0,
-      size.getWidth(), size.getHeight(), parent, nullptr,
-      GetModuleHandleW(nullptr), nullptr);
-  if (!session->child) return Fail(env, "could not create editor child window");
-  SetWindowPos(session->child, HWND_TOP, 0, 0, 0, 0,
-               SWP_NOMOVE | SWP_NOSIZE | SWP_SHOWWINDOW);
+  // Fixed-size caption window: plugins drive their size; resizeView is the
+  // only resize path.
+  const DWORD style = WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU | WS_MINIMIZEBOX;
+  RECT frame{0, 0, size.getWidth(), size.getHeight()};
+  AdjustWindowRect(&frame, style, FALSE);
+  session->top = CreateWindowExW(
+      WS_EX_APPWINDOW, kClass, Utf8ToWide(title).c_str(), style, CW_USEDEFAULT,
+      CW_USEDEFAULT, frame.right - frame.left, frame.bottom - frame.top, nullptr,
+      nullptr, GetModuleHandleW(nullptr), nullptr);
+  if (!session->top) return Fail(env, "could not create editor window");
+  gWndHosts[session->top] = session->host.get();
+  session->host->window = session->top;
 
-  if (session->view->attached(session->child, kPlatformTypeHWND) != kResultOk) {
+  if (session->view->attached(session->top, kPlatformTypeHWND) != kResultOk) {
     return Fail(env, "editor refused to attach to the window");
   }
+  ShowWindow(session->top, SW_SHOW);
+  SetForegroundWindow(session->top);
 #else
-  if (session->view->attached(hwnd, kPlatformTypeHWND) != kResultOk) {
-    return Fail(env, "editor refused to attach to the window");
-  }
+  return Fail(env, "editor hosting is Windows-only for now");
 #endif
 
   const int32_t handle = gNextEditor++;
@@ -928,11 +975,6 @@ Napi::Object EditorResized(const Napi::CallbackInfo& info) {
   if (found == gEditors.end()) return Fail(env, "unknown editor");
   const int width = info[1].As<Napi::Number>().Int32Value();
   const int height = info[2].As<Napi::Number>().Int32Value();
-#ifdef _WIN32
-  if (found->second->child) {
-    MoveWindow(found->second->child, 0, 0, width, height, TRUE);
-  }
-#endif
   ViewRect rect(0, 0, width, height);
   found->second->view->onSize(&rect);
   return result;
