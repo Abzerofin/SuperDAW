@@ -5,7 +5,7 @@ import { transport } from '@/state/transport'
 import { panels } from '@/state/panels'
 import { paletteUi, usePaletteUi } from '@/state/paletteUi'
 import { settingsUi } from '@/state/settingsUi'
-import { fxUi } from '@/state/fxUi'
+import { selection } from '@/state/selection'
 import { routingUi } from '@/state/routingUi'
 import { commentUi } from '@/state/commentUi'
 import { appShell } from '@/state/appShell'
@@ -113,7 +113,10 @@ export function CommandPalette(): React.JSX.Element | null {
         category: 'Track',
         label: track.name,
         detail: `${track.kind}${track.frozenAssetId ? ' · frozen' : ''} — open FX`,
-        action: () => fxUi.open(id)
+        action: () => {
+          selection.selectTrack(id)
+          panels.setBottom('effects')
+        }
       })
       out.push({
         id: `mixer:${id}`,
@@ -137,7 +140,10 @@ export function CommandPalette(): React.JSX.Element | null {
         category: 'Plugin',
         label: instance.descriptor.name,
         detail: track ? `on ${track.name}` : undefined,
-        action: () => fxUi.open(instance.trackId)
+        action: () => {
+          selection.selectTrack(instance.trackId)
+          panels.setBottom('effects')
+        }
       })
     }
 

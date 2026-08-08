@@ -1,8 +1,9 @@
 import { useProjectState } from '@/state/hooks'
-import { useSelectedClipId } from '@/state/selection'
+import { useSelectedClipId, useSelectedTrackId } from '@/state/selection'
 import { panels, usePanels } from '@/state/panels'
 import { pianoRollUi, usePianoRollUi } from '@/state/pianoRollUi'
 import { FileBay } from './bay/FileBay'
+import { EffectsDock } from './fx/EffectsDock'
 import { MixerPanel } from './mixer/MixerPanel'
 import { PianoRoll } from './pianoroll/PianoRoll'
 
@@ -32,15 +33,37 @@ export function BottomDock(): React.JSX.Element {
         >
           Mixer
         </button>
+        <EffectsTab />
         <PianoTab />
       </div>
 
       {panelState.bottomPanel === 'files' && <FileBay />}
       {panelState.bottomPanel === 'mixer' && <MixerPanel />}
+      {panelState.bottomPanel === 'effects' && <EffectsDock />}
       {panelState.bottomPanel === 'pianoroll' && rollState.clipId && (
         <PianoRoll clipId={rollState.clipId} />
       )}
     </>
+  )
+}
+
+function EffectsTab(): React.JSX.Element {
+  const panelState = usePanels()
+  const selectedTrackId = useSelectedTrackId()
+  const state = useProjectState()
+  const track = selectedTrackId ? state.tracks[selectedTrackId] : undefined
+  return (
+    <button
+      className={`dock-tab ${panelState.bottomPanel === 'effects' ? 'dock-tab-active' : ''}`}
+      title={
+        track
+          ? `Effects — ${track.name}'s insert chain`
+          : 'Effects — select a track to edit its insert chain'
+      }
+      onClick={() => panels.toggleBottom('effects')}
+    >
+      Effects
+    </button>
   )
 }
 

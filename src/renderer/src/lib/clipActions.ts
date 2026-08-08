@@ -26,7 +26,7 @@ function createCopy(source: { clip: Clip; notes: Note[] }, trackId: string, star
   const clip: Clip = { ...source.clip, id: newId('clp'), trackId, start: Math.max(0, start) }
   const notes: Note[] = source.notes.map((n) => ({ ...n, id: newId('not'), clipId: clip.id }))
   projectStore.dispatch({ type: 'clip/create', clip, notes })
-  selection.select(clip.id)
+  selection.select(clip.id, clip.trackId)
 }
 
 export function copySelectedClip(): boolean {

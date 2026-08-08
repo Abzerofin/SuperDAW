@@ -4,7 +4,8 @@ import { MAX_GAIN } from '@core/model/types'
 import { projectStore } from '@/state/projectStore'
 import { useProjectState } from '@/state/hooks'
 import { audioEngine } from '@/state/audioInstance'
-import { fxUi } from '@/state/fxUi'
+import { panels } from '@/state/panels'
+import { selection } from '@/state/selection'
 import { capturePointer } from '@/lib/pointer'
 import { Knob } from './Knob'
 
@@ -35,11 +36,22 @@ export function MixerPanel(): React.JSX.Element {
 
 function TrackStrip({ track }: { track: Track }): React.JSX.Element {
   return (
-    <div className="strip" style={{ '--track-color': track.color } as React.CSSProperties}>
+    <div
+      className="strip"
+      style={{ '--track-color': track.color } as React.CSSProperties}
+      onPointerDown={() => selection.selectTrack(track.id)}
+    >
       <div className="strip-name" title={track.name}>
         {track.name}
       </div>
-      <button className="corner-btn strip-fx" onClick={() => fxUi.toggle(track.id)}>
+      <button
+        className="corner-btn strip-fx"
+        title="Effects (opens the Effects tab)"
+        onClick={() => {
+          selection.selectTrack(track.id)
+          panels.setBottom('effects')
+        }}
+      >
         FX
       </button>
       <Knob

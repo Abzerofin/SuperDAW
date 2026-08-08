@@ -10,7 +10,7 @@ import { projectStore } from '@/state/projectStore'
 import { useProjectState } from '@/state/hooks'
 import { usePluginRegistry } from '@/state/pluginRegistryHook'
 import { audioEngine } from '@/state/audioInstance'
-import { fxUi } from '@/state/fxUi'
+import { useSelectedTrackId } from '@/state/selection'
 import {
   externalHostAvailable,
   externalParamDefs,
@@ -18,21 +18,39 @@ import {
   externalScanError,
   hasScanned,
   scanExternalPlugins,
-  subscribeExternalPlugins
+  subscribeExternalPlugins,
+  type ExternalPluginEntry
 } from '@/state/externalPlugins'
 import { openPluginEditor } from '@/state/vst3Editors'
 import { capturePointer } from '@/lib/pointer'
 import { PluginPlaceholder } from './PluginPlaceholder'
 
 /**
- * Per-track FX panel: the built-in synth's controls (MIDI tracks) and the
- * insert chain (add, bypass, remove, tweak). Knobs preview live through
- * the engine and dispatch ONE op on release.
+ * The Effects tab of the bottom dock: the SELECTED track's synth (MIDI)
+ * and insert chain as a horizontal rack, plus a "+" card that browses the
+ * whole plugin base (builtins and every installed VST3 effect). Replaces
+ * the old per-track FX popup. Knobs preview live through the engine and
+ * dispatch ONE op on release.
  */
-export function FxPanel({ track }: { track: Track }): React.JSX.Element {
+export function EffectsDock(): React.JSX.Element {
   const state = useProjectState()
-  const rootRef = useRef<HTMLDivElement>(null)
-  const insertsRef = useRef<HTMLDivElement>(null)
+  const selectedTrackId = useSelectedTrackId()
+  const track = selectedTrackId ? state.tracks[selectedTrackId] : undefined
+
+  if (!track) {
+    return (
+      <div className="fx-dock">
+        <div className="bay-empty">Select a track to edit its effects</div>
+      </div>
+    )
+  }
+  // Keyed by track so drag state can never leak across a selection change.
+  return <TrackEffects key={track.id} track={track} />
+}
+
+function TrackEffects({ track }: { track: Track }): React.JSX.Element {
+  const state = useProjectState()
+  const chainRef = useRef<HTMLDivElement>(null)
   const inserts = pluginsOfTrack(state, track.id)
 
   // Reorder drag: the previewed order lives here and only becomes a
@@ -51,14 +69,15 @@ export function FxPanel({ track }: { track: Track }): React.JSX.Element {
   }
 
   const moveDrag = (e: React.PointerEvent): void => {
-    if (!drag || !insertsRef.current) return
-    // Rows are rendered in the previewed order, so crossing a row's
-    // midpoint is what moves the dragged insert into that slot.
-    const rows = Array.from(insertsRef.current.children)
-    let target = rows.length - 1
-    for (let i = 0; i < rows.length; i++) {
-      const rect = rows[i].getBoundingClientRect()
-      if (e.clientY < rect.top + rect.height / 2) {
+    if (!drag || !chainRef.current) return
+    // Cards are rendered in the previewed order; crossing a card's
+    // horizontal midpoint moves the dragged insert into that slot.
+    const cards = Array.from(chainRef.current.querySelectorAll('.fx-insert'))
+    if (cards.length === 0) return
+    let target = cards.length - 1
+    for (let i = 0; i < cards.length; i++) {
+      const rect = cards[i].getBoundingClientRect()
+      if (e.clientX < rect.left + rect.width / 2) {
         target = i
         break
       }
@@ -79,12 +98,76 @@ export function FxPanel({ track }: { track: Track }): React.JSX.Element {
     setDrag(null)
   }
 
+  return (
+    <div className="fx-dock">
+      <div className="fx-dock-head">
+        <span className="proll-dot" style={{ background: track.color }} />
+        <span className="fx-dock-title">{track.name}</span>
+        <span className="statusbar-dim">
+          {track.kind === 'folder' ? 'bus effects' : track.kind === 'midi' ? 'instrument & effects' : 'effects'}
+        </span>
+        {track.frozenAssetId && (
+          <span className="statusbar-dim">· frozen — inserts baked into the render</span>
+        )}
+      </div>
+      <div className="fx-dock-chain" ref={chainRef}>
+        {track.kind === 'midi' && (
+          <div className="fx-card">
+            <SynthSection track={track} />
+          </div>
+        )}
+        {shown.map((instance) => (
+          <div
+            key={instance.id}
+            className={`fx-card fx-insert ${drag?.id === instance.id ? 'fx-insert-dragging' : ''}`}
+          >
+            <button
+              className="fx-grip"
+              title="Drag to reorder"
+              onPointerDown={(e) => startDrag(e, instance.id)}
+              onPointerMove={moveDrag}
+              onPointerUp={endDrag}
+              onPointerCancel={endDrag}
+            >
+              ⠿
+            </button>
+            <div className="fx-insert-body">
+              <PluginSection instance={instance} />
+            </div>
+          </div>
+        ))}
+        <AddPluginCard track={track} inserts={inserts} />
+      </div>
+    </div>
+  )
+}
+
+/** The "+" card: the entire plugin base, searchable. */
+function AddPluginCard({
+  track,
+  inserts
+}: {
+  track: Track
+  inserts: PluginInstance[]
+}): React.JSX.Element {
+  const [open, setOpen] = useState(false)
+  const [query, setQuery] = useState('')
+  const rootRef = useRef<HTMLDivElement>(null)
+  const [external, setExternal] = useState(externalPlugins)
+
   useEffect(() => {
+    const unsubscribe = subscribeExternalPlugins(() => setExternal(externalPlugins()))
+    if (!hasScanned()) void scanExternalPlugins()
+    return unsubscribe
+  }, [])
+
+  useEffect(() => {
+    if (!open) return
     const onPointerDown = (e: PointerEvent): void => {
-      if (rootRef.current && !rootRef.current.contains(e.target as Node)) fxUi.close()
+      if (rootRef.current && !rootRef.current.contains(e.target as Node)) setOpen(false)
     }
     const onKeyDown = (e: KeyboardEvent): void => {
-      if (e.key === 'Escape') fxUi.close()
+      if (e.key === 'Escape') setOpen(false)
     }
     window.addEventListener('pointerdown', onPointerDown, true)
     window.addEventListener('keydown', onKeyDown)
@@ -92,7 +175,7 @@ export function FxPanel({ track }: { track: Track }): React.JSX.Element {
       window.removeEventListener('pointerdown', onPointerDown, true)
       window.removeEventListener('keydown', onKeyDown)
     }
-  }, [])
+  }, [open])
 
   const addPlugin = (descriptor: PluginDescriptor): void => {
     const maxRank = inserts.reduce((max, p) => Math.max(max, p.rank), 0)
@@ -108,127 +191,87 @@ export function FxPanel({ track }: { track: Track }): React.JSX.Element {
         stateBlob: null
       }
     })
+    setOpen(false)
+    setQuery('')
   }
 
-  return (
-    <div className="fx-panel" ref={rootRef} onPointerDown={(e) => e.stopPropagation()}>
-      <div className="fx-head">
-        <span className="fx-title">
-          <span className="proll-dot" style={{ background: track.color }} />
-          {track.name}
-        </span>
-        <button className="proll-close" title="Close (Esc)" onClick={() => fxUi.close()}>
-          ×
-        </button>
-      </div>
+  const addVst3 = async (plugin: ExternalPluginEntry): Promise<void> => {
+    // Snapshot the plugin's parameters into the descriptor at add-time,
+    // so every peer clamps identically — including peers that do not have
+    // the plugin installed at all.
+    const paramDefs = await externalParamDefs(plugin.uid)
+    addPlugin({
+      format: 'vst3',
+      uid: plugin.uid,
+      name: plugin.name,
+      vendor: plugin.vendor,
+      version: plugin.version,
+      ...(paramDefs && Object.keys(paramDefs).length > 0 ? { paramDefs } : {})
+    })
+  }
 
-      <div className="fx-body">
-        {track.kind === 'midi' && <SynthSection track={track} />}
+  const q = query.trim().toLowerCase()
+  const matches = (name: string, vendor = ''): boolean =>
+    q === '' || name.toLowerCase().includes(q) || vendor.toLowerCase().includes(q)
 
-        <div className="fx-inserts" ref={insertsRef}>
-          {shown.map((instance) => (
-            <div
-              key={instance.id}
-              className={`fx-insert ${drag?.id === instance.id ? 'fx-insert-dragging' : ''}`}
-            >
-              <button
-                className="fx-grip"
-                title="Drag to reorder"
-                onPointerDown={(e) => startDrag(e, instance.id)}
-                onPointerMove={moveDrag}
-                onPointerUp={endDrag}
-                onPointerCancel={endDrag}
-              >
-                ⠿
-              </button>
-              <div className="fx-insert-body">
-                <PluginSection instance={instance} />
-              </div>
-            </div>
-          ))}
-        </div>
-
-        <div className="fx-add">
-          {BUILTIN_EFFECT_DESCRIPTORS.map((descriptor) => (
-            <button
-              key={descriptor.uid}
-              className="fx-add-btn"
-              onClick={() => addPlugin(descriptor)}
-            >
-              + {descriptor.name}
-            </button>
-          ))}
-        </div>
-
-        <Vst3Picker onAdd={addPlugin} />
-      </div>
-    </div>
-  )
-}
-
-/**
- * Installed VST3 effects. They cannot run in the renderer's audio graph
- * (see native/README.md), so an added one shows as a placeholder until the
- * track is frozen — which is where its audio is actually rendered. The
- * copy says so rather than letting it look broken.
- */
-function Vst3Picker({
-  onAdd
-}: {
-  onAdd: (descriptor: PluginDescriptor) => void
-}): React.JSX.Element | null {
-  const [plugins, setPlugins] = useState(externalPlugins)
-
-  useEffect(() => {
-    const unsubscribe = subscribeExternalPlugins(() => setPlugins(externalPlugins()))
-    if (!hasScanned()) void scanExternalPlugins()
-    return unsubscribe
-  }, [])
-
+  const builtins = BUILTIN_EFFECT_DESCRIPTORS.filter((d) => matches(d.name))
   // Effects only: instruments ignore audio input, and the insert chain is
   // not where they belong.
-  const effects = plugins.filter((p) => p.subCategories.startsWith('Fx'))
-
-  // Say WHY there is nothing to add. Rendering nothing at all is
-  // indistinguishable from "this feature does not exist", which is
-  // exactly how it reads in the browser build.
-  if (effects.length === 0) {
-    const reason = !externalHostAvailable()
-      ? 'VST3 · desktop app only (npm run dev)'
-      : (externalScanError() ?? 'VST3 · no effects found')
-    return (
-      <div className="fx-add fx-add-vst3">
-        <div className="fx-add-label statusbar-dim">{reason}</div>
-      </div>
-    )
-  }
+  const vst3Effects = external.filter(
+    (p) => p.subCategories.startsWith('Fx') && matches(p.name, p.vendor)
+  )
+  const vst3Reason = !externalHostAvailable()
+    ? 'VST3 · desktop app only (npm run dev)'
+    : (externalScanError() ?? (external.length === 0 ? 'VST3 · no effects found' : null))
 
   return (
-    <div className="fx-add fx-add-vst3">
-      <div className="fx-add-label statusbar-dim">VST3</div>
-      {effects.map((plugin) => (
-        <button
-          key={plugin.uid}
-          className="fx-add-btn"
-          title={`${plugin.vendor} · ${plugin.version}`}
-          onClick={async () => {
-            // Snapshot the plugin's parameters into the descriptor at
-            // add-time, so every peer clamps identically — including peers
-            // that do not have the plugin installed at all.
-            const paramDefs = await externalParamDefs(plugin.uid)
-            onAdd({
-              format: 'vst3',
-              uid: plugin.uid,
-              name: plugin.name,
-              vendor: plugin.vendor,
-              version: plugin.version,
-              ...(paramDefs && Object.keys(paramDefs).length > 0 ? { paramDefs } : {})
-            })
-          }}
-        >
-          + {plugin.name}
-        </button>
-      ))}
+    <div className="fx-card fx-add-card" ref={rootRef}>
+      <button className="fx-add-open" title="Add an effect" onClick={() => setOpen((v) => !v)}>
+        +
+      </button>
+      {open && (
+        <div className="fx-browser" onPointerDown={(e) => e.stopPropagation()}>
+          <input
+            className="fx-browser-search"
+            placeholder="Search plugins…"
+            autoFocus
+            value={query}
+            onChange={(e) => setQuery(e.target.value)}
+          />
+          <div className="fx-browser-list">
+            {builtins.length > 0 && <div className="fx-browser-group statusbar-dim">Built-in</div>}
+            {builtins.map((descriptor) => (
+              <button
+                key={descriptor.uid}
+                className="fx-browser-item"
+                onClick={() => addPlugin(descriptor)}
+              >
+                <span>{descriptor.name}</span>
+                <span className="statusbar-dim">SuperDAW</span>
+              </button>
+            ))}
+            {(vst3Effects.length > 0 || vst3Reason) && (
+              <div className="fx-browser-group statusbar-dim">
+                {vst3Reason ?? 'VST3 · rendered ahead during playback'}
+              </div>
+            )}
+            {vst3Effects.map((plugin) => (
+              <button
+                key={plugin.uid}
+                className="fx-browser-item"
+                title={`${plugin.vendor} · ${plugin.version}`}
+                onClick={() => void addVst3(plugin)}
+              >
+                <span>{plugin.name}</span>
+                <span className="statusbar-dim">{plugin.vendor}</span>
+              </button>
+            ))}
+            {builtins.length === 0 && vst3Effects.length === 0 && (
+              <div className="bay-empty">No plugins match “{query}”</div>
+            )}
+          </div>
+        </div>
+      )}
     </div>
   )
 }
@@ -259,12 +302,7 @@ function SynthSection({ track }: { track: Track }): React.JSX.Element {
       {Object.entries(SYNTH_DEFS)
         .filter(([key]) => key !== 'wave')
         .map(([key, def]) => (
-          <ParamSlider
-            key={key}
-            def={def}
-            value={params[key]}
-            onCommit={(v) => setParam(key, v)}
-          />
+          <ParamSlider key={key} def={def} value={params[key]} onCommit={(v) => setParam(key, v)} />
         ))}
     </div>
   )
@@ -325,9 +363,7 @@ function PluginSection({ instance }: { instance: PluginInstance }): React.JSX.El
         <button
           className="comment-delete fx-remove"
           title="Remove plugin"
-          onClick={() =>
-            projectStore.dispatch({ type: 'plugin/remove', instanceId: instance.id })
-          }
+          onClick={() => projectStore.dispatch({ type: 'plugin/remove', instanceId: instance.id })}
         >
           ×
         </button>

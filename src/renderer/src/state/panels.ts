@@ -7,7 +7,7 @@ import { projectStore } from './projectStore'
  * is hidden accumulate; opening the tab clears them.
  */
 export type RightPanel = 'activity' | 'chat' | null
-export type BottomPanel = 'files' | 'mixer' | 'pianoroll' | null
+export type BottomPanel = 'files' | 'mixer' | 'effects' | 'pianoroll' | null
 
 class PanelStore {
   rightPanel: RightPanel = 'activity'

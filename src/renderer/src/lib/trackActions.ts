@@ -14,6 +14,7 @@ import { encodeWavPcm16 } from '@audio/wav'
 import { projectStore } from '@/state/projectStore'
 import { assetStore } from '@/state/audioInstance'
 import { externalPluginHost } from '@/state/externalPlugins'
+import { selection } from '@/state/selection'
 
 /**
  * Track-level actions behind the header context menu. Everything persistent
@@ -26,10 +27,11 @@ import { externalPluginHost } from '@/state/externalPlugins'
 export function createTrack(kind: TrackKind): void {
   const count = projectStore.state.trackOrder.length
   const label = kind === 'audio' ? 'Audio' : kind === 'midi' ? 'MIDI' : 'Folder'
+  const trackId = newId('trk')
   projectStore.dispatch({
     type: 'track/create',
     track: {
-      id: newId('trk'),
+      id: trackId,
       kind,
       name: `${label} ${count + 1}`,
       color: nextTrackColor(count),
@@ -47,6 +49,9 @@ export function createTrack(kind: TrackKind): void {
     notes: [],
     plugins: []
   })
+  // A brand-new track is what you're about to work on — the Effects dock
+  // follows the selection.
+  selection.selectTrack(trackId)
 }
 
 /** Tracks currently rendering a freeze (ephemeral; drives the ❄ spinner). */

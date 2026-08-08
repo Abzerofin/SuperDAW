@@ -8,14 +8,14 @@ import { useProjectState } from '@/state/hooks'
 import { commentUi, useCommentUi } from '@/state/commentUi'
 import { automationUi } from '@/state/automationUi'
 import { recording, useRecording } from '@/state/recording'
-import { fxUi, useFxUi } from '@/state/fxUi'
+import { panels } from '@/state/panels'
+import { selection, useSelectedTrackId } from '@/state/selection'
 import { folderUi, useFolderUi } from '@/state/folderUi'
 import { routingUi } from '@/state/routingUi'
 import { trackInputs, useTrackInputs } from '@/state/trackInputs'
 import { trackInputUi, useTrackInputUi } from '@/state/trackInputUi'
 import { freezeTrack, loadTrackPreset, saveTrackPreset, unfreezeTrack } from '@/lib/trackActions'
 import { CommentThread } from '../comments/CommentThread'
-import { FxPanel } from '../fx/FxPanel'
 import { TrackInputPanel } from '../track/TrackInputPanel'
 import { TrackStripControls } from './TrackStripControls'
 
@@ -45,7 +45,7 @@ export function TrackHeader({
     (c) => c.parentId === null && !c.resolved && c.anchor.kind === 'track' && c.anchor.id === track.id
   ).length
   const popoverOpen = openAnchor?.kind === 'track' && openAnchor.id === track.id
-  const fxOpen = useFxUi().trackId === track.id
+  const isSelected = useSelectedTrackId() === track.id
   const hasFx = Object.values(state.plugins).some((p) => p.trackId === track.id)
   const isFolder = track.kind === 'folder'
   const frozen = track.frozenAssetId !== null
@@ -95,8 +95,12 @@ export function TrackHeader({
     <div
       className={`track-header ${frozen ? 'track-header-frozen' : ''} ${
         compact ? 'track-header-compact' : ''
-      }`}
+      } ${isSelected ? 'track-header-selected' : ''}`}
       style={{ borderLeftColor: track.color, paddingLeft: 9 + depth * 14 }}
+      // Any interaction with a header selects its track (the Effects dock
+      // follows the selection), including right-click and control clicks
+      // that bubble up.
+      onPointerDown={() => selection.selectTrack(track.id)}
       onContextMenu={(e) => {
         e.preventDefault()
         e.stopPropagation()
@@ -172,11 +176,6 @@ export function TrackHeader({
           <CommentThread anchor={{ kind: 'track', id: track.id }} />
         </div>
       )}
-      {fxOpen && (
-        <div className="comment-layer-anchor track-comment-popover">
-          <FxPanel track={track} />
-        </div>
-      )}
       {inputOpen && (
         <div className="comment-layer-anchor track-comment-popover">
           <TrackInputPanel track={track} />
@@ -191,17 +190,18 @@ export function TrackHeader({
           {track.kind === 'audio' ? 'AUD' : track.kind === 'midi' ? 'MIDI' : 'FLDR'}
         </span>
         <button
-          className={`track-toggle track-fx ${hasFx || track.kind === 'midi' ? 'track-fx-has' : ''} ${
-            fxOpen ? 'track-toggle-auto' : ''
-          }`}
+          className={`track-toggle track-fx ${hasFx || track.kind === 'midi' ? 'track-fx-has' : ''}`}
           title={
             isFolder
-              ? 'Bus effects'
+              ? 'Bus effects (opens the Effects tab)'
               : track.kind === 'midi'
-                ? 'Instrument & effects — synth, EQ, compressor…'
-                : 'Effects — EQ, compressor, reverb…'
+                ? 'Instrument & effects — synth, EQ, compressor… (opens the Effects tab)'
+                : 'Effects — EQ, compressor, reverb… (opens the Effects tab)'
           }
-          onClick={() => fxUi.toggle(track.id)}
+          onClick={() => {
+            selection.selectTrack(track.id)
+            panels.setBottom('effects')
+          }}
         >
           FX
         </button>
@@ -261,7 +261,10 @@ export function TrackHeader({
           >
             {menuItem(
               isFolder ? 'Bus effects…' : 'Instruments & effects…',
-              () => fxUi.open(track.id),
+              () => {
+                selection.selectTrack(track.id)
+                panels.setBottom('effects')
+              },
               false
             )}
             {canRecord &&

@@ -300,12 +300,12 @@ export function TimelineView(): React.JSX.Element {
     // Frozen tracks are locked: their render would go stale if clips moved.
     // Unfreeze to edit (selection and comments still work).
     if (projectStore.state.tracks[clip.trackId]?.frozenAssetId) {
-      selection.select(clipId)
+      selection.select(clipId, clip.trackId)
       return
     }
     const trackIndex = rowIndexOfTrack.get(clip.trackId) ?? -1
     if (trackIndex === -1) return
-    selection.select(clipId)
+    selection.select(clipId, clip.trackId)
     capturePointer(e)
     setDrag({
       mode,
@@ -627,7 +627,7 @@ export function TimelineView(): React.JSX.Element {
       loopLength: 0
     }
     projectStore.dispatch({ type: 'clip/create', clip, notes: [] })
-    selection.select(clip.id)
+    selection.select(clip.id, clip.trackId)
   }
 
   const onLaneDragOver = (e: React.DragEvent, trackIndex: number): void => {
@@ -918,7 +918,7 @@ export function TimelineView(): React.JSX.Element {
                   onContextMenu={(e) => {
                     e.preventDefault()
                     e.stopPropagation()
-                    selection.select(clip.id)
+                    selection.select(clip.id, clip.trackId)
                     setColorMenu({ clipId: clip.id, x: e.clientX, y: e.clientY })
                   }}
                   onOpenEditor={
