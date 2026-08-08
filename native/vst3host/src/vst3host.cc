@@ -1055,16 +1055,33 @@ Napi::Object MoveEditor(const Napi::CallbackInfo& info) {
   const auto clip = [&](const char* key) {
     return options.Has(key) ? std::max(0, options.Get(key).ToNumber().Int32Value()) : 0;
   };
-  const int clipLeft = clip("clipLeft");
-  const int clipTop = clip("clipTop");
-  const int clipRight = clip("clipRight");
-  const int clipBottom = clip("clipBottom");
-  if (clipLeft > 0 || clipTop > 0 || clipRight > 0 || clipBottom > 0) {
-    HRGN region = CreateRectRgn(clipLeft, clipTop, std::max(clipLeft, width - clipRight),
-                                std::max(clipTop, height - clipBottom));
-    SetWindowRgn(hwnd, region, TRUE); // the window owns the region now
-  } else {
+  // Visible region in window-local coords: the renderer's clip values...
+  int visLeft = clip("clipLeft");
+  int visTop = clip("clipTop");
+  int visRight = width - clip("clipRight");
+  int visBottom = height - clip("clipBottom");
+  // ...HARD-intersected with the app window's bounds (physical screen
+  // coords) when given. The renderer's geometry can be wrong; the caller's
+  // window bounds are authoritative — a docked overlay must never be able
+  // to leave the app window, whatever the reported dock rect says.
+  const auto bound = [&](const char* key, int fallback) {
+    return options.Has(key) ? options.Get(key).ToNumber().Int32Value() : fallback;
+  };
+  visLeft = std::max(visLeft, bound("boundLeft", bounds.left) - x);
+  visTop = std::max(visTop, bound("boundTop", bounds.top) - y);
+  visRight = std::min(visRight, bound("boundRight", bounds.right) - x);
+  visBottom = std::min(visBottom, bound("boundBottom", bounds.bottom) - y);
+
+  const bool fullyVisible =
+      visLeft <= 0 && visTop <= 0 && visRight >= width && visBottom >= height;
+  if (visRight <= visLeft || visBottom <= visTop) {
+    ShowWindow(hwnd, SW_HIDE); // nothing of it may show
+  } else if (fullyVisible) {
     SetWindowRgn(hwnd, nullptr, TRUE);
+  } else {
+    HRGN region = CreateRectRgn(std::max(0, visLeft), std::max(0, visTop),
+                                std::min(width, visRight), std::min(height, visBottom));
+    SetWindowRgn(hwnd, region, TRUE); // the window owns the region now
   }
 #endif
   return result;

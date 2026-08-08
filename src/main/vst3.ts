@@ -76,6 +76,10 @@ interface Vst3Addon {
       clipTop?: number
       clipRight?: number
       clipBottom?: number
+      boundLeft?: number
+      boundTop?: number
+      boundRight?: number
+      boundBottom?: number
     }
   ): { error?: string }
   setEditorParam(editor: number, paramId: number, value: number): { error?: string }
@@ -240,11 +244,16 @@ function placeDocked(host: Vst3Addon, win: BrowserWindow, instanceId: string): v
   // dipToScreenPoint is the authoritative DIP→physical mapping and stays
   // correct across mixed-DPI monitors, where multiplying global DIP
   // coords by one display's factor drifts (Windows-only API).
-  const dip = { x: content.x + rect.x, y: content.y + rect.y }
-  const phys =
+  const toPhys = (p: { x: number; y: number }): { x: number; y: number } =>
     typeof screen.dipToScreenPoint === 'function'
-      ? screen.dipToScreenPoint(dip)
-      : { x: Math.round(dip.x * scale), y: Math.round(dip.y * scale) }
+      ? screen.dipToScreenPoint(p)
+      : { x: Math.round(p.x * scale), y: Math.round(p.y * scale) }
+  const phys = toPhys({ x: content.x + rect.x, y: content.y + rect.y })
+  // The window's content area in physical pixels: the addon hard-clips
+  // every overlay to it, so whatever the renderer reported, a docked GUI
+  // can never escape the app window.
+  const boundTL = toPhys({ x: content.x, y: content.y })
+  const boundBR = toPhys({ x: content.x + content.width, y: content.y + content.height })
   try {
     host.moveEditor(editorHandle, {
       visible: rect.visible,
@@ -253,7 +262,11 @@ function placeDocked(host: Vst3Addon, win: BrowserWindow, instanceId: string): v
       clipLeft: Math.round(rect.clipLeft * scale),
       clipTop: Math.round(rect.clipTop * scale),
       clipRight: Math.round(rect.clipRight * scale),
-      clipBottom: Math.round(rect.clipBottom * scale)
+      clipBottom: Math.round(rect.clipBottom * scale),
+      boundLeft: boundTL.x,
+      boundTop: boundTL.y,
+      boundRight: boundBR.x,
+      boundBottom: boundBR.y
     })
   } catch {
     // a dying plugin must not break window moves
