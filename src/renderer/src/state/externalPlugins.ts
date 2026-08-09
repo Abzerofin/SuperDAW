@@ -23,12 +23,40 @@ export interface ExternalPluginEntry {
   subCategories: string
 }
 
+export interface PluginFailure {
+  path: string
+  reason: string
+  crashed: boolean
+}
+
 /** descriptorKey -> entry, for the descriptors we can actually run. */
 const byKey = new Map<string, ExternalPluginEntry>()
 const listeners = new Set<() => void>()
 
 let scanned = false
 let scanError: string | null = null
+let folders: string[] = []
+let failures: PluginFailure[] = []
+let scanning = false
+let lastScanMs: number | null = null
+
+/** Folders the scanner searches. Empty until the first status read. */
+export function pluginFolders(): string[] {
+  return folders
+}
+
+/** Bundles that would not load, and why. */
+export function pluginFailures(): PluginFailure[] {
+  return failures
+}
+
+export function pluginScanning(): boolean {
+  return scanning
+}
+
+export function pluginLastScanMs(): number | null {
+  return lastScanMs
+}
 
 /** Is an out-of-process plugin host reachable at all (i.e. the desktop app)? */
 export function externalHostAvailable(): boolean {
@@ -45,25 +73,18 @@ function keyOf(uid: string): string {
   return descriptorKey({ format: 'vst3', uid } as PluginDescriptor)
 }
 
-export async function scanExternalPlugins(): Promise<void> {
-  // Module-scope callers run under vitest too, where there is no window.
-  if (typeof window === 'undefined') return
-  const api = window.superdaw
-  if (!api?.vst3Scan) return
-  scanned = true
-  scanError = null
-  let found: Awaited<ReturnType<NonNullable<typeof api.vst3Scan>>>
-  try {
-    found = await api.vst3Scan()
-  } catch (error) {
-    // A failed scan must SAY so. Silently rendering nothing is
-    // indistinguishable from "you own no plugins".
-    scanError = error instanceof Error ? error.message : String(error)
-    for (const listener of listeners) listener()
-    return
-  }
+interface ScanStatus {
+  plugins: ExternalPluginEntry[]
+  folders: string[]
+  failures: PluginFailure[]
+  scanning: boolean
+  lastScanMs: number | null
+}
+
+/** One place where a scan result becomes app state, whatever produced it. */
+function applyStatus(status: ScanStatus): void {
   byKey.clear()
-  for (const plugin of found) {
+  for (const plugin of status.plugins) {
     byKey.set(keyOf(plugin.uid), {
       uid: plugin.uid,
       name: plugin.name,
@@ -72,10 +93,100 @@ export async function scanExternalPlugins(): Promise<void> {
       subCategories: plugin.subCategories
     })
   }
+  folders = status.folders
+  failures = status.failures
+  scanning = status.scanning
+  lastScanMs = status.lastScanMs
   // Teach the registry which descriptors this client can render out of
   // process, so their status is 'offline' rather than 'missing'.
   pluginRegistry.setExternalIndex((descriptor) => byKey.has(descriptorKey(descriptor)))
+  emit()
+}
+
+function emit(): void {
   for (const listener of listeners) listener()
+}
+
+/**
+ * Run a main-process plugin operation and fold the result into app state.
+ * A failed scan must SAY so — silently rendering nothing is
+ * indistinguishable from "you own no plugins".
+ */
+async function withStatus(
+  run: () => Promise<ScanStatus>,
+  { busy }: { busy: boolean } = { busy: false }
+): Promise<void> {
+  if (busy) {
+    scanning = true
+    emit()
+  }
+  try {
+    applyStatus(await run())
+    scanError = null
+  } catch (error) {
+    scanError = error instanceof Error ? error.message : String(error)
+    scanning = false
+    emit()
+  }
+}
+
+export async function scanExternalPlugins(): Promise<void> {
+  // Module-scope callers run under vitest too, where there is no window.
+  if (typeof window === 'undefined') return
+  const api = window.superdaw
+  if (!api?.pluginStatus) return
+  scanned = true
+  await withStatus(() => api.pluginStatus!())
+}
+
+/**
+ * "Refresh Plugins": force main to re-inspect every bundle and retry the
+ * ones that previously crashed. Slower than a normal scan by design — it
+ * is the button you press when the cache might be wrong.
+ */
+export async function refreshExternalPlugins(): Promise<void> {
+  const api = window.superdaw
+  if (!api?.pluginRefresh) return
+  scanned = true
+  await withStatus(() => api.pluginRefresh!(), { busy: true })
+}
+
+export async function setPluginFolders(next: string[]): Promise<void> {
+  const api = window.superdaw
+  if (!api?.pluginSetFolders) return
+  await withStatus(() => api.pluginSetFolders!(next), { busy: true })
+}
+
+/** Open the OS folder picker and add the choice to the search list. */
+export async function addPluginFolder(): Promise<void> {
+  const api = window.superdaw
+  if (!api?.pluginBrowseFolder || !api.pluginSetFolders) return
+  const picked = await api.pluginBrowseFolder()
+  if (!picked) return
+  await setPluginFolders([...folders, picked])
+}
+
+export async function resetPluginFolders(): Promise<void> {
+  const api = window.superdaw
+  if (!api?.pluginResetFolders) return
+  await withStatus(() => api.pluginResetFolders!(), { busy: true })
+}
+
+export async function clearPluginQuarantine(): Promise<void> {
+  const api = window.superdaw
+  if (!api?.pluginClearQuarantine) return
+  await withStatus(() => api.pluginClearQuarantine!(), { busy: true })
+}
+
+/**
+ * Keep this module in step with scans main runs on its own (the startup
+ * one, or a refresh triggered from another window). Wired once at import.
+ */
+if (typeof window !== 'undefined') {
+  window.superdaw?.onPluginsChanged?.(() => {
+    const api = window.superdaw
+    if (api?.pluginStatus) void withStatus(() => api.pluginStatus!())
+  })
 }
 
 /**

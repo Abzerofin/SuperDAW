@@ -8,6 +8,7 @@ import {
   useSettingsUi,
   type SettingsSection
 } from '@/state/settingsUi'
+import { PluginsPane } from './PluginsPane'
 
 /**
  * The settings window: an in-app overlay (professional, no OS dialogs)
@@ -63,6 +64,7 @@ export function SettingsWindow(): React.JSX.Element | null {
           {ui.section === 'general' && <GeneralPane />}
           {ui.section === 'audio' && <AudioPane />}
           {ui.section === 'collaboration' && <CollaborationPane />}
+          {ui.section === 'plugins' && <PluginsPane />}
           {!IMPLEMENTED_SECTIONS.has(ui.section) && (
             <div className="settings-pane">
               <h2>{SECTIONS.find((s) => s.id === ui.section)?.label}</h2>

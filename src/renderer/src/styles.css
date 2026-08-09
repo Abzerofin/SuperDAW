@@ -1248,6 +1248,117 @@ input {
   background: var(--bg-3);
 }
 
+/* Settings → Plugins: scan folders and failure list. */
+.plugin-folders {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  margin-bottom: 6px;
+}
+
+.plugin-folder {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 4px 8px;
+  background: var(--bg-0);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+}
+
+.plugin-folder-path {
+  flex: 1;
+  min-width: 0;
+  font-size: 11px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  /* Long paths matter at the END (the folder), not the drive letter. */
+  direction: rtl;
+  text-align: left;
+}
+
+.plugin-folder-remove {
+  flex: none;
+  color: var(--text-dim);
+  font-size: 14px;
+  line-height: 1;
+  padding: 0 4px;
+  border-radius: 3px;
+}
+
+.plugin-folder-remove:hover:not(:disabled) {
+  color: var(--danger);
+  background: var(--bg-3);
+}
+
+.plugin-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.plugin-actions button {
+  padding: 4px 10px;
+  font-size: 12px;
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  background: var(--bg-2);
+  color: var(--text);
+}
+
+.plugin-actions button:hover:not(:disabled) {
+  background: var(--bg-3);
+  border-color: var(--accent);
+}
+
+.plugin-actions button:disabled {
+  opacity: 0.5;
+  cursor: default;
+}
+
+.plugin-refresh {
+  font-weight: 600;
+}
+
+.plugin-failures {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  max-height: 160px;
+  overflow-y: auto;
+  margin-bottom: 6px;
+}
+
+.plugin-failure {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 10px;
+  padding: 3px 8px;
+  font-size: 11px;
+  background: var(--bg-0);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+}
+
+.plugin-failure-name {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.plugin-failure-bad {
+  color: var(--danger);
+  white-space: nowrap;
+}
+
+.plugin-error {
+  font-size: 11px;
+  color: var(--danger);
+}
+
 /* Rubber-band selection dragged across empty timeline space. */
 .marquee-layer {
   position: relative;

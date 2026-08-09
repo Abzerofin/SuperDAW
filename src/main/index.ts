@@ -5,6 +5,7 @@ import { readAppData, setAppData } from './appData'
 import { registerCollabIpc } from './collabServer'
 import { registerVst3Ipc } from './vst3'
 import { checkForUpdates } from './updater'
+import { ensureScanned } from './pluginScan'
 
 const PROJECT_FILTERS = [{ name: 'SuperDAW Project', extensions: ['sdaw'] }]
 
@@ -219,6 +220,10 @@ app.whenReady().then(() => {
   registerVst3Ipc()
   createWindow()
   checkForUpdates()
+  // Warm the plugin index in the background. It runs out of process and
+  // is cached, so this costs nothing on a normal launch but means the
+  // first plugin browse is instant instead of loading every bundle then.
+  void ensureScanned()
   app.on('activate', () => {
     if (BrowserWindow.getAllWindows().length === 0) createWindow()
   })

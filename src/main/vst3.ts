@@ -1,8 +1,19 @@
-import { app, BrowserWindow, ipcMain, screen } from 'electron'
+import { BrowserWindow, dialog, ipcMain, screen } from 'electron'
 import type { WebContents } from 'electron'
 import { readAppData, setAppData } from './appData'
-import { existsSync } from 'node:fs'
-import { join } from 'node:path'
+import { resolveAddonPath } from './addonPath'
+import {
+  clearQuarantine,
+  currentPlugins,
+  defaultPluginFolders,
+  ensureScanned,
+  getFolders,
+  rescan,
+  scanStatus,
+  setFolders,
+  type ScanStatus,
+  type Vst3Plugin
+} from './pluginScan'
 
 /**
  * VST3 hosting lives in the MAIN process, not the renderer: the renderer
@@ -108,27 +119,12 @@ export interface Vst3Param {
   canAutomate: boolean
 }
 
-/** A discovered plugin, flattened to one entry per audio class. */
-export interface Vst3Plugin {
-  path: string
-  uid: string
-  name: string
-  vendor: string
-  version: string
-  subCategories: string
-}
-
 let addon: Vst3Addon | null = null
 let loadError: string | null = null
 
 function loadAddon(): Vst3Addon | null {
   if (addon || loadError) return addon
-  const candidates = [
-    join(app.getAppPath(), 'native/vst3host/build/Release/vst3host.node'),
-    join(process.cwd(), 'native/vst3host/build/Release/vst3host.node'),
-    join(process.resourcesPath ?? '', 'native/vst3host/build/Release/vst3host.node')
-  ]
-  const found = candidates.find((path) => existsSync(path))
+  const found = resolveAddonPath()
   if (!found) {
     loadError = 'vst3host addon not built (see native/README.md)'
     return null
@@ -162,32 +158,15 @@ function chunkFromBlob(stateBlob: string | null | undefined): Buffer | undefined
   }
 }
 
-/** Cached across calls — scanning re-loads every bundle off disk. */
-let cachedScan: Vst3Plugin[] | null = null
-
-function scan(): Vst3Plugin[] {
-  if (cachedScan) return cachedScan
-  const host = loadAddon()
-  if (!host) return []
-  const plugins: Vst3Plugin[] = []
-  for (const path of host.scanPaths()) {
-    const info = host.inspect(path)
-    // A bundle that fails to load is skipped, never thrown: one broken
-    // plugin must not abort the scan.
-    if (info.error || !info.classes) continue
-    for (const cls of info.classes) {
-      plugins.push({
-        path,
-        uid: cls.uid,
-        name: cls.name,
-        vendor: cls.vendor,
-        version: cls.version,
-        subCategories: cls.subCategories
-      })
-    }
-  }
-  cachedScan = plugins
-  return plugins
+/**
+ * uid -> installed bundle, from the scanner's index. Callers pass a
+ * descriptor uid, never a path: paths are machine-specific and must never
+ * enter the document. `ensureScanned` makes the first lookup of a session
+ * wait for discovery instead of reporting everything as missing.
+ */
+async function findPlugin(uid: string): Promise<Vst3Plugin | undefined> {
+  await ensureScanned()
+  return currentPlugins().find((p) => p.uid === uid)
 }
 
 /**
@@ -321,7 +300,7 @@ export function registerVst3Ipc(): void {
       const host = loadAddon()
       if (!host) return { error: loadError ?? 'vst3 host unavailable' }
       if (editors.has(args.instanceId)) return { opened: true } // already open
-      const plugin = scan().find((p) => p.uid === args.uid)
+      const plugin = await findPlugin(args.uid)
       if (!plugin) return { error: `plugin not installed: ${args.uid}` }
 
       const sender = event.sender
@@ -399,7 +378,7 @@ export function registerVst3Ipc(): void {
       let editorHandle = editors.get(args.instanceId)
       let dims: { width?: number; height?: number } = {}
       if (editorHandle === undefined) {
-        const plugin = scan().find((p) => p.uid === args.uid)
+        const plugin = await findPlugin(args.uid)
         if (!plugin) return { error: `plugin not installed: ${args.uid}` }
         try {
           const opened = host.openEditor(plugin.path, plugin.uid, {
@@ -445,14 +424,67 @@ export function registerVst3Ipc(): void {
     }
   )
 
-  ipcMain.handle('vst3:scan', async (): Promise<Vst3Plugin[]> => scan())
+  ipcMain.handle('vst3:scan', async (): Promise<Vst3Plugin[]> => {
+    await ensureScanned()
+    return currentPlugins()
+  })
+
+  // --- Plugin folder configuration and rescanning ---
+
+  ipcMain.handle('plugins:status', async (): Promise<ScanStatus> => {
+    await ensureScanned()
+    return scanStatus()
+  })
+
+  /**
+   * "Refresh Plugins": a FORCED rescan. Every bundle is re-inspected even
+   * if its mtime is unchanged, and previously crashed plugins get another
+   * chance — the user may have just updated the one that was broken.
+   */
+  ipcMain.handle('plugins:refresh', async (): Promise<ScanStatus> => {
+    await rescan(true)
+    return scanStatus()
+  })
+
+  ipcMain.handle('plugins:get-folders', async (): Promise<string[]> => getFolders())
+
+  ipcMain.handle(
+    'plugins:set-folders',
+    async (_event, folders: string[]): Promise<ScanStatus> => {
+      await setFolders(folders)
+      await rescan(true)
+      return scanStatus()
+    }
+  )
+
+  ipcMain.handle('plugins:reset-folders', async (): Promise<ScanStatus> => {
+    await setFolders(defaultPluginFolders())
+    await rescan(true)
+    return scanStatus()
+  })
+
+  /** Pick a folder to search. Null = the user cancelled. */
+  ipcMain.handle('plugins:browse-folder', async (event): Promise<string | null> => {
+    const win = BrowserWindow.fromWebContents(event.sender)
+    const result = win
+      ? await dialog.showOpenDialog(win, { properties: ['openDirectory'] })
+      : await dialog.showOpenDialog({ properties: ['openDirectory'] })
+    if (result.canceled || result.filePaths.length === 0) return null
+    return result.filePaths[0]
+  })
+
+  ipcMain.handle('plugins:clear-quarantine', async (): Promise<ScanStatus> => {
+    await clearQuarantine()
+    await rescan(true)
+    return scanStatus()
+  })
 
   ipcMain.handle(
     'vst3:parameters',
     async (_event, uid: string): Promise<{ parameters?: Vst3Param[]; error?: string }> => {
       const host = loadAddon()
       if (!host) return { error: loadError ?? 'vst3 host unavailable' }
-      const plugin = scan().find((p) => p.uid === uid)
+      const plugin = await findPlugin(uid)
       if (!plugin) return { error: `plugin not installed: ${uid}` }
       try {
         const result = host.parameters(plugin.path, plugin.uid)
@@ -488,7 +520,7 @@ export function registerVst3Ipc(): void {
     ): Promise<{ handle?: number; outputChannels?: number; error?: string }> => {
       const host = loadAddon()
       if (!host) return { error: loadError ?? 'vst3 host unavailable' }
-      const plugin = scan().find((p) => p.uid === args.uid)
+      const plugin = await findPlugin(args.uid)
       if (!plugin) return { error: `plugin not installed: ${args.uid}` }
       try {
         const result = host.openInstance(plugin.path, plugin.uid, {
@@ -579,7 +611,7 @@ export function registerVst3Ipc(): void {
       // The renderer sends a descriptor uid, never a filesystem path —
       // paths are machine-specific and must not enter the document. Main
       // resolves uid -> path against its own scan.
-      const plugin = scan().find((p) => p.uid === args.uid)
+      const plugin = await findPlugin(args.uid)
       if (!plugin) return { error: `plugin not installed: ${args.uid}` }
       try {
         const result = host.processBuffer(plugin.path, plugin.uid, {

@@ -1,5 +1,21 @@
 import { contextBridge, ipcRenderer } from 'electron'
 
+/** Mirrors main's ScanStatus (see src/main/pluginScan.ts). */
+export interface PluginScanStatus {
+  plugins: {
+    path: string
+    uid: string
+    name: string
+    vendor: string
+    version: string
+    subCategories: string
+  }[]
+  folders: string[]
+  failures: { path: string; reason: string; crashed: boolean }[]
+  scanning: boolean
+  lastScanMs: number | null
+}
+
 /**
  * Minimal bridge between the sandboxed renderer and the main process.
  * The renderer must run without this (browser dev mode), so everything
@@ -94,6 +110,34 @@ const api = {
       ipcRenderer.off('collab:peer-message', onMessage)
       ipcRenderer.off('collab:peer-disconnected', onDisconnected)
     }
+  },
+
+  // ----- Plugin scanning (see src/main/pluginScan.ts) -----
+
+  /** Discovered plugins, configured folders, and anything that failed. */
+  pluginStatus: (): Promise<PluginScanStatus> => ipcRenderer.invoke('plugins:status'),
+
+  /** Forced rescan: re-inspects everything and retries crashed plugins. */
+  pluginRefresh: (): Promise<PluginScanStatus> => ipcRenderer.invoke('plugins:refresh'),
+
+  pluginGetFolders: (): Promise<string[]> => ipcRenderer.invoke('plugins:get-folders'),
+
+  pluginSetFolders: (folders: string[]): Promise<PluginScanStatus> =>
+    ipcRenderer.invoke('plugins:set-folders', folders),
+
+  pluginResetFolders: (): Promise<PluginScanStatus> => ipcRenderer.invoke('plugins:reset-folders'),
+
+  /** Native folder picker. Null = cancelled. */
+  pluginBrowseFolder: (): Promise<string | null> => ipcRenderer.invoke('plugins:browse-folder'),
+
+  pluginClearQuarantine: (): Promise<PluginScanStatus> =>
+    ipcRenderer.invoke('plugins:clear-quarantine'),
+
+  /** Fires when a scan finishes, so open UI can refresh itself. */
+  onPluginsChanged: (handler: () => void): (() => void) => {
+    const listener = (): void => handler()
+    ipcRenderer.on('plugins:changed', listener)
+    return () => ipcRenderer.off('plugins:changed', listener)
   },
 
   /** Installed VST3 plugins, one entry per audio class. */

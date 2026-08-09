@@ -17,7 +17,8 @@ export type SettingsSection =
 export const IMPLEMENTED_SECTIONS: ReadonlySet<SettingsSection> = new Set([
   'general',
   'audio',
-  'collaboration'
+  'collaboration',
+  'plugins'
 ])
 
 class SettingsUiStore {

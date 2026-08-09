@@ -1,5 +1,21 @@
 /// <reference types="vite/client" />
 
+/** Result of a plugin scan (see src/main/pluginScan.ts). */
+interface PluginScanStatus {
+  plugins: {
+    path: string
+    uid: string
+    name: string
+    vendor: string
+    version: string
+    subCategories: string
+  }[]
+  folders: string[]
+  failures: { path: string; reason: string; crashed: boolean }[]
+  scanning: boolean
+  lastScanMs: number | null
+}
+
 /** API exposed by the Electron preload script (src/preload/index.ts).
  * Declared structurally here so the renderer stays compilable without
  * Electron (browser dev mode). */
@@ -36,6 +52,15 @@ interface Window {
       message(connId: number, data: string): void
       disconnected(connId: number): void
     }): () => void
+    /** Plugin scanning. Optional: absent in the browser build. */
+    pluginStatus?(): Promise<PluginScanStatus>
+    pluginRefresh?(): Promise<PluginScanStatus>
+    pluginGetFolders?(): Promise<string[]>
+    pluginSetFolders?(folders: string[]): Promise<PluginScanStatus>
+    pluginResetFolders?(): Promise<PluginScanStatus>
+    pluginBrowseFolder?(): Promise<string | null>
+    pluginClearQuarantine?(): Promise<PluginScanStatus>
+    onPluginsChanged?(handler: () => void): () => void
     vst3Scan(): Promise<
       {
         path: string
