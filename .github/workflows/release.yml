@@ -44,10 +44,28 @@ jobs:
       - name: Run tests
         run: npm test
 
-      # Builds the NSIS installer and uploads it — plus latest.yml, which
-      # electron-updater reads to know a newer version exists — to the
-      # GitHub Release for this tag (created if it doesn't exist yet).
-      - name: Build and publish
-        run: npm run release
+      - name: Build the installer
+        run: npm run build:installer
+
+      # Published in ONE step rather than through electron-builder's own
+      # GitHub publisher: that uploads each artifact separately and can race
+      # with itself, producing two half-filled draft releases for a single
+      # tag. electron-updater would then be free to resolve the one without
+      # an installer in it. gh is preinstalled on the runner.
+      #
+      # latest.yml is what electron-updater reads to discover a new version,
+      # so it matters as much as the .exe; the .blockmap lets updates
+      # download only changed chunks. Kept as a draft so the release is
+      # reviewed before it reaches anyone.
+      - name: Publish to GitHub Releases
+        shell: bash
+        run: |
+          gh release create "$GITHUB_REF_NAME" \
+            release/SuperDAW-Setup-*.exe \
+            release/SuperDAW-Setup-*.exe.blockmap \
+            release/latest.yml \
+            --draft \
+            --title "SuperDAW $GITHUB_REF_NAME" \
+            --generate-notes
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}

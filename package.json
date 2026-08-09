@@ -15,7 +15,7 @@
     "test": "vitest run",
     "relay": "node server/src/index.ts",
     "dist": "electron-vite build && electron-builder --win --dir",
-    "release": "electron-vite build && electron-builder --win --publish always"
+    "build:installer": "electron-vite build && electron-builder --win --publish never"
   },
   "repository": {
     "type": "git",
