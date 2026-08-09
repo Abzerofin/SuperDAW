@@ -13,6 +13,8 @@ import type {
   NoteId,
   PluginInstance,
   PluginInstanceId,
+  Route,
+  RouteId,
   Track,
   TrackId
 } from '../model/types'
@@ -40,6 +42,8 @@ export type Operation =
       automation: AutomationPoint[]
       notes: Note[]
       plugins: PluginInstance[]
+      /** Routing-graph edges of the restored subtree (absent for new tracks). */
+      routes?: Route[]
       descendants?: Array<{ track: Track; index: number }>
     }
   /** Deletes the track AND, for folders, every descendant track. */
@@ -72,8 +76,20 @@ export type Operation =
   /** Plural: multi-delete and thread restores stay one undoable op. */
   | { type: 'note/delete'; noteIds: NoteId[] }
   | { type: 'note/addMany'; notes: Note[] }
-  | { type: 'plugin/add'; instance: PluginInstance }
+  /** `routes` restores the instance's graph connections on undo of a remove. */
+  | { type: 'plugin/add'; instance: PluginInstance; routes?: Route[] }
+  /** Also cascades away every route touching the instance (see invert). */
   | { type: 'plugin/remove'; instanceId: PluginInstanceId }
+  /**
+   * Effect ROUTING GRAPH edges (see Route). Plural like note/delete: a
+   * gesture that materializes a chain or clears a graph stays one op.
+   * The reducer validates each edge against the evolving state (unknown
+   * endpoints, duplicates and cycles are skipped individually).
+   */
+  | { type: 'route/addMany'; routes: Route[] }
+  | { type: 'route/deleteMany'; routeIds: RouteId[] }
+  /** Node position in the graph editor (document data, like clip colors). */
+  | { type: 'plugin/setGraphPos'; instanceId: PluginInstanceId; x: number; y: number }
   | { type: 'plugin/setParam'; instanceId: PluginInstanceId; param: string; value: number }
   /**
    * Set several params atomically — for gestures that move more than one

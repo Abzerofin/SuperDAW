@@ -4,6 +4,7 @@ import {
   clipsOfTrack,
   notesOfClip,
   pluginsOfTrack,
+  routesOfTrack,
   trackSubtreeOf
 } from '../model/types'
 import { newId } from '../model/ids'
@@ -38,6 +39,8 @@ export function buildDuplicateTrackOp(state: ProjectState, trackId: TrackId): Op
   const notes: ReturnType<typeof notesOfClip> = []
   const automation: ReturnType<typeof automationOf> = []
   const plugins: ReturnType<typeof pluginsOfTrack> = []
+  const routes: ReturnType<typeof routesOfTrack> = []
+  const pluginIdMap = new Map<string, string>()
   for (const t of subtree) {
     const newTrackId = trackIdMap.get(t.id)!
     for (const clip of clipsOfTrack(state, t.id)) {
@@ -51,7 +54,18 @@ export function buildDuplicateTrackOp(state: ProjectState, trackId: TrackId): Op
       automation.push({ ...point, id: newId('aut'), trackId: newTrackId })
     }
     for (const instance of pluginsOfTrack(state, t.id)) {
-      plugins.push({ ...instance, id: newId('plg'), trackId: newTrackId })
+      const newInstanceId = newId('plg')
+      pluginIdMap.set(instance.id, newInstanceId)
+      plugins.push({ ...instance, id: newInstanceId, trackId: newTrackId })
+    }
+    // Routing edges follow their plugins ('in'/'out' terminals stay as-is).
+    for (const route of routesOfTrack(state, t.id)) {
+      routes.push({
+        id: newId('rte'),
+        trackId: newTrackId,
+        from: route.from === 'in' ? 'in' : (pluginIdMap.get(route.from) ?? route.from),
+        to: route.to === 'out' ? 'out' : (pluginIdMap.get(route.to) ?? route.to)
+      })
     }
   }
 
@@ -66,6 +80,7 @@ export function buildDuplicateTrackOp(state: ProjectState, trackId: TrackId): Op
     automation,
     notes,
     plugins,
+    ...(routes.length > 0 ? { routes } : {}),
     ...(rest.length > 0
       ? {
           descendants: rest.map((t, i) => ({ track: cloneTrack(t), index: subtreeEnd + 2 + i }))

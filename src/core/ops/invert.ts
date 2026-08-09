@@ -3,6 +3,7 @@ import {
   clipsOfTrack,
   pluginsOfTrack,
   notesOfClip,
+  routesOfTrack,
   subtreeOf,
   trackSubtreeOf
 } from '../model/types'
@@ -45,6 +46,7 @@ export function invert(state: ProjectState, op: Operation): Operation | null {
       // at its original trackOrder index) plus all their content.
       const subtree = trackSubtreeOf(state, op.trackId)
       const rest = subtree.filter((t) => t.id !== op.trackId)
+      const routes = subtree.flatMap((t) => routesOfTrack(state, t.id))
       return {
         type: 'track/create',
         track,
@@ -53,6 +55,7 @@ export function invert(state: ProjectState, op: Operation): Operation | null {
         automation: subtree.flatMap((t) => automationOfTrack(state, t.id)),
         notes: subtree.flatMap((t) => notesOfTrack(state, t.id)),
         plugins: subtree.flatMap((t) => pluginsOfTrack(state, t.id)),
+        ...(routes.length > 0 ? { routes } : {}),
         ...(rest.length > 0
           ? { descendants: rest.map((t) => ({ track: t, index: state.trackOrder.indexOf(t.id) })) }
           : {})
@@ -160,7 +163,39 @@ export function invert(state: ProjectState, op: Operation): Operation | null {
     case 'plugin/remove': {
       const instance = state.plugins[op.instanceId]
       if (!instance) return null
-      return { type: 'plugin/add', instance }
+      // The remove cascades away the node's routing edges; carry them so
+      // undo restores the graph, not just the node.
+      const routes = Object.values(state.routes).filter(
+        (r) => r.from === op.instanceId || r.to === op.instanceId
+      )
+      return { type: 'plugin/add', instance, ...(routes.length > 0 ? { routes } : {}) }
+    }
+
+    case 'route/addMany': {
+      if (op.routes.length === 0) return null
+      return { type: 'route/deleteMany', routeIds: op.routes.map((r) => r.id) }
+    }
+
+    case 'route/deleteMany': {
+      const routes = op.routeIds
+        .map((id) => state.routes[id])
+        .filter((r): r is NonNullable<typeof r> => r !== undefined)
+      if (routes.length === 0) return null
+      return { type: 'route/addMany', routes }
+    }
+
+    case 'plugin/setGraphPos': {
+      const instance = state.plugins[op.instanceId]
+      if (!instance) return null
+      // A node that was never placed has no position to restore — the
+      // first placement is deliberately not undoable (cosmetic).
+      if (instance.graphX === undefined || instance.graphY === undefined) return null
+      return {
+        type: 'plugin/setGraphPos',
+        instanceId: op.instanceId,
+        x: instance.graphX,
+        y: instance.graphY
+      }
     }
 
     case 'plugin/setParam': {

@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState } from 'react'
 import { createPortal } from 'react-dom'
 import type { PluginInstance, PluginInstanceId, Track } from '@core/model/types'
-import { pluginsOfTrack } from '@core/model/types'
+import { pluginsOfTrack, routesOfTrack } from '@core/model/types'
 import {
   SYNTH_DEFS,
   SYNTH_STATE_PARAMS,
@@ -38,6 +38,7 @@ import { useVst3Dock, vst3Dock } from '@/state/vst3Dock'
 import { PluginPlaceholder } from './PluginPlaceholder'
 import { EffectVisual } from './PluginVisuals'
 import { ParamSlider } from './ParamSlider'
+import { RoutingGraph } from './RoutingGraph'
 
 /**
  * The Effects tab of the bottom dock: the SELECTED track's synth (MIDI)
@@ -67,6 +68,11 @@ function TrackEffects({ track }: { track: Track }): React.JSX.Element {
   const chainRef = useRef<HTMLDivElement>(null)
   const inserts = pluginsOfTrack(state, track.id)
   const dock = useVst3Dock()
+  // Rack = the classic ordered chain; Graph = node routing. Tracks that
+  // already have routing edges open on their graph.
+  const [view, setView] = useState<'rack' | 'graph'>(() =>
+    routesOfTrack(projectStore.state, track.id).length > 0 ? 'graph' : 'rack'
+  )
 
   /** Does this insert render its plugin's own GUI (vs generic sliders)? */
   const isGuiInsert = (instance: PluginInstance): boolean =>
@@ -154,7 +160,25 @@ function TrackEffects({ track }: { track: Track }): React.JSX.Element {
         {track.frozenAssetId && (
           <span className="statusbar-dim">· frozen — inserts baked into the render</span>
         )}
+        <div className="fx-view-toggle">
+          <button
+            className={`bay-btn ${view === 'rack' ? 'fx-view-active' : ''}`}
+            title="The ordered effect rack"
+            onClick={() => setView('rack')}
+          >
+            Rack
+          </button>
+          <button
+            className={`bay-btn ${view === 'graph' ? 'fx-view-active' : ''}`}
+            title="Node routing — branch and merge effect paths"
+            onClick={() => setView('graph')}
+          >
+            Graph
+          </button>
+        </div>
       </div>
+      {view === 'graph' && <RoutingGraph track={track} />}
+      {view === 'rack' && (
       <div className="fx-dock-chain" ref={chainRef}>
         {track.kind === 'midi' &&
           ((track.synth.present ?? 1) >= 0.5 ? (
@@ -181,6 +205,7 @@ function TrackEffects({ track }: { track: Track }): React.JSX.Element {
         ))}
         <AddPluginCard track={track} inserts={inserts} />
       </div>
+      )}
     </div>
   )
 }

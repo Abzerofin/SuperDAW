@@ -5,7 +5,8 @@ import {
   childTracksOf,
   clipsOfTrack,
   notesOfClip,
-  pluginsOfTrack
+  pluginsOfTrack,
+  routesOfTrack
 } from '@core/model/types'
 import { pluginRegistry } from '@audio/pluginRegistry'
 import { useProjectState } from '@/state/hooks'
@@ -91,15 +92,26 @@ export function RoutingPanel(): React.JSX.Element | null {
     )
   }
   if (!frozen) {
-    for (const instance of inserts) {
-      const status = pluginRegistry.status(instance.descriptor)
+    // Graph-routed tracks don't have a single linear order to draw; the
+    // interactive picture lives in the Effects tab's Graph view.
+    if (routesOfTrack(state, track.id).length > 0) {
       nodes.push(
         node(
-          instance.descriptor.name,
-          `${instance.enabled ? status : 'bypassed'}${status !== 'local' ? ' — bypassed here' : ''}`,
-          instance.enabled && status === 'local' ? undefined : 'muted'
+          'Effect graph',
+          `${inserts.length} node${inserts.length === 1 ? '' : 's'} — see Effects › Graph`
         )
       )
+    } else {
+      for (const instance of inserts) {
+        const status = pluginRegistry.status(instance.descriptor)
+        nodes.push(
+          node(
+            instance.descriptor.name,
+            `${instance.enabled ? status : 'bypassed'}${status !== 'local' ? ' — bypassed here' : ''}`,
+            instance.enabled && status === 'local' ? undefined : 'muted'
+          )
+        )
+      }
     }
     nodes.push(node('Volume automation', volPoints > 0 ? `${volPoints} points` : 'none (unity)', volPoints > 0 ? undefined : 'muted'))
   }

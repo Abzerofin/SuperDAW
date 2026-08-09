@@ -78,6 +78,7 @@ export function createDemoProject(): ProjectState {
     masterVolume: 1,
     automation: {},
     notes: {},
-    plugins: {}
+    plugins: {},
+    routes: {}
   }
 }

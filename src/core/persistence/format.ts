@@ -1,5 +1,6 @@
 import type { Clip, PluginInstance, ProjectState, Track } from '../model/types'
 import { createEmptyProject } from '../model/types'
+import { routeIsValid } from '../model/routing'
 import { synthDefaults, EFFECT_DEFS, type EffectType } from '../model/effects'
 import { builtinEffectDescriptor } from '../plugins/builtin'
 import type { OpEnvelope } from '../ops/operations'
@@ -181,7 +182,31 @@ function normalizeState(state: ProjectState): ProjectState {
   const full: ProjectState = { ...merged, tracks, clips, plugins: migratePlugins(merged) }
   // v1 stored inserts under `effects`; migratePlugins consumed it.
   delete (full as { effects?: unknown }).effects
-  return full
+  return sanitizeRoutes(full)
+}
+
+/**
+ * Routing edges come straight from the file, so each one re-earns its
+ * place through the same validator the reducer uses — malformed shapes,
+ * dangling endpoints, duplicates and cycles are dropped, never trusted.
+ * (Additive since format 3; older files simply have none.)
+ */
+function sanitizeRoutes(state: ProjectState): ProjectState {
+  const stored = Object.values(state.routes ?? {})
+  let acc: ProjectState = { ...state, routes: {} }
+  for (const route of stored) {
+    if (
+      typeof route?.id !== 'string' ||
+      typeof route.trackId !== 'string' ||
+      typeof route.from !== 'string' ||
+      typeof route.to !== 'string'
+    ) {
+      continue
+    }
+    if (!routeIsValid(acc, route)) continue
+    acc = { ...acc, routes: { ...acc.routes, [route.id]: route } }
+  }
+  return acc
 }
 
 /** Lineage is best-effort: anything malformed → undefined (fresh lineage on load). */

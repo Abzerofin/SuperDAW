@@ -77,6 +77,49 @@ suite('project file format', () => {
     expect(parsed.assets).toEqual(assets)
   })
 
+  test('routing edges round-trip; malformed or invalid ones are dropped on load', () => {
+    let state = sampleState()
+    state = apply(state, {
+      type: 'plugin/add',
+      instance: {
+        id: 'fx1',
+        trackId: 't1',
+        descriptor: { format: 'builtin', uid: 'superdaw.eq3', name: 'EQ', vendor: 'SuperDAW', version: '1' },
+        enabled: true,
+        rank: 1,
+        params: {},
+        stateBlob: null
+      }
+    })
+    state = apply(state, {
+      type: 'route/addMany',
+      routes: [
+        { id: 'r1', trackId: 't1', from: 'in', to: 'fx1' },
+        { id: 'r2', trackId: 't1', from: 'fx1', to: 'out' }
+      ]
+    })
+    const parsed = parseProjectJson(serializeProjectJson(state, []))
+    expect(parsed.state.routes).toEqual(state.routes)
+
+    // A doctored file: dangling endpoint, wrong shape, and one good edge.
+    const doctored = {
+      ...state,
+      routes: {
+        r1: state.routes['r1'],
+        bad1: { id: 'bad1', trackId: 't1', from: 'ghost-plugin', to: 'out' },
+        bad2: { id: 'bad2', trackId: 't1', from: 'in' } // missing `to`
+      }
+    }
+    const cleaned = parseProjectJson(JSON.stringify({ formatVersion: 3, state: doctored, assets: [] }))
+    expect(Object.keys(cleaned.state.routes)).toEqual(['r1'])
+
+    // Pre-routing files come back with an empty routes map.
+    const legacyState = { ...state } as Record<string, unknown>
+    delete legacyState.routes
+    const legacy = parseProjectJson(JSON.stringify({ formatVersion: 3, state: legacyState, assets: [] }))
+    expect(legacy.state.routes).toEqual({})
+  })
+
   test('round-trips lineage and op log; pre-v3 files come back without them', () => {
     const state = sampleState()
     const lineage = { projectId: 'prj_1', originTime: 1234, origin: createEmptyProject('Origin') }

@@ -96,6 +96,15 @@ function baseState(): ProjectState {
   })
   // An EQ on t1, and a MIDI track with default synth params
   s = apply(s, { type: 'plugin/add', instance: plugin('fxA', 't1', 'eq3') })
+  // t1 uses graph routing: in → fxA → out, fxA placed in the editor
+  s = apply(s, {
+    type: 'route/addMany',
+    routes: [
+      { id: 'rA', trackId: 't1', from: 'in', to: 'fxA' },
+      { id: 'rB', trackId: 't1', from: 'fxA', to: 'out' }
+    ]
+  })
+  s = apply(s, { type: 'plugin/setGraphPos', instanceId: 'fxA', x: 120, y: 80 })
   s = apply(s, {
     type: 'track/create',
     track: { ...track('tm'), kind: 'midi', synth: synthDefaults() },
@@ -173,7 +182,12 @@ suite('invert', () => {
       plugins: [plugin('fx9', 't9', 'eq3', { low: 3, mid: 0, midFreq: 1000, high: -2 })]
     },
     { type: 'plugin/add', instance: plugin('fx1', 't1', 'compressor') },
+    // Cascades away rA/rB; the inverse must restore node AND edges.
     { type: 'plugin/remove', instanceId: 'fxA' },
+    // A parallel dry path next to the existing in → fxA → out.
+    { type: 'route/addMany', routes: [{ id: 'r9', trackId: 't1', from: 'in', to: 'out' }] },
+    { type: 'route/deleteMany', routeIds: ['rA'] },
+    { type: 'plugin/setGraphPos', instanceId: 'fxA', x: 300, y: 40 },
     { type: 'plugin/setParam', instanceId: 'fxA', param: 'low', value: 6 },
     { type: 'plugin/setParams', instanceId: 'fxA', params: { low: 4, high: -3 } },
     { type: 'plugin/setEnabled', instanceId: 'fxA', enabled: false },
@@ -475,6 +489,99 @@ suite('file bay ops', () => {
     expect(s.files['a1'].parentId).toBeNull()
     s = apply(s, { type: 'file/move', nodeId: 'a1', parentId: 'f2' })
     expect(s.files['a1'].parentId).toBe('f2')
+  })
+})
+
+suite('effect routing', () => {
+  /** baseState (in → fxA → out on t1) plus a second effect fxB, unwired. */
+  const twoFx = (): ProjectState =>
+    apply(baseState(), { type: 'plugin/add', instance: plugin('fxB', 't1', 'delay', {}, 2) })
+
+  test('branching and merging: one output feeds many, many merge into out', () => {
+    let s = twoFx()
+    s = apply(s, {
+      type: 'route/addMany',
+      routes: [
+        { id: 'r1', trackId: 't1', from: 'in', to: 'fxB' },
+        { id: 'r2', trackId: 't1', from: 'fxB', to: 'out' }
+      ]
+    })
+    // in fans out to fxA and fxB; both merge into out.
+    expect(Object.keys(s.routes).sort()).toEqual(['r1', 'r2', 'rA', 'rB'])
+  })
+
+  test('a cycle is rejected; the rest of the op still lands', () => {
+    let s = twoFx()
+    s = apply(s, {
+      type: 'route/addMany',
+      routes: [
+        { id: 'r1', trackId: 't1', from: 'fxA', to: 'fxB' },
+        { id: 'r2', trackId: 't1', from: 'fxB', to: 'fxA' }, // closes a loop
+        { id: 'r3', trackId: 't1', from: 'fxB', to: 'out' }
+      ]
+    })
+    expect(s.routes['r1']).toBeDefined()
+    expect(s.routes['r2']).toBeUndefined()
+    expect(s.routes['r3']).toBeDefined()
+  })
+
+  test('duplicates, cross-track endpoints, self-loops and backwards terminals are rejected', () => {
+    const s = twoFx()
+    const rejected: Operation = {
+      type: 'route/addMany',
+      routes: [
+        { id: 'd1', trackId: 't1', from: 'in', to: 'fxA' }, // duplicate of rA
+        { id: 'd2', trackId: 't2', from: 'in', to: 'fxA' }, // fxA lives on t1
+        { id: 'd3', trackId: 't1', from: 'fxA', to: 'fxA' }, // self-loop
+        { id: 'd4', trackId: 't1', from: 'out', to: 'fxA' }, // out has no output
+        { id: 'd5', trackId: 't1', from: 'fxA', to: 'in' } // in has no input
+      ]
+    }
+    expect(apply(s, rejected)).toBe(s)
+  })
+
+  test('removing a plugin cascades its routes; undo restores node and edges', () => {
+    const store = new ProjectStore(baseState(), 'tester')
+    store.dispatch({ type: 'plugin/remove', instanceId: 'fxA' })
+    expect(Object.keys(store.state.routes)).toHaveLength(0)
+    store.undo()
+    expect(store.state.plugins['fxA']).toBeDefined()
+    expect(Object.keys(store.state.routes).sort()).toEqual(['rA', 'rB'])
+  })
+
+  test('deleting a track drops its routes; undo restores them', () => {
+    const store = new ProjectStore(baseState(), 'tester')
+    store.dispatch({ type: 'track/delete', trackId: 't1' })
+    expect(Object.keys(store.state.routes)).toHaveLength(0)
+    store.undo()
+    expect(Object.keys(store.state.routes).sort()).toEqual(['rA', 'rB'])
+  })
+
+  test('duplicating a track clones its routing graph with remapped ids', () => {
+    const s = baseState()
+    const op = buildDuplicateTrackOp(s, 't1')!
+    const after = apply(s, op)
+    const copyId = (op as { track: Track }).track.id
+    const copied = Object.values(after.routes).filter((r) => r.trackId === copyId)
+    expect(copied).toHaveLength(2)
+    // Same shape (in → copy-of-fxA → out), no id shared with the original.
+    expect(copied.some((r) => r.from === 'in')).toBe(true)
+    expect(copied.some((r) => r.to === 'out')).toBe(true)
+    expect(copied.every((r) => !['rA', 'rB'].includes(r.id))).toBe(true)
+    expect(copied.every((r) => r.from !== 'fxA' && r.to !== 'fxA')).toBe(true)
+  })
+
+  test('first node placement is not undoable (nothing to restore); later moves are', () => {
+    const s = twoFx()
+    // fxB has never been placed: no position to return to.
+    expect(invert(s, { type: 'plugin/setGraphPos', instanceId: 'fxB', x: 10, y: 10 })).toBeNull()
+    // fxA was placed at (120, 80) in baseState: invert restores that.
+    expect(invert(s, { type: 'plugin/setGraphPos', instanceId: 'fxA', x: 10, y: 10 })).toEqual({
+      type: 'plugin/setGraphPos',
+      instanceId: 'fxA',
+      x: 120,
+      y: 80
+    })
   })
 })
 

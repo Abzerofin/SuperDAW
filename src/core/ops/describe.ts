@@ -135,6 +135,23 @@ export function describe(state: ProjectState, op: Operation): string | null {
         instance.trackId
       )}"`
     }
+    case 'route/addMany': {
+      const trackId = op.routes[0]?.trackId
+      if (!trackId || !state.tracks[trackId]) return null
+      return op.routes.length === 1
+        ? `Connected effects on "${trackName(state, trackId)}"`
+        : `Rewired effect routing on "${trackName(state, trackId)}"`
+    }
+    case 'route/deleteMany': {
+      const trackId = op.routeIds.map((id) => state.routes[id]?.trackId).find((t) => t)
+      if (!trackId || !state.tracks[trackId]) return null
+      return op.routeIds.length === 1
+        ? `Disconnected effects on "${trackName(state, trackId)}"`
+        : `Cleared effect routing on "${trackName(state, trackId)}"`
+    }
+    // Node positions are pure layout — keep them out of the activity feed.
+    case 'plugin/setGraphPos':
+      return null
     case 'track/setSynthParam': {
       const def = SYNTH_DEFS[op.param]
       const name = trackName(state, op.trackId)

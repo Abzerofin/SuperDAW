@@ -8,8 +8,10 @@ import type {
   FileNode,
   AutomationPoint,
   Note,
-  PluginInstance
+  PluginInstance,
+  Route
 } from '../model/types'
+import { routeIsValid } from '../model/routing'
 import {
   clipsOfTrack,
   isSelfOrDescendant,
@@ -138,7 +140,12 @@ export function apply(state: ProjectState, op: Operation): ProjectState {
       for (const instance of op.plugins) {
         if (!plugins[instance.id]) plugins[instance.id] = instance
       }
-      return { ...state, tracks, trackOrder, clips, automation, notes, plugins }
+      let next: ProjectState = { ...state, tracks, trackOrder, clips, automation, notes, plugins }
+      // Restore the subtree's routing edges (validated like any other add).
+      if (op.routes && op.routes.length > 0) {
+        next = apply(next, { type: 'route/addMany', routes: op.routes })
+      }
+      return next
     }
 
     case 'track/delete': {
@@ -167,6 +174,10 @@ export function apply(state: ProjectState, op: Operation): ProjectState {
       for (const instance of Object.values(state.plugins)) {
         if (!doomed.has(instance.trackId)) plugins[instance.id] = instance
       }
+      const routes: Record<string, Route> = {}
+      for (const route of Object.values(state.routes)) {
+        if (!doomed.has(route.trackId)) routes[route.id] = route
+      }
       return {
         ...state,
         tracks,
@@ -174,7 +185,8 @@ export function apply(state: ProjectState, op: Operation): ProjectState {
         clips,
         automation,
         notes,
-        plugins
+        plugins,
+        routes
       }
     }
 
@@ -316,17 +328,64 @@ export function apply(state: ProjectState, op: Operation): ProjectState {
       // A builtin descriptor whose uid core doesn't know is unusable.
       if (op.instance.descriptor.format === 'builtin' && !defs) return state
       const params = sanitizeParams(defs, op.instance.params)
-      return {
+      let next: ProjectState = {
         ...state,
         plugins: { ...state.plugins, [op.instance.id]: { ...op.instance, params } }
       }
+      // Undoing a remove puts the node's graph connections back (each edge
+      // re-validated — a concurrently deleted neighbor just drops its edge).
+      if (op.routes && op.routes.length > 0) {
+        next = apply(next, { type: 'route/addMany', routes: op.routes })
+      }
+      return next
     }
 
     case 'plugin/remove': {
       if (!state.plugins[op.instanceId]) return state
       const plugins = { ...state.plugins }
       delete plugins[op.instanceId]
-      return { ...state, plugins }
+      // Cascade: a routing edge without both endpoints is meaningless.
+      const routes: Record<string, Route> = {}
+      for (const route of Object.values(state.routes)) {
+        if (route.from !== op.instanceId && route.to !== op.instanceId) routes[route.id] = route
+      }
+      return { ...state, plugins, routes }
+    }
+
+    case 'route/addMany': {
+      let changed = false
+      let next = state
+      for (const route of op.routes) {
+        // Validated against the EVOLVING state so edges within one op can
+        // build on each other, and invalid ones drop individually.
+        if (!routeIsValid(next, route)) continue
+        next = { ...next, routes: { ...next.routes, [route.id]: route } }
+        changed = true
+      }
+      return changed ? next : state
+    }
+
+    case 'route/deleteMany': {
+      const doomed = new Set(op.routeIds)
+      let changed = false
+      const routes: Record<string, Route> = {}
+      for (const route of Object.values(state.routes)) {
+        if (doomed.has(route.id)) changed = true
+        else routes[route.id] = route
+      }
+      return changed ? { ...state, routes } : state
+    }
+
+    case 'plugin/setGraphPos': {
+      const instance = state.plugins[op.instanceId]
+      if (!instance || !Number.isFinite(op.x) || !Number.isFinite(op.y)) return state
+      const x = Math.round(clamp(op.x, 0, 8000))
+      const y = Math.round(clamp(op.y, 0, 8000))
+      if (instance.graphX === x && instance.graphY === y) return state
+      return {
+        ...state,
+        plugins: { ...state.plugins, [op.instanceId]: { ...instance, graphX: x, graphY: y } }
+      }
     }
 
     case 'plugin/setParam': {

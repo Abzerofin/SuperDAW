@@ -5,7 +5,8 @@ import {
   automationValueAt,
   clipsOfTrack,
   isTrackAudible,
-  pluginsOfTrack
+  pluginsOfTrack,
+  routesOfTrack
 } from '@core/model/types'
 import { applyClipFades } from './fades'
 import { pluginRegistry } from './pluginRegistry'
@@ -83,15 +84,50 @@ export function projectEndTicks(state: ProjectState): number {
   return Object.values(state.clips).reduce((max, c) => Math.max(max, c.start + c.duration), 0)
 }
 
-/** Build a track's insert path into `ctx`: input → enabled resolvable plugins → out. */
+/**
+ * Build a track's insert path into `ctx`: input → enabled resolvable
+ * plugins → out. A track with routing-graph edges wires those instead
+ * (fan-out/fan-in sum natively); unresolvable or bypassed nodes short
+ * through, mirroring the live engine exactly.
+ */
 function buildInserts(ctx: BaseAudioContext, state: ProjectState, trackId: TrackId, input: AudioNode): AudioNode {
+  const localNodes = (instance: PluginInstance): { input: AudioNode; output: AudioNode } | null => {
+    const resolved = pluginRegistry.resolve(instance.descriptor)
+    if (!resolved) return null // MISSING on this client: bypass, as in live playback
+    const nodes = resolved.provider.create(ctx)
+    nodes.apply(instance.params, 0)
+    return nodes
+  }
+
+  const routes = routesOfTrack(state, trackId)
+  if (routes.length > 0) {
+    const out = ctx.createGain()
+    const ports = new Map<string, { inlet: GainNode; outlet: GainNode }>()
+    for (const instance of pluginsOfTrack(state, trackId)) {
+      const inlet = ctx.createGain()
+      const outlet = ctx.createGain()
+      const nodes = instance.enabled ? localNodes(instance) : null
+      if (nodes) {
+        inlet.connect(nodes.input)
+        nodes.output.connect(outlet)
+      } else {
+        inlet.connect(outlet)
+      }
+      ports.set(instance.id, { inlet, outlet })
+    }
+    for (const route of routes) {
+      const from = route.from === 'in' ? input : ports.get(route.from)?.outlet
+      const to = route.to === 'out' ? out : ports.get(route.to)?.inlet
+      if (from && to) from.connect(to)
+    }
+    return out
+  }
+
   let prev: AudioNode = input
   for (const instance of pluginsOfTrack(state, trackId)) {
     if (!instance.enabled) continue
-    const resolved = pluginRegistry.resolve(instance.descriptor)
-    if (!resolved) continue // MISSING on this client: bypass, as in live playback
-    const nodes = resolved.provider.create(ctx)
-    nodes.apply(instance.params, 0)
+    const nodes = localNodes(instance)
+    if (!nodes) continue
     prev.connect(nodes.input)
     prev = nodes.output
   }
@@ -298,8 +334,10 @@ export async function renderTrackFreeze(
     : []
 
   // Fast path: nothing needs the out-of-process host, so the whole chain
-  // is one Web Audio pass exactly as before.
-  if (externalInserts.length === 0) {
+  // is one Web Audio pass exactly as before. Graph-routed tracks take it
+  // too — segmenting assumes a LINEAR chain, so their external inserts
+  // pass through in the graph (same audible result as live playback).
+  if (externalInserts.length === 0 || routesOfTrack(state, trackId).length > 0) {
     const ctx = new OfflineAudioContext(2, frames, SAMPLE_RATE)
     const input = ctx.createGain()
     const auto = ctx.createGain()
@@ -359,6 +397,10 @@ export function canLivePreview(
   trackId: TrackId,
   external: ExternalPluginHost
 ): boolean {
+  // Look-ahead preview windows a LINEAR chain; a routing graph has no
+  // single "before the externals" cut, so graph tracks play dry live
+  // (externals short through) and freeze for the exact sound.
+  if (routesOfTrack(state, trackId).length > 0) return false
   let seenExternal = false
   let anyExternal = false
   for (const instance of pluginsOfTrack(state, trackId)) {

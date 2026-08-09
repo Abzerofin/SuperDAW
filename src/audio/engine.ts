@@ -1,9 +1,10 @@
-import type { PluginInstanceId, ProjectState, TrackId } from '@core/model/types'
+import type { PluginInstance, PluginInstanceId, ProjectState, Route, TrackId } from '@core/model/types'
 import {
   automationOf,
   automationValueAt,
   isTrackAudible,
-  pluginsOfTrack
+  pluginsOfTrack,
+  routesOfTrack
 } from '@core/model/types'
 import type { AssetStore } from './assets'
 import { applyClipFades } from './fades'
@@ -87,6 +88,12 @@ export class AudioEngine {
   private meterBuf: Float32Array<ArrayBuffer> | null = null
   private chains = new Map<TrackId, TrackChain>()
   private fxNodes = new Map<PluginInstanceId, PluginNodes>()
+  /**
+   * Per-instance inlet/outlet gains for GRAPH-routed tracks. Routing edges
+   * connect outlets to inlets; a bypassed/missing plugin just shorts its
+   * inlet to its outlet, so every graph shape degrades gracefully.
+   */
+  private graphPorts = new Map<PluginInstanceId, { inlet: GainNode; outlet: GainNode }>()
   /** Everything currently scheduled: clip buffer sources AND synth oscillators. */
   private sources = new Set<AudioScheduledSourceNode>()
   /** Per-clip fade envelope gains for the current scheduling pass. */
@@ -135,6 +142,7 @@ export class AudioEngine {
   private prevMasterVolume: number
   private prevNotes: ProjectState['notes']
   private prevPlugins: ProjectState['plugins']
+  private prevRoutes: ProjectState['routes']
 
   constructor(
     private store: StoreLike,
@@ -148,6 +156,7 @@ export class AudioEngine {
     this.prevMasterVolume = store.state.masterVolume
     this.prevNotes = store.state.notes
     this.prevPlugins = store.state.plugins
+    this.prevRoutes = store.state.routes
     store.subscribe(this.onStateChanged)
     assets.subscribe(this.onAssetsChanged)
     transport.onEvent(this.onTransportEvent)
@@ -616,6 +625,14 @@ export class AudioEngine {
       this.prevPlugins = state.plugins
       if (this.ctx) this.syncPlugins()
     }
+    // Routing-graph edits rewire chains; on a track previewed through
+    // external plugins they also change what the windows sound like.
+    let routesChanged = false
+    if (state.routes !== this.prevRoutes) {
+      routesChanged = true
+      this.prevRoutes = state.routes
+      if (this.ctx) this.syncPlugins()
+    }
     const automationEdited = state.automation !== this.prevAutomation
     this.prevAutomation = state.automation
     if (automationEdited && this.transport.isPlaying && this.ctx) {
@@ -627,7 +644,7 @@ export class AudioEngine {
       state.notes !== this.prevNotes ||
       synthChanged ||
       frozenChanged ||
-      (externalPluginChanged && this.preview !== null)
+      ((externalPluginChanged || routesChanged) && this.preview !== null)
     this.prevClips = state.clips
     this.prevTempo = state.tempo
     this.prevNotes = state.notes
@@ -978,6 +995,13 @@ export class AudioEngine {
         this.fxNodes.delete(instanceId)
       }
     }
+    for (const [instanceId, ports] of this.graphPorts) {
+      if (!state.plugins[instanceId]) {
+        ports.inlet.disconnect()
+        ports.outlet.disconnect()
+        this.graphPorts.delete(instanceId)
+      }
+    }
     for (const [trackId, chain] of this.chains) this.wireInserts(trackId, chain)
   }
 
@@ -990,6 +1014,9 @@ export class AudioEngine {
     chain.input.disconnect()
     for (const instance of inserts) {
       this.fxNodes.get(instance.id)?.output.disconnect()
+      const ports = this.graphPorts.get(instance.id)
+      ports?.inlet.disconnect()
+      ports?.outlet.disconnect()
     }
 
     // A frozen track's render already contains its inserts — bypass them
@@ -999,21 +1026,70 @@ export class AudioEngine {
       return
     }
 
+    const routes = routesOfTrack(this.store.state, trackId)
+    if (routes.length > 0) {
+      this.wireGraph(chain, inserts, routes, now)
+      return
+    }
+
     let prev: AudioNode = chain.input
     for (const instance of inserts) {
       if (!instance.enabled) continue
-      let nodes = this.fxNodes.get(instance.id)
-      if (!nodes) {
-        const resolved = pluginRegistry.resolve(instance.descriptor)
-        if (!resolved) continue // MISSING here: bypass until a provider appears
-        nodes = resolved.provider.create(ctx)
-        this.fxNodes.set(instance.id, nodes)
-      }
-      nodes.apply(instance.params, now)
+      const nodes = this.liveNodesFor(instance, now)
+      if (!nodes) continue // MISSING here: bypass until a provider appears
       prev.connect(nodes.input)
       prev = nodes.output
     }
     prev.connect(chain.auto)
+  }
+
+  /**
+   * GRAPH routing: edges connect instance outlets to inlets; 'in' is the
+   * track source (chain.input) and 'out' the summing mix node (chain.auto —
+   * Web Audio fan-in sums, fan-out is free). Bypassed, missing and
+   * external (out-of-process) plugins short inlet→outlet, so signal always
+   * flows along the drawn wires. A graph with no path in→out is honestly
+   * silent — the editor warns.
+   */
+  private wireGraph(
+    chain: TrackChain,
+    inserts: PluginInstance[],
+    routes: Route[],
+    now: number
+  ): void {
+    const ctx = this.ctx!
+    for (const instance of inserts) {
+      let ports = this.graphPorts.get(instance.id)
+      if (!ports) {
+        ports = { inlet: ctx.createGain(), outlet: ctx.createGain() }
+        this.graphPorts.set(instance.id, ports)
+      }
+      const nodes = instance.enabled ? this.liveNodesFor(instance, now) : null
+      if (nodes) {
+        ports.inlet.connect(nodes.input)
+        nodes.output.connect(ports.outlet)
+      } else {
+        ports.inlet.connect(ports.outlet)
+      }
+    }
+    for (const route of routes) {
+      const from = route.from === 'in' ? chain.input : this.graphPorts.get(route.from)?.outlet
+      const to = route.to === 'out' ? chain.auto : this.graphPorts.get(route.to)?.inlet
+      if (from && to) from.connect(to)
+    }
+  }
+
+  /** The live builtin nodes for an instance, created/applied on demand (null = not local). */
+  private liveNodesFor(instance: PluginInstance, now: number): PluginNodes | null {
+    let nodes = this.fxNodes.get(instance.id)
+    if (!nodes) {
+      const resolved = pluginRegistry.resolve(instance.descriptor)
+      if (!resolved) return null
+      nodes = resolved.provider.create(this.ctx!)
+      this.fxNodes.set(instance.id, nodes)
+    }
+    nodes.apply(instance.params, now)
+    return nodes
   }
 
   /** Mirrored buffer for reversed clips, allocated by the asset store's cache. */

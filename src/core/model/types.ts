@@ -144,6 +144,31 @@ export interface PluginInstance {
   readonly params: Readonly<Record<string, number>>
   /** Opaque serialized plugin chunk state (external formats); null for builtins. */
   readonly stateBlob: string | null
+  /**
+   * Node position in the track's routing graph (document data, like clip
+   * colors — the layout is shared). Absent = auto-layout by graph depth.
+   */
+  readonly graphX?: number
+  readonly graphY?: number
+}
+
+export type RouteId = string
+
+/**
+ * One audio connection in a track's effect ROUTING GRAPH. The endpoints
+ * are plugin instances of the same track, or the track's fixed terminals:
+ * 'in' (the track source — clips/synth) and 'out' (the mix/output node,
+ * pre-automation/fader; multiple arrivals sum there, fan-out is free).
+ *
+ * A track with NO routes uses the classic linear chain (rank order) — the
+ * graph exists only once the user materializes it, and deleting every
+ * route returns the track to chain routing.
+ */
+export interface Route {
+  readonly id: RouteId
+  readonly trackId: TrackId
+  readonly from: 'in' | PluginInstanceId
+  readonly to: 'out' | PluginInstanceId
 }
 
 /** Fader ceiling: +6 dB of headroom above unity. */
@@ -239,6 +264,7 @@ export interface ProjectState {
   readonly automation: Readonly<Record<AutomationPointId, AutomationPoint>>
   readonly notes: Readonly<Record<NoteId, Note>>
   readonly plugins: Readonly<Record<PluginInstanceId, PluginInstance>>
+  readonly routes: Readonly<Record<RouteId, Route>>
 }
 
 export function createEmptyProject(name: string, createdAt = 0): ProjectState {
@@ -256,7 +282,8 @@ export function createEmptyProject(name: string, createdAt = 0): ProjectState {
     masterVolume: 1,
     automation: {},
     notes: {},
-    plugins: {}
+    plugins: {},
+    routes: {}
   }
 }
 
@@ -296,6 +323,11 @@ export function pluginsOfTrack(state: ProjectState, trackId: TrackId): PluginIns
   return Object.values(state.plugins)
     .filter((p) => p.trackId === trackId)
     .sort((a, b) => a.rank - b.rank)
+}
+
+/** A track's routing-graph edges (empty = classic linear chain applies). */
+export function routesOfTrack(state: ProjectState, trackId: TrackId): Route[] {
+  return Object.values(state.routes).filter((r) => r.trackId === trackId)
 }
 
 export function notesOfClip(state: ProjectState, clipId: ClipId): Note[] {
