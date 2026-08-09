@@ -61,3 +61,16 @@ npm run test      # core test suite
 ```
 
 Architecture and contribution rules: [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md).
+
+## Releases
+
+Tagging a commit `v*` (e.g. `v0.2.0`) builds the Windows installer on CI and
+publishes it to GitHub Releases; installed copies update themselves from
+there. See [.github/workflows/release.yml](.github/workflows/release.yml).
+
+## License
+
+GNU General Public License v3.0 or later — see [LICENSE](LICENSE).
+
+Music you make with SuperDAW is yours. Copyleft covers this program's own
+source code, not the projects, presets or recordings you create with it.

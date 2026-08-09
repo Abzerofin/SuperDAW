@@ -4,6 +4,7 @@ import { basename, join } from 'node:path'
 import { readAppData, setAppData } from './appData'
 import { registerCollabIpc } from './collabServer'
 import { registerVst3Ipc } from './vst3'
+import { checkForUpdates } from './updater'
 
 const PROJECT_FILTERS = [{ name: 'SuperDAW Project', extensions: ['sdaw'] }]
 
@@ -217,6 +218,7 @@ app.whenReady().then(() => {
   registerCollabIpc()
   registerVst3Ipc()
   createWindow()
+  checkForUpdates()
   app.on('activate', () => {
     if (BrowserWindow.getAllWindows().length === 0) createWindow()
   })

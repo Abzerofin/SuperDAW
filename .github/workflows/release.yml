@@ -1,0 +1,53 @@
+name: Release
+
+# Push a tag like v0.2.0 to build the Windows installer and publish it
+# (plus the update manifest electron-updater reads) to a GitHub Release.
+on:
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: windows-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 24
+
+      - name: Install dependencies
+        run: npm ci
+
+      # The VST3 SDK is a ~243 MB third-party dependency and is deliberately
+      # not committed (see native/README.md) — fetch it the same way local
+      # dev does before the native addon can compile against its headers.
+      - name: Fetch VST3 SDK
+        run: git clone --recurse-submodules --depth 1 --shallow-submodules https://github.com/steinbergmedia/vst3sdk.git native/vst3sdk
+
+      # windows-latest ships Visual Studio 2022 (Desktop C++ workload),
+      # CMake and Python already installed, so node-gyp has everything it
+      # needs without extra setup steps.
+      - name: Build the native VST3 host addon
+        working-directory: native/vst3host
+        run: npx node-gyp rebuild
+
+      - name: Type-check
+        run: npm run typecheck
+
+      - name: Run tests
+        run: npm test
+
+      # Builds the NSIS installer and uploads it — plus latest.yml, which
+      # electron-updater reads to know a newer version exists — to the
+      # GitHub Release for this tag (created if it doesn't exist yet).
+      - name: Build and publish
+        run: npm run release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}

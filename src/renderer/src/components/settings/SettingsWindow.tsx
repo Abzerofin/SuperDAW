@@ -154,6 +154,20 @@ function GeneralPane(): React.JSX.Element {
           join code from the Collab menu.
         </p>
       </div>
+      <div className="settings-field">
+        <label>About</label>
+        <p className="settings-dim">
+          SuperDAW — free software under the{' '}
+          <a href="https://www.gnu.org/licenses/gpl-3.0.html" target="_blank" rel="noreferrer">
+            GNU GPL v3
+          </a>
+          . Source:{' '}
+          <a href="https://github.com/Abzerofin/SuperDAW" target="_blank" rel="noreferrer">
+            github.com/Abzerofin/SuperDAW
+          </a>
+          . Music you make with it is yours.
+        </p>
+      </div>
     </div>
   )
 }

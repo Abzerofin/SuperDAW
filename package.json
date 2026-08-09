@@ -4,6 +4,7 @@
   "version": "0.1.0",
   "description": "A collaboration-first professional DAW",
   "author": "Abzerofin",
+  "license": "GPL-3.0-or-later",
   "private": true,
   "main": "./out/main/index.js",
   "scripts": {
@@ -13,7 +14,12 @@
     "typecheck": "tsc --noEmit -p tsconfig.json && tsc --noEmit -p tsconfig.node.json && tsc --noEmit -p server/tsconfig.json",
     "test": "vitest run",
     "relay": "node server/src/index.ts",
-    "dist": "electron-vite build && electron-builder --win --dir"
+    "dist": "electron-vite build && electron-builder --win --dir",
+    "release": "electron-vite build && electron-builder --win --publish always"
+  },
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/Abzerofin/SuperDAW.git"
   },
   "build": {
     "appId": "app.superdaw",
@@ -32,12 +38,17 @@
       }
     ],
     "win": {
-      "target": "dir",
+      "target": "nsis",
       "signAndEditExecutable": false
-    }
+    },
+    "nsis": {
+      "artifactName": "${productName}-Setup-${version}.${ext}"
+    },
+    "publish": ["github"]
   },
   "dependencies": {
     "@breezystack/lamejs": "^1.2.7",
+    "electron-updater": "^6.8.9",
     "fflate": "^0.8.3",
     "react": "^19.2.8",
     "react-dom": "^19.2.8",
