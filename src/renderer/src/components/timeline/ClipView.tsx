@@ -6,6 +6,7 @@ import type { ProjectAsset } from '@audio/assets'
 import { assetStore } from '@/state/audioInstance'
 import { projectStore } from '@/state/projectStore'
 import { capturePointer } from '@/lib/pointer'
+import { useTheme } from '@/state/theme'
 
 interface Props {
   clip: Clip
@@ -419,6 +420,8 @@ function Waveform({
   loopTicks
 }: WaveformProps): React.JSX.Element {
   const canvasRef = useRef<HTMLCanvasElement>(null)
+  // Repaint when the ink changes: a theme switch is not otherwise a render.
+  const themeId = useTheme().themeId
 
   useEffect(() => {
     const canvas = canvasRef.current
@@ -437,7 +440,11 @@ function Waveform({
     const amp = mid - 2
 
     g.clearRect(0, 0, w, h)
-    g.fillStyle = 'rgba(255, 255, 255, 0.55)'
+    // Canvas can't read CSS variables itself; themes that put dark ink on a
+    // light clip would otherwise paint white on white.
+    g.fillStyle =
+      getComputedStyle(canvas).getPropertyValue('--wave-ink').trim() ||
+      'rgba(255, 255, 255, 0.55)'
     // The drawn region must match what scheduling will read: resampling
     // scales timeline position into buffer position, and a reversed clip
     // reads its region back-to-front.
@@ -458,7 +465,7 @@ function Waveform({
       const max = peaks[bucket * 2 + 1]
       g.fillRect(x, mid - max * amp, 1, Math.max(1, (max - min) * amp))
     }
-  }, [asset, width, height, offset, duration, tempo, rate, reverse, loopTicks])
+  }, [asset, width, height, offset, duration, tempo, rate, reverse, loopTicks, themeId])
 
   return <canvas ref={canvasRef} className="clip-wave" />
 }

@@ -300,6 +300,21 @@ audio engine milestone.
 
 - Dark, dense, professional. All colors come from CSS variables in
   `styles.css`.
+- Themes (Settings ▸ Themes, `state/theme.ts`) are app-level and personal —
+  never part of a document, never sent to peers. A theme sets two
+  attributes on `<html>`: `data-theme` (palette) and `data-shell` (surface
+  treatment). Palettes only redefine the existing variables, so nothing
+  else in the app knows a theme exists; a shell adds shape on top. The one
+  non-plain shell, `analog` (`styles/analog.css`), machines every division
+  into hardware grooves on cream panels; it is also where the
+  light-background corrections live: styles.css draws a number of
+  hairlines, outlines and labels in white, which is invisible on cream,
+  and "light" is a property of the shell rather than of any one palette.
+  Canvas can't read CSS variables, so the two waveform painters look up
+  `--wave-ink` and repaint on theme change. The selection is persisted
+  through `appStorage` and mirrored into `localStorage` so the first paint
+  is already themed; a stored id from a removed theme falls back to the
+  default.
 - Track headers show only what is used constantly — name, pan knob, volume
   slider (whose bar doubles as a live per-track meter, painted straight to
   the DOM from one rAF loop so metering never re-renders React), FX,

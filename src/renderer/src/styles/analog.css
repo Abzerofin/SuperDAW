@@ -1,0 +1,568 @@
+/* =========================================================================
+ * Analog shell — the "Cassette" and "Formica" themes.
+ *
+ * Loaded always, active only while <html data-shell="analog"> is set. Where
+ * the metal shell melts the divisions, this one machines them: cream panels
+ * with screen-printed labels, hairline grooves with a light lip under them,
+ * chunky bevelled keys. Nothing glows, nothing moves — the reference is a
+ * 1970s tape deck, not a screen.
+ *
+ * These are the app's only LIGHT themes, so this file also carries the
+ * corrections for everything in styles.css that assumes a dark background:
+ * white-on-white hairlines, white text on a pale chip, white outlines.
+ * They live here rather than in each palette because "light" is a property
+ * of the shell, not of the colour scheme layered on it.
+ * ========================================================================= */
+
+/* ---------- Palettes ---------- */
+
+/* Cassette — 1979 deck. Bone chassis, warm ink, burnt-orange VU. */
+:root[data-theme='cassette'] {
+  --bg-0: #c8b895; /* the desk the machine sits on */
+  --bg-1: #e7ddc6; /* panels */
+  --bg-2: #f0e8d5; /* raised surfaces */
+  --bg-3: #f8f2e4; /* hover */
+  --border: #ad9c7d;
+  --text: #3d3529;
+  --text-dim: #7c6f5b;
+  --accent: #a4552f;
+  --grid-bar: rgba(61, 53, 41, 0.16);
+  --grid-beat: rgba(61, 53, 41, 0.07);
+  --mute: #9a7620;
+  --solo: #5f7f45;
+  --danger: #a3403a;
+  --wave-ink: rgba(61, 53, 41, 0.5);
+
+  --a-lip: rgba(255, 252, 243, 0.85);
+  --a-groove: rgba(72, 60, 42, 0.3);
+  --a-shadow: rgba(72, 60, 42, 0.16);
+}
+
+/* Formica — 1962 combo organ. Pale mint laminate, teal and mustard. */
+:root[data-theme='formica'] {
+  --bg-0: #b7c2ae;
+  --bg-1: #dce6d4;
+  --bg-2: #e8efe2;
+  --bg-3: #f2f7ee;
+  --border: #97a58e;
+  --text: #2d3a30;
+  --text-dim: #637065;
+  --accent: #3c6f7a;
+  --grid-bar: rgba(45, 58, 48, 0.16);
+  --grid-beat: rgba(45, 58, 48, 0.065);
+  --mute: #9b7c22;
+  --solo: #6d8a3f;
+  --danger: #9c4a54;
+  --wave-ink: rgba(51, 58, 51, 0.48);
+
+  --a-lip: rgba(252, 255, 249, 0.85);
+  --a-groove: rgba(45, 60, 48, 0.3);
+  --a-shadow: rgba(45, 60, 48, 0.17);
+}
+
+/* ---------- Shared analog vocabulary ---------- */
+
+:root[data-shell='analog'] {
+  /* Native form controls, scrollbars and focus rings follow the theme. */
+  color-scheme: light;
+
+  /* A panel is a sheet of painted metal: faint vertical brushing, a lighter
+     top edge where the light catches, a hair of shadow at the bottom. */
+  /* The sheen is measured in px, not %: as a percentage it scales with the
+     element, and a full-height side panel turns into a white sheet. */
+  --a-panel: linear-gradient(180deg, rgba(255, 255, 255, 0.5) 0, transparent 34px),
+    linear-gradient(97deg, rgba(255, 255, 255, 0.14) 0%, transparent 38%, rgba(0, 0, 0, 0.03) 100%);
+  --a-bevel: inset 0 1px 0 var(--a-lip), inset 0 -1px 0 var(--a-shadow);
+  /* A key: bevelled, sitting slightly proud of its panel. */
+  --a-key: inset 0 1px 0 rgba(255, 255, 255, 0.9), inset 0 -1px 0 var(--a-shadow),
+    0 1px 1px var(--a-shadow);
+  --a-key-down: inset 0 2px 3px var(--a-shadow), inset 0 -1px 0 var(--a-lip);
+  --a-radius: 3px;
+}
+
+/* ---------- The groove: how divisions are drawn ---------- */
+
+/* One dark hairline with a light lip beneath it. That pairing is the whole
+   trick — it reads as a machined edge in a physical panel rather than as a
+   drawn line, and it costs one box-shadow. */
+:root[data-shell='analog']
+  :is(.transport, .timeline-corner, .timeline-ruler, .home-header, .activity-header, .bay-toolbar, .fx-dock-head, .proll-head) {
+  border-bottom: 1px solid var(--border);
+  box-shadow: 0 1px 0 var(--a-lip);
+}
+
+:root[data-shell='analog']
+  :is(.statusbar, .dock-tabs, .bay, .mixer, .fx-dock, .proll, .track-drop-bar, .home-footer, .chat-compose) {
+  border-top: 1px solid var(--border);
+  box-shadow: 0 -1px 0 var(--a-lip) inset;
+}
+
+:root[data-shell='analog'] :is(.activity, .chat) {
+  border-left: 1px solid var(--border);
+  box-shadow: 1px 0 0 var(--a-lip) inset;
+}
+
+:root[data-shell='analog'] .settings-sidebar {
+  border-right: 1px solid var(--border);
+  box-shadow: -1px 0 0 var(--a-lip) inset;
+}
+
+/* ---------- Chassis ---------- */
+
+:root[data-shell='analog'] body {
+  background: var(--bg-0);
+}
+
+:root[data-shell='analog']
+  :is(.transport, .statusbar, .timeline-corner, .timeline-ruler, .track-header, .bay, .mixer, .activity, .chat, .fx-dock, .proll, .settings-window, .home) {
+  background-image: var(--a-panel);
+}
+
+:root[data-shell='analog'] :is(.transport-brand, .home-brand) {
+  color: var(--text);
+  letter-spacing: 1.4px;
+  text-transform: uppercase;
+  text-shadow: 0 1px 0 var(--a-lip);
+}
+
+:root[data-shell='analog'] .transport-brand {
+  font-size: 12px;
+}
+
+/* Screen-printed legends. */
+:root[data-shell='analog'] :is(.settings-field label, .settings-title, .home-recents-head h2, .home-table th) {
+  letter-spacing: 1px;
+}
+
+/* ---------- Keys ---------- */
+
+/* NOTE on selector shape: keep these shared lists CLASS-ONLY. `:is()` takes
+   the specificity of its most specific argument, so one `.parent button`
+   compound in the list silently raises the whole rule above every
+   state rule below it — which is exactly how the engaged toggles lost
+   their colour. Descendant-of-element selectors get their own line. */
+:root[data-shell='analog']
+  :is(.tbtn, .corner-btn, .bay-btn, .collab-secondary, .fx-add-btn, .home-settings, .comment-action, .clipmenu-toggle, .track-toggle, .fx-power),
+:root[data-shell='analog'] :is(.plugin-actions, .clipmenu-stepper, .clipmenu-parts) button {
+  border: 1px solid var(--border);
+  border-radius: var(--a-radius);
+  background-color: var(--bg-2);
+  background-image: linear-gradient(180deg, rgba(255, 255, 255, 0.75), rgba(255, 255, 255, 0) 62%);
+  box-shadow: var(--a-key);
+  color: var(--text);
+}
+
+:root[data-shell='analog']
+  :is(.tbtn, .corner-btn, .bay-btn, .collab-secondary, .fx-add-btn, .home-settings, .comment-action, .track-toggle, .fx-power):hover:not(:disabled),
+:root[data-shell='analog'] .plugin-actions button:hover:not(:disabled) {
+  background-color: var(--bg-3);
+}
+
+/* Engaged keys latch DOWN and keep their state colour.
+ *
+ * The key rule above is more specific than styles.css's `.track-toggle-mute`
+ * and friends, so it was overriding their fills — every toggle on a track
+ * card looked identical whether it was on or off. They are restored here,
+ * below the key rule, and a latched key also loses its top highlight and
+ * gains a real shadow across its top edge, so "pressed" reads from the
+ * bevel as well as from the colour. */
+:root[data-shell='analog']
+  :is(
+    .tbtn-active,
+    .corner-btn-active,
+    .tbtn-rec-active,
+    .track-toggle-mute,
+    .track-toggle-solo,
+    .track-toggle-monitor,
+    .track-toggle-armed,
+    .track-toggle-auto,
+    .track-input-monitor-on,
+    .track-input-armed,
+    .clipmenu-toggle-on,
+    .fx-power-on,
+    .fx-eq-type-active,
+    .fx-wave-active
+  ) {
+  background-image: linear-gradient(180deg, rgba(0, 0, 0, 0.12), rgba(255, 255, 255, 0.18) 70%);
+  box-shadow: inset 0 2px 3px rgba(0, 0, 0, 0.32), 0 0 0 1px var(--a-lip);
+  text-shadow: none;
+}
+
+:root[data-shell='analog'] .track-toggle-mute {
+  background-color: var(--mute);
+  border-color: color-mix(in srgb, var(--mute) 55%, #000);
+  color: #1f1804;
+}
+
+:root[data-shell='analog']
+  :is(.track-toggle-solo, .track-toggle-monitor, .track-input-monitor-on, .fx-power-on) {
+  background-color: var(--solo);
+  border-color: color-mix(in srgb, var(--solo) 55%, #000);
+  color: #17200f;
+}
+
+:root[data-shell='analog']
+  :is(.tbtn-rec-active, .track-toggle-armed, .track-input-armed) {
+  background-color: var(--danger);
+  border-color: color-mix(in srgb, var(--danger) 55%, #000);
+  color: #fff;
+}
+
+:root[data-shell='analog']
+  :is(
+    .tbtn-active,
+    .corner-btn-active,
+    .track-toggle-auto,
+    .clipmenu-toggle-on,
+    .fx-eq-type-active,
+    .fx-wave-active
+  ) {
+  background-color: var(--accent);
+  border-color: color-mix(in srgb, var(--accent) 55%, #000);
+  color: #fff;
+}
+
+/* "This track has effects" is a legend change in styles.css — too quiet on
+   a cream key, where an unlit and a lit key are already close. */
+:root[data-shell='analog'] .track-fx-has {
+  background-color: color-mix(in srgb, var(--accent) 22%, var(--bg-2));
+  border-color: color-mix(in srgb, var(--accent) 55%, var(--border));
+  color: color-mix(in srgb, var(--accent) 70%, #000);
+}
+
+/* Every key acknowledges the press itself, not just the latching ones. */
+:root[data-shell='analog']
+  :is(.tbtn, .corner-btn, .bay-btn, .collab-secondary, .fx-add-btn, .home-settings, .comment-action, .track-toggle, .fx-power, .track-menu-btn):active:not(:disabled),
+:root[data-shell='analog']
+  :is(.plugin-actions, .clipmenu-stepper, .clipmenu-parts) button:active:not(:disabled) {
+  background-image: linear-gradient(180deg, rgba(0, 0, 0, 0.16), rgba(255, 255, 255, 0.14) 70%);
+  box-shadow: var(--a-key-down);
+}
+
+:root[data-shell='analog'] :is(.collab-primary, .home-join-btn, .chat-send) {
+  border: 1px solid color-mix(in srgb, var(--accent) 70%, #000);
+  border-radius: var(--a-radius);
+  box-shadow: var(--a-key);
+}
+
+/* Recessed fields: the panel is cut away and the plate sits below it. */
+:root[data-shell='analog']
+  :is(input, select, .settings-field input, .settings-field select, .home-join-input, .collab-code-input, .chat-input, .home-search, .transport-grid, .track-input-field select, .palette-input, .settings-info, .plugin-folder, .routing-node) {
+  border: 1px solid var(--border);
+  border-radius: var(--a-radius);
+  background-color: var(--bg-3);
+  box-shadow: inset 0 1px 2px var(--a-shadow);
+}
+
+:root[data-shell='analog'] .transport-pos {
+  background-color: var(--bg-3);
+  border: 1px solid var(--border);
+  border-radius: var(--a-radius);
+  box-shadow: inset 0 1px 2px var(--a-shadow);
+}
+
+/* ---------- Timeline ---------- */
+
+:root[data-shell='analog'] .track-header {
+  border-right: 1px solid var(--border);
+  border-bottom: 1px solid var(--border);
+  box-shadow: 1px 0 0 var(--a-lip), 0 1px 0 var(--a-lip);
+}
+
+:root[data-shell='analog'] .lane {
+  border-bottom: 1px solid var(--border);
+  box-shadow: 0 1px 0 var(--a-lip);
+}
+
+:root[data-shell='analog'] .lane-muted {
+  background-color: rgba(72, 60, 42, 0.1);
+}
+
+/* Clips are tape labels: flat colour, hard outline, printed name. */
+:root[data-shell='analog'] .clip {
+  border: 1px solid color-mix(in srgb, var(--clip-color) 60%, #000 22%);
+  border-left: 4px solid color-mix(in srgb, var(--clip-color) 75%, #000 12%);
+  border-radius: var(--a-radius);
+  background-color: color-mix(in srgb, var(--clip-color) 30%, var(--bg-2));
+  background-image: linear-gradient(180deg, rgba(255, 255, 255, 0.45), transparent 40%);
+  box-shadow: 0 1px 1px var(--a-shadow);
+}
+
+:root[data-shell='analog'] .clip:hover {
+  background-color: color-mix(in srgb, var(--clip-color) 38%, var(--bg-2));
+}
+
+:root[data-shell='analog'] .clip-selected {
+  background-color: color-mix(in srgb, var(--clip-color) 46%, var(--bg-2));
+  box-shadow: 0 0 0 2px color-mix(in srgb, var(--clip-color) 55%, #000 30%);
+}
+
+:root[data-shell='analog'] .clip-name {
+  text-shadow: 0 1px 0 rgba(255, 255, 255, 0.35);
+}
+
+/* Playhead: an inked line with a counter flag, not a light source. */
+:root[data-shell='analog'] .playhead {
+  width: 2px;
+  margin-left: -1px;
+  background: var(--accent);
+  box-shadow: 0 0 0 1px rgba(255, 255, 255, 0.45);
+}
+
+:root[data-shell='analog'] .playhead::after {
+  content: '';
+  position: absolute;
+  top: 0;
+  left: 50%;
+  width: 13px;
+  height: 11px;
+  margin-left: -6.5px;
+  background: var(--accent);
+  /* A machined tab: square shoulders, chamfered nose. */
+  clip-path: polygon(0 0, 100% 0, 100% 55%, 50% 100%, 0 55%);
+  box-shadow: 0 1px 1px var(--a-shadow);
+}
+
+:root[data-shell='analog'] .marquee {
+  border: 1px dashed var(--text-dim);
+  background: color-mix(in srgb, var(--accent) 10%, transparent);
+}
+
+/* ---------- Dock ---------- */
+
+:root[data-shell='analog'] .dock-tab {
+  border: 1px solid transparent;
+  border-radius: var(--a-radius) var(--a-radius) 0 0;
+}
+
+:root[data-shell='analog'] .dock-tab-active {
+  border-color: var(--border);
+  border-bottom-color: transparent;
+  background-color: var(--bg-2);
+  box-shadow: inset 0 1px 0 var(--a-lip);
+}
+
+:root[data-shell='analog'] .bay-tile {
+  border-radius: var(--a-radius);
+}
+
+:root[data-shell='analog'] .bay-tile-selected {
+  box-shadow: 0 0 0 2px color-mix(in srgb, var(--accent) 60%, transparent);
+}
+
+/* ---------- Mixer ---------- */
+
+:root[data-shell='analog'] .strip {
+  border: 1px solid var(--border);
+  border-top: 3px solid var(--track-color);
+  border-radius: var(--a-radius);
+  background-color: var(--bg-2);
+  background-image: var(--a-panel);
+  box-shadow: var(--a-bevel);
+}
+
+:root[data-shell='analog'] :is(.fader, .fx-slider, .track-vol-bar) {
+  border: 1px solid var(--border);
+  border-radius: 2px;
+  background-color: color-mix(in srgb, var(--bg-0) 70%, var(--bg-1));
+  box-shadow: inset 0 1px 3px var(--a-shadow);
+}
+
+/* A cap you could actually grip, with the centre line printed on it. */
+:root[data-shell='analog'] .fader-thumb {
+  height: 12px;
+  border-radius: 2px;
+  background-color: var(--bg-3);
+  background-image: linear-gradient(
+    180deg,
+    rgba(255, 255, 255, 0.9) 0%,
+    rgba(255, 255, 255, 0) 45%,
+    var(--a-shadow) 100%
+  );
+  border: 1px solid var(--border);
+  box-shadow: 0 1px 2px var(--a-shadow);
+}
+
+:root[data-shell='analog'] .track-vol-thumb {
+  background: var(--text);
+}
+
+:root[data-shell='analog'] .knob-body {
+  fill: var(--bg-3);
+  stroke: var(--border);
+}
+
+:root[data-shell='analog'] .knob-track {
+  stroke: color-mix(in srgb, var(--bg-0) 80%, #000);
+}
+
+:root[data-shell='analog'] .knob-pointer {
+  stroke: var(--text);
+}
+
+/* ---------- Overlays ---------- */
+
+:root[data-shell='analog']
+  :is(.menu-panel, .clipmenu, .color-menu, .track-context-menu, .collab-panel, .health-panel, .settings-window, .palette, .routing-panel, .crash-panel, .comment-popover) {
+  border: 1px solid var(--border);
+  border-radius: var(--a-radius);
+  background-color: var(--bg-2);
+  background-image: var(--a-panel);
+  box-shadow: var(--a-bevel), 0 8px 20px rgba(60, 50, 35, 0.28);
+}
+
+:root[data-shell='analog'] :is(.settings-backdrop, .palette-backdrop, .routing-backdrop) {
+  background: rgba(60, 50, 35, 0.4);
+}
+
+:root[data-shell='analog'] .menu-item:hover {
+  background: var(--bg-3);
+}
+
+:root[data-shell='analog'] .menu-sep {
+  background: var(--border);
+  box-shadow: 0 1px 0 var(--a-lip);
+}
+
+:root[data-shell='analog'] .settings-nav {
+  border-radius: var(--a-radius);
+}
+
+/* styles.css puts white text on --bg-2 here, which is a cream panel now. */
+:root[data-shell='analog'] .settings-nav-active {
+  color: var(--text);
+  background: var(--bg-3);
+  box-shadow: inset 0 0 0 1px var(--border);
+}
+
+:root[data-shell='analog'] .home-action {
+  border: 1px solid var(--border);
+  border-radius: var(--a-radius);
+  background-color: var(--bg-1);
+  background-image: var(--a-panel);
+  box-shadow: var(--a-bevel);
+}
+
+:root[data-shell='analog'] .home-action:hover {
+  background-color: var(--bg-2);
+}
+
+/* ---------- Light-background corrections ---------- */
+/* Everything below exists because styles.css draws these in white or in a
+   near-transparent white, which is invisible on cream. Same shapes, ink
+   instead of light. */
+
+:root[data-shell='analog'] .clip-handle-loop,
+:root[data-shell='analog'] .clip-handle-stretch {
+  color: rgba(40, 33, 24, 0.5);
+}
+
+:root[data-shell='analog'] .clip:hover .clip-handle-loop,
+:root[data-shell='analog'] .clip-selected .clip-handle-loop,
+:root[data-shell='analog'] .clip:hover .clip-handle-stretch,
+:root[data-shell='analog'] .clip-selected .clip-handle-stretch {
+  background: rgba(255, 255, 255, 0.55);
+  color: rgba(40, 33, 24, 0.9);
+}
+
+:root[data-shell='analog'] .clip-loop-divider {
+  border-left: 1px dashed rgba(40, 33, 24, 0.45);
+}
+
+:root[data-shell='analog'] .clip-fade-shade {
+  fill: rgba(255, 255, 255, 0.42);
+  stroke: rgba(40, 33, 24, 0.55);
+}
+
+:root[data-shell='analog'] .clip-fade-handle {
+  border: 1.5px solid rgba(40, 33, 24, 0.6);
+  background: var(--bg-3);
+}
+
+:root[data-shell='analog'] .clip-badges {
+  color: rgba(40, 33, 24, 0.85);
+  background: rgba(255, 255, 255, 0.4);
+  text-shadow: none;
+}
+
+:root[data-shell='analog'] .activity-entry,
+:root[data-shell='analog'] .comment-item + .comment-item {
+  border-bottom-color: var(--border);
+}
+
+:root[data-shell='analog'] .auto-point {
+  background: rgba(40, 33, 24, 0.1);
+}
+
+:root[data-shell='analog'] .auto-svg .auto-point {
+  stroke: rgba(40, 33, 24, 0.35);
+}
+
+:root[data-shell='analog'] .auto-lane {
+  background: rgba(40, 33, 24, 0.06);
+}
+
+:root[data-shell='analog'] .track-vol-meter {
+  background: rgba(40, 33, 24, 0.12);
+  border-right: 1px solid rgba(40, 33, 24, 0.4);
+}
+
+:root[data-shell='analog'] .ruler-loop-strip {
+  background: rgba(40, 33, 24, 0.05);
+}
+
+:root[data-shell='analog'] .ruler-loop-handle {
+  border-left: 2px solid rgba(40, 33, 24, 0.75);
+}
+
+:root[data-shell='analog'] .ruler-loop-handle-end {
+  border-left: none;
+  border-right: 2px solid rgba(40, 33, 24, 0.75);
+}
+
+:root[data-shell='analog'] .loop-region {
+  background: rgba(40, 33, 24, 0.05);
+  border-color: rgba(40, 33, 24, 0.18);
+}
+
+:root[data-shell='analog'] .color-swatch {
+  border: 1px solid rgba(40, 33, 24, 0.25);
+}
+
+:root[data-shell='analog'] .proll-key-label {
+  fill: rgba(40, 33, 24, 0.7);
+}
+
+:root[data-shell='analog'] .proll-note-selected {
+  box-shadow: 0 0 0 1.5px rgba(40, 33, 24, 0.9);
+}
+
+:root[data-shell='analog'] .proll-note {
+  border: 1px solid rgba(40, 33, 24, 0.4);
+}
+
+:root[data-shell='analog'] .proll-key {
+  border-bottom: 1px solid var(--border);
+}
+
+/* ---------- Scrollbars ---------- */
+
+:root[data-shell='analog'] ::-webkit-scrollbar {
+  width: 13px;
+  height: 13px;
+}
+
+:root[data-shell='analog'] ::-webkit-scrollbar-track {
+  background: color-mix(in srgb, var(--bg-0) 70%, #000 6%);
+}
+
+:root[data-shell='analog'] ::-webkit-scrollbar-thumb {
+  border: 3px solid transparent;
+  border-radius: 7px;
+  background-clip: padding-box;
+  background-color: color-mix(in srgb, var(--border) 85%, #000);
+}
+
+:root[data-shell='analog'] ::-webkit-scrollbar-thumb:hover {
+  background-color: var(--text-dim);
+}

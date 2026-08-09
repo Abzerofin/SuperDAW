@@ -6,6 +6,7 @@ import { projectStore } from '@/state/projectStore'
 import { useProjectState } from '@/state/hooks'
 import { assetStore } from '@/state/audioInstance'
 import { BAY_DRAG_MIME, importFilesToBay, type BayDragPayload } from '@/lib/importAudio'
+import { useTheme } from '@/state/theme'
 
 /** Internal drag type for reorganizing nodes inside the bay. */
 const NODE_DRAG_MIME = 'application/x-superdaw-baynode'
@@ -253,6 +254,8 @@ function BayTile({
 
 function ThumbWave({ assetId }: { assetId: string | null }): React.JSX.Element {
   const canvasRef = useRef<HTMLCanvasElement>(null)
+  // Repaint when the ink changes: a theme switch is not otherwise a render.
+  const themeId = useTheme().themeId
 
   useEffect(() => {
     const canvas = canvasRef.current
@@ -266,14 +269,16 @@ function ThumbWave({ assetId }: { assetId: string | null }): React.JSX.Element {
     const peaks = asset.peaks
     const buckets = peaks.length / 2
     const mid = h / 2
-    g.fillStyle = 'rgba(255, 255, 255, 0.6)'
+    g.fillStyle =
+      getComputedStyle(canvas).getPropertyValue('--wave-ink').trim() ||
+      'rgba(255, 255, 255, 0.6)'
     for (let x = 0; x < w; x++) {
       const b = Math.floor((x / w) * buckets)
       const min = peaks[b * 2]
       const max = peaks[b * 2 + 1]
       g.fillRect(x, mid - max * (mid - 1), 1, Math.max(1, (max - min) * (mid - 1)))
     }
-  }, [assetId])
+  }, [assetId, themeId])
 
   return <canvas ref={canvasRef} width={72} height={40} className="bay-thumb" />
 }

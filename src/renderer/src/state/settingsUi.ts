@@ -2,13 +2,13 @@ import { useSyncExternalStore } from 'react'
 
 /**
  * Settings window visibility — ephemeral UI state. Sections are a fixed
- * roster so future panes (appearance, shortcuts, collaboration, plugins)
- * slot in without touching the window shell.
+ * roster so future panes (shortcuts, …) slot in without touching the
+ * window shell.
  */
 export type SettingsSection =
   | 'general'
   | 'audio'
-  | 'appearance'
+  | 'themes'
   | 'shortcuts'
   | 'collaboration'
   | 'plugins'
@@ -17,6 +17,7 @@ export type SettingsSection =
 export const IMPLEMENTED_SECTIONS: ReadonlySet<SettingsSection> = new Set([
   'general',
   'audio',
+  'themes',
   'collaboration',
   'plugins'
 ])

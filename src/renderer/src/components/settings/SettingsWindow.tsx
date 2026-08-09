@@ -9,6 +9,7 @@ import {
   type SettingsSection
 } from '@/state/settingsUi'
 import { PluginsPane } from './PluginsPane'
+import { ThemesPane } from './ThemesPane'
 
 /**
  * The settings window: an in-app overlay (professional, no OS dialogs)
@@ -20,7 +21,7 @@ import { PluginsPane } from './PluginsPane'
 const SECTIONS: Array<{ id: SettingsSection; label: string }> = [
   { id: 'general', label: 'General' },
   { id: 'audio', label: 'Audio' },
-  { id: 'appearance', label: 'Appearance' },
+  { id: 'themes', label: 'Themes' },
   { id: 'shortcuts', label: 'Keyboard Shortcuts' },
   { id: 'collaboration', label: 'Collaboration' },
   { id: 'plugins', label: 'Plugins' }
@@ -63,6 +64,7 @@ export function SettingsWindow(): React.JSX.Element | null {
           </button>
           {ui.section === 'general' && <GeneralPane />}
           {ui.section === 'audio' && <AudioPane />}
+          {ui.section === 'themes' && <ThemesPane />}
           {ui.section === 'collaboration' && <CollaborationPane />}
           {ui.section === 'plugins' && <PluginsPane />}
           {!IMPLEMENTED_SECTIONS.has(ui.section) && (

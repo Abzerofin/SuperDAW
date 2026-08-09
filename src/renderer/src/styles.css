@@ -13,6 +13,9 @@
   --mute: #e0b25b;
   --solo: #6fbf73;
   --danger: #e06c75;
+  /* Waveform ink. Canvas can't read a variable on its own — the two peak
+     painters look this up, so a light theme can put dark ink on a pale clip. */
+  --wave-ink: rgba(255, 255, 255, 0.55);
 }
 
 * {
@@ -3407,7 +3410,6 @@ input {
   font-size: 12px;
 }
 
-
 /* ---------- Track input / monitoring ---------- */
 .track-in {
   width: auto;
@@ -3833,3 +3835,104 @@ input {
   background: var(--accent);
   border-color: var(--accent);
 }
+
+/* ---------- Settings ▸ Themes ---------- */
+/* The cards preview a theme the app is NOT currently wearing, so each
+   swatch paints its own palette literally instead of reading the live
+   --bg/--m tokens. */
+.theme-field {
+  max-width: none;
+}
+
+.theme-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(168px, 1fr));
+  gap: 10px;
+  max-width: 560px;
+}
+
+.theme-card {
+  display: flex;
+  flex-direction: column;
+  align-items: stretch;
+  gap: 6px;
+  padding: 8px;
+  text-align: left;
+  background: var(--bg-0);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+}
+
+.theme-card:hover {
+  border-color: var(--text-dim);
+}
+
+.theme-card-active {
+  border-color: var(--accent);
+  box-shadow: inset 0 0 0 1px var(--accent);
+}
+
+.theme-card-name {
+  font-size: 12px;
+  font-weight: 600;
+}
+
+.theme-card-desc {
+  font-size: 11px;
+  line-height: 1.4;
+  color: var(--text-dim);
+  white-space: normal;
+}
+
+.theme-swatch {
+  position: relative;
+  display: block;
+  height: 54px;
+  border-radius: 4px;
+  overflow: hidden;
+}
+
+/* Graphite: flat panels parted by a straight 1px border. */
+.theme-swatch-graphite {
+  background: linear-gradient(180deg, #1c1e22 0 45%, #2e3138 45% calc(45% + 1px), #141518 0);
+}
+
+.theme-swatch-graphite::after {
+  content: '';
+  position: absolute;
+  left: 14px;
+  top: 8px;
+  width: 42px;
+  height: 12px;
+  border-radius: 3px;
+  background: #5b8def;
+}
+
+/* The analog swatches: a cream panel parted by a machined groove (dark
+   hairline + light lip), with a printed marker chip. */
+.theme-swatch-cassette,
+.theme-swatch-formica {
+  background: linear-gradient(180deg, #f0e8d5 0 46%, #ad9c7d 46% calc(46% + 1px), #fffcf3 0 calc(46% + 2px), #cdc1a6 0);
+}
+
+.theme-swatch-formica {
+  background: linear-gradient(180deg, #eff0e6 0 46%, #a3a996 46% calc(46% + 1px), #fffffa 0 calc(46% + 2px), #c4c7b8 0);
+}
+
+.theme-swatch-cassette::after,
+.theme-swatch-formica::after {
+  content: '';
+  position: absolute;
+  left: 15px;
+  top: 9px;
+  width: 38px;
+  height: 12px;
+  border-radius: 2px;
+  background: #a4552f;
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.55), 0 1px 1px rgba(72, 60, 42, 0.3);
+}
+
+.theme-swatch-formica::after {
+  background: #3c6f7a;
+}
+
