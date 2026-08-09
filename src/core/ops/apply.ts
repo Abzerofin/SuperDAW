@@ -275,12 +275,19 @@ export function apply(state: ProjectState, op: Operation): ProjectState {
       return { ...state, notes: { ...state.notes, [op.noteId]: { ...note, pitch, start } } }
     }
 
+    case 'note/moveMany': {
+      let next = state
+      for (const move of op.moves) next = apply(next, { type: 'note/move', ...move })
+      return next
+    }
+
     case 'note/resize': {
       const note = state.notes[op.noteId]
       if (!note) return state
       const duration = Math.max(1, op.duration)
-      if (note.duration === duration) return state
-      return { ...state, notes: { ...state.notes, [op.noteId]: { ...note, duration } } }
+      const start = op.start !== undefined ? Math.max(0, op.start) : note.start
+      if (note.duration === duration && note.start === start) return state
+      return { ...state, notes: { ...state.notes, [op.noteId]: { ...note, duration, start } } }
     }
 
     case 'note/setVelocity': {

@@ -69,6 +69,11 @@ export function describe(state: ProjectState, op: Operation): string | null {
       const note = state.notes[op.noteId]
       return `Moved a note${note ? ` in "${clipName(state, note.clipId)}"` : ''}`
     }
+    case 'note/moveMany': {
+      const first = state.notes[op.moves[0]?.noteId]
+      const suffix = first ? ` in "${clipName(state, first.clipId)}"` : ''
+      return `Moved ${op.moves.length} notes${suffix}`
+    }
     case 'note/resize': {
       const note = state.notes[op.noteId]
       return `Resized a note${note ? ` in "${clipName(state, note.clipId)}"` : ''}`

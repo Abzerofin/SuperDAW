@@ -3,6 +3,7 @@ import { formatPosition, type TimeSignature } from '@core/model/timebase'
 import { useProjectState, useCanUndo, useCanRedo } from '@/state/hooks'
 import { projectStore } from '@/state/projectStore'
 import { transport } from '@/state/transport'
+import { timelineViewport } from '@/state/timelineViewport'
 import { audioEngine } from '@/state/audioInstance'
 import { useCollab, USER_COLORS } from '@/state/collab'
 import { usePanels } from '@/state/panels'
@@ -42,6 +43,16 @@ export function TransportBar(): React.JSX.Element {
         >
           ⏮
         </button>
+        <button
+          className="tbtn"
+          title="Return to start and bring the view along"
+          onClick={() => {
+            transport.setPosition(0)
+            timelineViewport.scrollTo(0)
+          }}
+        >
+          ⇤
+        </button>
         <PlayButton />
         <StopButton />
         <RecordButton />
@@ -65,9 +76,9 @@ export function TransportBar(): React.JSX.Element {
           ↷
         </button>
         <button
-          className={`tbtn ${panelState.rightPanel === 'chat' ? 'tbtn-active' : ''}`}
+          className={`tbtn ${panelState.isOpen('chat') ? 'tbtn-active' : ''}`}
           title="Toggle chat"
-          onClick={() => panelState.toggleRight('chat')}
+          onClick={() => panelState.togglePanel('chat')}
         >
           Chat
           {panelState.unreadChat > 0 && (
@@ -75,9 +86,9 @@ export function TransportBar(): React.JSX.Element {
           )}
         </button>
         <button
-          className={`tbtn ${panelState.rightPanel === 'activity' ? 'tbtn-active' : ''}`}
+          className={`tbtn ${panelState.isOpen('activity') ? 'tbtn-active' : ''}`}
           title="Toggle activity feed"
-          onClick={() => panelState.toggleRight('activity')}
+          onClick={() => panelState.togglePanel('activity')}
         >
           Activity
         </button>

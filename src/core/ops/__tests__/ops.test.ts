@@ -186,7 +186,10 @@ suite('invert', () => {
       { id: 'n3', clipId: 'c2', pitch: 65, start: 480, duration: 480, velocity: 80 }
     ] },
     { type: 'note/move', noteId: 'nA', pitch: 67, start: 960 },
+    { type: 'note/moveMany', moves: [{ noteId: 'nA', pitch: 55, start: 1440 }] },
     { type: 'note/resize', noteId: 'nA', duration: 960 },
+    // Left-edge trim: start and duration change in the one op.
+    { type: 'note/resize', noteId: 'nA', duration: 240, start: 240 },
     { type: 'note/setVelocity', noteId: 'nA', velocity: 45 },
     { type: 'note/delete', noteIds: ['nA'] },
     { type: 'track/setVolume', trackId: 't1', volume: 0.7 },

@@ -86,10 +86,10 @@ export function CommandPalette(): React.JSX.Element | null {
     cmd('Export WAV…', () => void exportWav())
     cmd('Close project', () => closeProject())
     cmd('Return to Home', () => appShell.goHome())
-    cmd('Toggle mixer', () => panels.toggleBottom('mixer'))
-    cmd('Toggle File Bay', () => panels.toggleBottom('files'))
-    cmd('Toggle chat', () => panels.toggleRight('chat'))
-    cmd('Toggle activity feed', () => panels.toggleRight('activity'))
+    cmd('Toggle mixer', () => panels.togglePanel('mixer'))
+    cmd('Toggle File Bay', () => panels.togglePanel('files'))
+    cmd('Toggle chat', () => panels.togglePanel('chat'))
+    cmd('Toggle activity feed', () => panels.togglePanel('activity'))
 
     out.push({
       id: 'settings:general',
@@ -115,7 +115,7 @@ export function CommandPalette(): React.JSX.Element | null {
         detail: `${track.kind}${track.frozenAssetId ? ' · frozen' : ''} — open FX`,
         action: () => {
           selection.selectTrack(id)
-          panels.setBottom('effects')
+          panels.openPanel('effects')
         }
       })
       out.push({
@@ -123,7 +123,7 @@ export function CommandPalette(): React.JSX.Element | null {
         category: 'Mixer',
         label: `${track.name} strip`,
         detail: 'open in mixer',
-        action: () => panels.setBottom('mixer')
+        action: () => panels.openPanel('mixer')
       })
       out.push({
         id: `routing:${id}`,
@@ -142,7 +142,7 @@ export function CommandPalette(): React.JSX.Element | null {
         detail: track ? `on ${track.name}` : undefined,
         action: () => {
           selection.selectTrack(instance.trackId)
-          panels.setBottom('effects')
+          panels.openPanel('effects')
         }
       })
     }
@@ -154,7 +154,7 @@ export function CommandPalette(): React.JSX.Element | null {
         category: 'Asset',
         label: node.name,
         detail: node.kind,
-        action: () => panels.setBottom('files')
+        action: () => panels.openPanel('files')
       })
     }
 

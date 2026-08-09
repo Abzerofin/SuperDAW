@@ -113,6 +113,8 @@ export function TrackHeader({
         compact ? 'track-header-compact' : ''
       } ${isSelected ? 'track-header-selected' : ''}`}
       style={{ borderLeftColor: track.color, paddingLeft: 9 + depth * 14 }}
+      data-ping-id={`track:${track.id}`}
+      data-ping={`track "${track.name}"`}
       // Any interaction with a header selects its track (the Effects dock
       // follows the selection), including right-click and control clicks
       // that bubble up. Ctrl/Cmd extends the selection instead, so several
@@ -224,7 +226,7 @@ export function TrackHeader({
           }
           onClick={() => {
             selection.selectTrack(track.id)
-            panels.setBottom('effects')
+            panels.openPanel('effects')
           }}
         >
           FX
@@ -299,7 +301,7 @@ export function TrackHeader({
               isFolder ? 'Bus effects…' : 'Instruments & effects…',
               () => {
                 selection.selectTrack(track.id)
-                panels.setBottom('effects')
+                panels.openPanel('effects')
               },
               false
             )}

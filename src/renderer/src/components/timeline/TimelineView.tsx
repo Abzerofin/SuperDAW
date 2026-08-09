@@ -24,6 +24,7 @@ import {
   type BayDragPayload
 } from '@/lib/importAudio'
 import { collab } from '@/state/collab'
+import { timelineViewport } from '@/state/timelineViewport'
 import { createTrack } from '@/lib/trackActions'
 import { capturePointer } from '@/lib/pointer'
 import { commentUi, useCommentUi } from '@/state/commentUi'
@@ -232,6 +233,8 @@ export function TimelineView(): React.JSX.Element {
     setReorderState(value)
   }
   const [colorMenu, setColorMenu] = useState<{ clipId: ClipId; x: number; y: number } | null>(null)
+  // Right-click on empty editor space: a small "new track" menu.
+  const [spaceMenu, setSpaceMenu] = useState<{ x: number; y: number } | null>(null)
   /** Files are hovering the trailing drop bar (highlight only). */
   const [dropBarActive, setDropBarActive] = useState(false)
   // Rubber-band select. Mirrored in a ref because pointermove batching can
@@ -400,6 +403,23 @@ export function TimelineView(): React.JSX.Element {
     return () => window.removeEventListener('pointerdown', onPointerDown)
   }, [colorMenu])
 
+  useEffect(() => {
+    if (!spaceMenu) return
+    const onPointerDown = (): void => setSpaceMenu(null)
+    window.addEventListener('pointerdown', onPointerDown)
+    return () => window.removeEventListener('pointerdown', onPointerDown)
+  }, [spaceMenu])
+
+  // Outside chrome (the transport's ⇤ button) can ask the view to scroll.
+  useEffect(
+    () =>
+      timelineViewport.onScrollRequest((ticks) => {
+        const el = scrollRef.current
+        if (el) el.scrollLeft = Math.max(0, ticks * followRef.current.pxPerTick)
+      }),
+    []
+  )
+
   /** Snapshot a clip's pre-drag values; null if it can't take part. */
   const dragMemberOf = (clipId: ClipId): DragMember | null => {
     const clip = projectStore.state.clips[clipId]
@@ -547,7 +567,11 @@ export function TimelineView(): React.JSX.Element {
     // "presence is broken". It clears only on leaving the timeline.
     const x = Math.max(0, e.clientX - rect.left - HEADER_W)
     const y = Math.max(0, e.clientY - rect.top - RULER_H)
-    collab.sendCursor({ ticks: x / pxPerTick, trackIndex: trackIndexAtY(y) })
+    const trackIndex = trackIndexAtY(y)
+    // Lane-relative vertical fraction, so peers place the literal pointer
+    // on the same track whatever their zoom/compact/automation layout.
+    const yFrac = Math.min(1.5, Math.max(0, (y - (trackTops[trackIndex] ?? 0)) / laneH))
+    collab.sendCursor({ ticks: x / pxPerTick, trackIndex, yFrac })
   }
 
   /** Middle mouse = temporary ping identifying exactly what was clicked. */
@@ -962,6 +986,22 @@ export function TimelineView(): React.JSX.Element {
     createTrack(kind)
   }
 
+  /** Empty space below the tracks: double-click adds, right-click offers. */
+  const isEmptySpace = (e: React.MouseEvent): boolean => e.target === scrollRef.current
+
+  const onEmptyDoubleClick = (e: React.MouseEvent): void => {
+    if (!isEmptySpace(e)) return
+    // Same kind as the last track, so a MIDI-heavy session keeps its flow.
+    const last = tracks[tracks.length - 1]
+    addTrack(last && last.kind !== 'folder' ? last.kind : 'audio')
+  }
+
+  const onEmptyContextMenu = (e: React.MouseEvent): void => {
+    if (!isEmptySpace(e)) return
+    e.preventDefault()
+    setSpaceMenu({ x: e.clientX, y: e.clientY })
+  }
+
   // Ruler labels for the active mode, thinned to stay legible.
   const rulerLabels: Array<{ x: number; text: string }> = []
   if (rulerMode === 'bars') {
@@ -1020,7 +1060,12 @@ export function TimelineView(): React.JSX.Element {
   }
 
   return (
-    <div className="timeline" ref={scrollRef}>
+    <div
+      className="timeline"
+      ref={scrollRef}
+      onDoubleClick={onEmptyDoubleClick}
+      onContextMenu={onEmptyContextMenu}
+    >
       <div
         className="timeline-grid"
         ref={gridRef}
@@ -1063,6 +1108,7 @@ export function TimelineView(): React.JSX.Element {
             </span>
           ))}
           <div className="ruler-loop-strip" style={{ height: LOOP_STRIP_H }} />
+          <PlayheadCap pxPerTick={pxPerTick} gridRef={gridRef} />
           {shownLoop && (
             <div
               className={`ruler-loop ${transport.loopEnabled ? '' : 'ruler-loop-off'}`}
@@ -1351,7 +1397,72 @@ export function TimelineView(): React.JSX.Element {
             />
           )
         })()}
+
+      {spaceMenu && (
+        <div
+          className="menu-panel space-menu"
+          style={{ left: spaceMenu.x, top: spaceMenu.y }}
+          onPointerDown={(e) => e.stopPropagation()}
+        >
+          {(['audio', 'midi', 'folder'] as const).map((kind) => (
+            <button
+              key={kind}
+              className="menu-item"
+              onClick={() => {
+                setSpaceMenu(null)
+                addTrack(kind)
+              }}
+            >
+              <span>
+                New {kind === 'audio' ? 'Audio' : kind === 'midi' ? 'MIDI' : 'Folder'} Track
+              </span>
+            </button>
+          ))}
+        </div>
+      )}
     </div>
+  )
+}
+
+/**
+ * The grabbable top of the playhead, riding the bottom of the ruler.
+ * Clicking the ruler still jumps; this adds dragging the cursor itself.
+ */
+function PlayheadCap({
+  pxPerTick,
+  gridRef
+}: {
+  pxPerTick: number
+  gridRef: React.RefObject<HTMLDivElement | null>
+}): React.JSX.Element {
+  const [, force] = useReducer((c: number) => c + 1, 0)
+  useEffect(() => transport.subscribe(force), [])
+  const draggingRef = useRef(false)
+
+  const positionFrom = (e: React.PointerEvent): number => {
+    const rect = gridRef.current?.getBoundingClientRect()
+    if (!rect) return 0
+    return Math.max(0, (e.clientX - rect.left - HEADER_W) / pxPerTick)
+  }
+
+  return (
+    <div
+      className="playhead-cap"
+      title="Playhead — drag to scrub"
+      style={{ left: transport.positionTicks() * pxPerTick }}
+      onPointerDown={(e) => {
+        if (e.button !== 0) return
+        e.stopPropagation()
+        capturePointer(e)
+        draggingRef.current = true
+      }}
+      onPointerMove={(e) => {
+        if (draggingRef.current) transport.setPosition(positionFrom(e))
+      }}
+      onPointerUp={() => {
+        draggingRef.current = false
+      }}
+    />
   )
 }
 

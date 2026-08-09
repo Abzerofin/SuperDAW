@@ -11,14 +11,14 @@ class PianoRollUiStore {
 
   open(clipId: ClipId): void {
     this.clipId = clipId
-    panels.setBottom('pianoroll')
+    panels.openPanel('pianoroll')
     this.emit()
   }
 
   close(): void {
     if (this.clipId === null) return
     this.clipId = null
-    if (panels.bottomPanel === 'pianoroll') panels.setBottom(null)
+    panels.closePanel('pianoroll')
     this.emit()
   }
 

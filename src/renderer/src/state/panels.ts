@@ -2,16 +2,79 @@ import { useSyncExternalStore } from 'react'
 import { projectStore } from './projectStore'
 
 /**
- * Which panels are open — ephemeral per-user UI state. Also owns the
- * chat unread counter: messages from others arriving while the chat tab
- * is hidden accumulate; opening the tab clears them.
+ * Dockable panel layout — ephemeral per-user UI state, persisted per
+ * machine (never in the project). Every panel lives in exactly one dock
+ * (bottom or right); each dock shows at most one panel at a time and can
+ * be resized. Tabs can be dragged between docks so the workspace bends to
+ * the user's workflow, not the other way round.
+ *
+ * Also owns the chat unread counter: messages from others arriving while
+ * the chat panel is hidden accumulate; opening it clears them.
  */
-export type RightPanel = 'activity' | 'chat' | null
-export type BottomPanel = 'files' | 'mixer' | 'effects' | 'pianoroll' | null
+
+export type PanelId = 'files' | 'mixer' | 'effects' | 'pianoroll' | 'activity' | 'chat'
+export type DockSide = 'bottom' | 'right'
+
+export const PANEL_LABELS: Record<PanelId, string> = {
+  files: 'Files',
+  mixer: 'Mixer',
+  effects: 'Effects',
+  pianoroll: 'Piano',
+  activity: 'Activity',
+  chat: 'Chat'
+}
+
+const ALL_PANELS: readonly PanelId[] = ['files', 'mixer', 'effects', 'pianoroll', 'activity', 'chat']
+
+interface DockLayout {
+  docks: Record<DockSide, PanelId[]>
+  active: Record<DockSide, PanelId | null>
+  bottomHeight: number
+  rightWidth: number
+}
+
+const DEFAULT_LAYOUT: DockLayout = {
+  docks: {
+    bottom: ['files', 'mixer', 'effects', 'pianoroll'],
+    right: ['activity', 'chat']
+  },
+  active: { bottom: 'files', right: 'activity' },
+  bottomHeight: 240,
+  rightWidth: 300
+}
+
+const STORAGE_KEY = 'superdaw.dockLayout'
+const MIN_BOTTOM_H = 120
+const MAX_BOTTOM_H = 600
+const MIN_RIGHT_W = 220
+const MAX_RIGHT_W = 640
+
+function loadLayout(): DockLayout {
+  try {
+    const raw = typeof localStorage !== 'undefined' ? localStorage.getItem(STORAGE_KEY) : null
+    if (!raw) return structuredClone(DEFAULT_LAYOUT)
+    const parsed = JSON.parse(raw) as DockLayout
+    // Every known panel must appear in exactly one dock, or the layout is
+    // from another era — fall back rather than losing panels.
+    const all = [...parsed.docks.bottom, ...parsed.docks.right]
+    const valid =
+      all.length === ALL_PANELS.length &&
+      ALL_PANELS.every((id) => all.includes(id)) &&
+      typeof parsed.bottomHeight === 'number' &&
+      typeof parsed.rightWidth === 'number'
+    if (!valid) return structuredClone(DEFAULT_LAYOUT)
+    for (const side of ['bottom', 'right'] as const) {
+      const active = parsed.active[side]
+      if (active !== null && !parsed.docks[side].includes(active)) parsed.active[side] = null
+    }
+    return parsed
+  } catch {
+    return structuredClone(DEFAULT_LAYOUT)
+  }
+}
 
 class PanelStore {
-  rightPanel: RightPanel = 'activity'
-  bottomPanel: BottomPanel = 'files'
+  layout: DockLayout = loadLayout()
   unreadChat = 0
 
   private version = 0
@@ -22,7 +85,7 @@ class PanelStore {
       if (
         envelope.op.type === 'chat/post' &&
         envelope.op.message.userId !== projectStore.userId &&
-        this.rightPanel !== 'chat'
+        !this.isOpen('chat')
       ) {
         this.unreadChat++
         this.emit()
@@ -30,21 +93,66 @@ class PanelStore {
     })
   }
 
-  toggleRight(panel: Exclude<RightPanel, null>): void {
-    this.rightPanel = this.rightPanel === panel ? null : panel
-    if (this.rightPanel === 'chat') this.unreadChat = 0
+  dockOf(id: PanelId): DockSide {
+    return this.layout.docks.right.includes(id) ? 'right' : 'bottom'
+  }
+
+  isOpen(id: PanelId): boolean {
+    return this.layout.active[this.dockOf(id)] === id
+  }
+
+  openPanel(id: PanelId): void {
+    const side = this.dockOf(id)
+    if (this.layout.active[side] === id) return
+    this.layout.active[side] = id
+    if (id === 'chat') this.unreadChat = 0
+    this.persist()
     this.emit()
   }
 
-  toggleBottom(panel: Exclude<BottomPanel, null>): void {
-    this.bottomPanel = this.bottomPanel === panel ? null : panel
+  closePanel(id: PanelId): void {
+    const side = this.dockOf(id)
+    if (this.layout.active[side] !== id) return
+    this.layout.active[side] = null
+    this.persist()
     this.emit()
   }
 
-  setBottom(panel: BottomPanel): void {
-    if (this.bottomPanel === panel) return
-    this.bottomPanel = panel
+  togglePanel(id: PanelId): void {
+    this.isOpen(id) ? this.closePanel(id) : this.openPanel(id)
+  }
+
+  /** Re-home a tab (drag-and-drop). The moved panel becomes its dock's active one. */
+  movePanel(id: PanelId, side: DockSide, index: number): void {
+    const from = this.dockOf(id)
+    if (this.layout.active[from] === id) this.layout.active[from] = null
+    this.layout.docks[from] = this.layout.docks[from].filter((p) => p !== id)
+    const target = this.layout.docks[side]
+    target.splice(Math.min(Math.max(0, index), target.length), 0, id)
+    this.layout.active[side] = id
+    if (id === 'chat') this.unreadChat = 0
+    this.persist()
     this.emit()
+  }
+
+  setBottomHeight(height: number): void {
+    this.layout.bottomHeight = Math.min(MAX_BOTTOM_H, Math.max(MIN_BOTTOM_H, Math.round(height)))
+    this.persist()
+    this.emit()
+  }
+
+  setRightWidth(width: number): void {
+    this.layout.rightWidth = Math.min(MAX_RIGHT_W, Math.max(MIN_RIGHT_W, Math.round(width)))
+    this.persist()
+    this.emit()
+  }
+
+  private persist(): void {
+    try {
+      localStorage.setItem(STORAGE_KEY, JSON.stringify(this.layout))
+    } catch {
+      // Layout that doesn't persist must never break the session.
+    }
   }
 
   subscribe = (listener: () => void): (() => void) => {

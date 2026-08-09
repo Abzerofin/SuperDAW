@@ -205,7 +205,8 @@ export class HostSession {
           message.envelope.op,
           'remote',
           peer.user.userId,
-          message.envelope.id
+          message.envelope.id,
+          message.envelope.intent
         )
         if (!applied) peer.sink.send({ t: 'op-noop', envelopeId: message.envelope.id })
         return

@@ -75,6 +75,12 @@ interface HistoryEntry {
 
 const ACTIVITY_LIMIT = 500
 
+function withIntentLabel(text: string, intent: 'undo' | 'redo' | undefined): string {
+  if (intent === 'undo') return `Undo · ${text}`
+  if (intent === 'redo') return `Redo · ${text}`
+  return text
+}
+
 export class ProjectStore {
   private confirmed: ProjectState
   private displayed: ProjectState
@@ -202,7 +208,10 @@ export class ProjectStore {
     const isOwn = ownIndex !== -1
     // Describe against pre-apply confirmed state so names resolve. A null
     // description (chat) stays out of the activity feed but still applies.
-    const text = isOwn ? null : describe(this.confirmed, envelope.op)
+    const described = isOwn ? null : describe(this.confirmed, envelope.op)
+    // A peer's undo travels as its inverse op; label it as the undo it is,
+    // not as a fresh edit ("Set volume…" when they actually reverted one).
+    const text = described ? withIntentLabel(described, envelope.intent) : described
 
     this.confirmed = apply(this.confirmed, envelope.op)
     if (isOwn) this.pending.splice(ownIndex, 1)
@@ -243,20 +252,23 @@ export class ProjectStore {
     op: Operation,
     source: OpSource = 'local',
     userId: string = this.userId,
-    envelopeId?: string
+    envelopeId?: string,
+    intent?: 'undo' | 'redo'
   ): boolean {
     const next = apply(this.displayed, op)
     if (next === this.displayed) return false
 
-    const text = describe(this.displayed, op)
+    const described = describe(this.displayed, op)
+    // A host applying a client's history op labels it like the client did.
+    const text = described ? withIntentLabel(described, intent) : described
     if (source === 'local') {
       const inverse = invert(this.displayed, op)
       if (inverse) {
-        this.undoStack.push({ forward: op, inverse, text: text ?? op.type })
+        this.undoStack.push({ forward: op, inverse, text: described ?? op.type })
         this.redoStack = []
       }
     }
-    this.commit(op, next, text, source, userId, envelopeId)
+    this.commit(op, next, text, source, userId, envelopeId, intent)
     return true
   }
 
@@ -265,7 +277,7 @@ export class ProjectStore {
     if (!entry) return false
     const next = apply(this.displayed, entry.inverse)
     this.redoStack.push(entry)
-    this.commit(entry.inverse, next, `Undo · ${entry.text}`, 'history', this.userId)
+    this.commit(entry.inverse, next, `Undo · ${entry.text}`, 'history', this.userId, undefined, 'undo')
     return true
   }
 
@@ -275,7 +287,7 @@ export class ProjectStore {
     const inverse = invert(this.displayed, entry.forward)
     const next = apply(this.displayed, entry.forward)
     if (inverse) this.undoStack.push({ ...entry, inverse })
-    this.commit(entry.forward, next, `Redo · ${entry.text}`, 'history', this.userId)
+    this.commit(entry.forward, next, `Redo · ${entry.text}`, 'history', this.userId, undefined, 'redo')
     return true
   }
 
@@ -287,13 +299,15 @@ export class ProjectStore {
     text: string | null,
     source: OpSource,
     userId: string,
-    envelopeId?: string
+    envelopeId?: string,
+    intent?: 'undo' | 'redo'
   ): void {
     const envelope: OpEnvelope = {
       id: envelopeId ?? newId('op'),
       userId,
       time: Date.now(),
-      op
+      op,
+      ...(intent !== undefined ? { intent } : {})
     }
 
     this.displayed = next

@@ -330,6 +330,24 @@ suite('session sync', () => {
     expect(b.store.state.clips['c-undo']).toBeUndefined()
   })
 
+  test("a peer's undo is labeled as an undo in everyone's activity feed", () => {
+    const net = new TestNetwork()
+    const a = net.addClient('alice')
+    const b = net.addClient('bob')
+    net.flush()
+
+    a.store.dispatch({ type: 'clip/rename', clipId: 'c1', name: 'Take 2' })
+    net.flush()
+    a.store.undo()
+    net.flush()
+
+    net.expectConverged()
+    // The undo arrives at peers as its inverse op (a plain rename on the
+    // wire); the envelope's intent is what lets them label it honestly.
+    expect(net.hostStore.activity.at(-1)?.text).toMatch(/^Undo · /)
+    expect(b.store.activity.at(-1)?.text).toMatch(/^Undo · /)
+  })
+
   test('late joiner receives the full current document', () => {
     const net = new TestNetwork()
     const a = net.addClient('alice')

@@ -39,6 +39,8 @@ function TrackStrip({ track }: { track: Track }): React.JSX.Element {
     <div
       className="strip"
       style={{ '--track-color': track.color } as React.CSSProperties}
+      data-ping-id={`mixer:${track.id}`}
+      data-ping={`mixer · "${track.name}"`}
       onPointerDown={() => selection.selectTrack(track.id)}
     >
       <div className="strip-name" title={track.name}>
@@ -49,7 +51,7 @@ function TrackStrip({ track }: { track: Track }): React.JSX.Element {
         title="Effects (opens the Effects tab)"
         onClick={() => {
           selection.selectTrack(track.id)
-          panels.setBottom('effects')
+          panels.openPanel('effects')
         }}
       >
         FX

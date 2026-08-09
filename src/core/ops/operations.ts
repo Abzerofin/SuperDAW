@@ -64,7 +64,10 @@ export type Operation =
   | { type: 'automation/delete'; pointId: AutomationPointId }
   | { type: 'note/add'; note: Note }
   | { type: 'note/move'; noteId: NoteId; pitch: number; start: number }
-  | { type: 'note/resize'; noteId: NoteId; duration: number }
+  /** Move a whole multi-selection in one gesture = one op (absolute, idempotent). */
+  | { type: 'note/moveMany'; moves: Array<{ noteId: NoteId; pitch: number; start: number }> }
+  /** `start` present = the LEFT edge moved too (duration and start in one op). */
+  | { type: 'note/resize'; noteId: NoteId; duration: number; start?: number }
   | { type: 'note/setVelocity'; noteId: NoteId; velocity: number }
   /** Plural: multi-delete and thread restores stay one undoable op. */
   | { type: 'note/delete'; noteIds: NoteId[] }
@@ -235,4 +238,10 @@ export interface OpEnvelope {
   readonly userId: string
   readonly time: number
   readonly op: Operation
+  /**
+   * Present when the op came from the history stack rather than a fresh
+   * gesture. Peers can only label it honestly with this — an undo travels
+   * as its inverse op, which is indistinguishable from a plain edit.
+   */
+  readonly intent?: 'undo' | 'redo'
 }

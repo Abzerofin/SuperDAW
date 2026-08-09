@@ -30,8 +30,15 @@ export interface SessionUser {
 
 /** Ephemeral presence payload — relayed, never stored, never in the document. */
 export interface PresenceData {
-  /** Timeline cursor, when the pointer is over the timeline. */
-  readonly cursor?: { ticks: number; trackIndex: number } | null
+  /**
+   * Timeline cursor, when the pointer is over the timeline. `yFrac` is the
+   * pointer's vertical position within the lane (0 = lane top, 1 = lane
+   * bottom) — semantic rather than pixels, so the literal cursor lands on
+   * the same track even when peers differ in zoom, compact mode, or open
+   * automation lanes. Absent on older peers; receivers fall back to a
+   * plain lane caret.
+   */
+  readonly cursor?: { ticks: number; trackIndex: number; yFrac?: number } | null
   /** A transient ping anchored to something. */
   readonly ping?: {
     readonly pingId: string
@@ -39,6 +46,13 @@ export interface PresenceData {
     readonly trackIndex: number | null
     /** Human-readable target, e.g. 'clip "Drums 1"' or 'bar 17'. */
     readonly label: string
+    /**
+     * Present = a UI ping rather than a timeline ping: a string anchors to
+     * the element carrying that `data-ping-id` on the receiver's screen
+     * (found by identity, so it lands correctly in ANY layout); null means
+     * no stable anchor exists and only the label is shown.
+     */
+    readonly uiTarget?: string | null
   }
 }
 

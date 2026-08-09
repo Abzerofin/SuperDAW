@@ -26,21 +26,29 @@ import { assetStore, audioEngine } from './audioInstance'
 export type CollabMode = 'off' | 'hosting' | 'joined'
 export type CollabTransport = 'internet' | 'lan'
 
+/**
+ * Presence palette (index 0 = host). Deliberately avoids the UI accent
+ * blue (#5b8def): a person's dot must never look like part of the chrome —
+ * a host wearing the accent colour reads as "the collab button is on",
+ * not "that's a person".
+ */
 export const USER_COLORS = [
-  '#5b8def',
   '#e8875b',
   '#6fbf73',
   '#c678dd',
   '#56b6c2',
   '#e06c75',
   '#d19a66',
-  '#98c379'
+  '#98c379',
+  '#d574b6'
 ] as const
 
 export interface RemoteCursor {
   readonly userId: string
   readonly ticks: number
   readonly trackIndex: number
+  /** Vertical position within the lane (0..1); absent from older peers. */
+  readonly yFrac?: number
   readonly lastSeen: number
 }
 
@@ -50,6 +58,8 @@ export interface ActivePing {
   readonly ticks: number
   readonly trackIndex: number | null
   readonly label: string
+  /** See PresenceData: string = anchored UI ping, null = label-only. */
+  readonly uiTarget?: string | null
   readonly at: number
 }
 
@@ -319,12 +329,24 @@ class CollabStore {
   // ---------- presence ----------
 
   /** Throttled by the caller (timeline pointer handler). */
-  sendCursor(cursor: { ticks: number; trackIndex: number } | null): void {
+  sendCursor(cursor: { ticks: number; trackIndex: number; yFrac?: number } | null): void {
     this.sendPresence({ cursor })
   }
 
   ping(ticks: number, trackIndex: number | null, label: string): void {
-    const ping = { pingId: newId('png'), ticks, trackIndex, label }
+    this.emitPing({ pingId: newId('png'), ticks, trackIndex, label })
+  }
+
+  /**
+   * Ping anything outside the timeline: `target` names a `data-ping-id`
+   * element so peers can ring it in their own layout; null shows just the
+   * label.
+   */
+  uiPing(target: string | null, label: string): void {
+    this.emitPing({ pingId: newId('png'), ticks: 0, trackIndex: null, label, uiTarget: target })
+  }
+
+  private emitPing(ping: NonNullable<PresenceData['ping']>): void {
     // Show own pings too — the sender needs the same feedback.
     this.pingList.push({ ...ping, userId: projectStore.userId, at: Date.now() })
     this.schedulePingSweep()

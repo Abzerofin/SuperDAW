@@ -121,10 +121,23 @@ export function invert(state: ProjectState, op: Operation): Operation | null {
       return { type: 'note/move', noteId: op.noteId, pitch: note.pitch, start: note.start }
     }
 
+    case 'note/moveMany': {
+      const moves = op.moves
+        .filter((m) => state.notes[m.noteId])
+        .map((m) => ({
+          noteId: m.noteId,
+          pitch: state.notes[m.noteId].pitch,
+          start: state.notes[m.noteId].start
+        }))
+      if (moves.length === 0) return null
+      return { type: 'note/moveMany', moves }
+    }
+
     case 'note/resize': {
       const note = state.notes[op.noteId]
       if (!note) return null
-      return { type: 'note/resize', noteId: op.noteId, duration: note.duration }
+      // Start always carried, so undoing a left-edge trim restores it exactly.
+      return { type: 'note/resize', noteId: op.noteId, duration: note.duration, start: note.start }
     }
 
     case 'note/setVelocity': {
