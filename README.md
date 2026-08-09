@@ -62,6 +62,24 @@ npm run test      # core test suite
 
 Architecture and contribution rules: [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md).
 
+## Collaborating
+
+Click **Collab → Start**, share the join code, others paste it into the
+launcher. Two transports, picked automatically by code length:
+
+- **LAN** (15-char codes) — the host listens directly; peers connect to its
+  address. No server involved, lowest latency, but everyone must be on the
+  same network.
+- **Internet** (8-char codes) — every peer dials a relay that forwards
+  opaque payloads without interpreting them. Works anywhere; adds one hop.
+
+**Playing with someone remote, without a relay:** a mesh VPN such as
+[Tailscale](https://tailscale.com) puts both machines on one virtual
+network, so LAN mode works across the internet unchanged — direct
+host-to-peer, no relay to run or trust. Start the session as usual and
+share the LAN code; the address it encodes is simply the host's VPN
+address. This is how remote sessions have been tested in practice.
+
 ## Releases
 
 Tagging a commit `v*` (e.g. `v0.2.0`) builds the Windows installer on CI and

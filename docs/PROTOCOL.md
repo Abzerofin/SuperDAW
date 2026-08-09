@@ -128,7 +128,10 @@ both behind the `CollabNetworking` interface (`src/net`):
 
 - **LAN** (15-char codes): the host listens on a WebSocket (Electron main
   process relays frames to the renderer); the join code encodes
-  address + port + session token.
+  address + port + session token. Because the code carries an address and
+  nothing about it assumes a physical network, this transport also works
+  across a mesh VPN (Tailscale et al.) — peers reach the host's VPN
+  address directly, no relay involved.
 - **Internet** (8-char codes): every peer — host included — dials the
   relay server (`server/`, logic in `src/core/relay`), which routes
   opaque payloads between the host and guests and never interprets them.
