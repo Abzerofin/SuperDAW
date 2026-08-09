@@ -14,6 +14,10 @@ native/vst3sdk/
 # assets), not source — they are large binaries and git handles them badly.
 Songs/
 
+# Local tool config: launch.json pins an absolute path to this machine's
+# Node install, so it is per-developer, not project state.
+.claude/launch.json
+
 # node-gyp output. Explicit rather than relying on the `release/` rule
 # above, which only matches build/Release/ by accident of Windows
 # case-insensitivity and would leak on Linux/macOS.

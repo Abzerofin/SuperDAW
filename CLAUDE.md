@@ -22,8 +22,9 @@ host-based collaboration sessions via join codes.
 
 ## Working on this repo
 
-- Node is portable, NOT on PATH. Prefix shell commands with:
-  `$env:Path = "C:\Users\calb1\AppData\Local\nodejs-portable\node-v24.19.0-win-x64;$env:Path"`
+- On the maintainer's machine Node is portable and NOT on PATH; prefix
+  shell commands with (harmless elsewhere — skip it if `node` already runs):
+  `$env:Path = "$env:LOCALAPPDATA\nodejs-portable\node-v24.19.0-win-x64;$env:Path"`
 - `npm run dev` (Electron) · `npm run dev:web` (browser, port 5180) ·
   `npm run typecheck` · `npm run test` · `npm run build`
 - The renderer must keep working in a plain browser (guard all Electron API
