@@ -146,7 +146,8 @@ export interface PluginInstance {
   readonly stateBlob: string | null
 }
 
-export const MAX_GAIN = 1.4 // ≈ +3 dB of headroom above unity
+/** Fader ceiling: +6 dB of headroom above unity. */
+export const MAX_GAIN = 10 ** (6 / 20)
 
 export type NoteId = string
 

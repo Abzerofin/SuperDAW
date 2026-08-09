@@ -12,12 +12,14 @@ import { PPQ, barsToTicks, snapTicks, ticksPerBar } from '@core/model/timebase'
 import { newId } from '@core/model/ids'
 import { projectStore } from '@/state/projectStore'
 import { useProjectState } from '@/state/hooks'
-import { selection, useSelectedClipId } from '@/state/selection'
+import { selection, useSelectionVersion } from '@/state/selection'
 import { transport } from '@/state/transport'
 import { gridTicksFor, useGridChoice } from '@/state/gridUi'
 import {
   BAY_DRAG_MIME,
+  browseForMediaFiles,
   createClipFromBayAsset,
+  importFilesAsNewTracks,
   importFilesToTrack,
   type BayDragPayload
 } from '@/lib/importAudio'
@@ -39,6 +41,7 @@ import {
   LANE_H,
   COMPACT_LANE_H,
   AUTO_H,
+  DROP_BAR_H,
   MIN_PX_PER_BEAT,
   MAX_PX_PER_BEAT
 } from './geometry'
@@ -67,6 +70,22 @@ interface ReorderState {
 /** Height of the ruler strip that drags out a loop region. */
 const LOOP_STRIP_H = 12
 
+/**
+ * Rubber-band selection dragged across empty timeline space. Coordinates
+ * are CONTENT pixels (relative to the lane area's top-left, so unaffected
+ * by scrolling), matching how clips are positioned.
+ */
+interface MarqueeState {
+  originX: number
+  originY: number
+  x: number
+  y: number
+  /** Ctrl/Cmd started the drag: add to the existing selection. */
+  additive: boolean
+  /** Selection as it was when the drag began (the base for `additive`). */
+  base: ClipId[]
+}
+
 type LoopDragMode = 'new' | 'start' | 'end' | 'move'
 
 interface LoopDrag {
@@ -79,12 +98,10 @@ interface LoopDrag {
   origEnd?: number
 }
 
-interface DragState {
-  mode: 'move' | 'resize-l' | 'resize-r' | 'loop-r' | 'stretch-r'
+/** One clip taking part in a drag: its pre-drag values plus its preview. */
+interface DragMember {
   clipId: ClipId
   hasAsset: boolean
-  originX: number
-  originY: number
   origStart: number
   origDuration: number
   origOffset: number
@@ -99,12 +116,94 @@ interface DragState {
   /** Time-factor preview during a stretch-handle drag. */
   stretch: number
   trackIndex: number
+}
+
+interface DragState extends DragMember {
+  mode: 'move' | 'resize-l' | 'resize-r' | 'loop-r' | 'stretch-r'
+  originX: number
+  originY: number
+  /**
+   * The rest of the multi-clip selection, dragged by the SAME deltas as
+   * the grabbed clip (which snaps; the others follow it exactly, so their
+   * relative spacing is preserved). Empty for an ordinary single drag.
+   */
+  others: DragMember[]
   moved: boolean
+}
+
+/**
+ * Apply the grabbed clip's resolved deltas to another selected clip.
+ * Deltas rather than absolute values, so a multi-clip drag preserves the
+ * spacing and relative lengths the user arranged — and only the grabbed
+ * clip snaps to the grid, which is what makes the group feel rigid.
+ */
+function followDrag(
+  member: DragMember,
+  lead: DragState,
+  resolved: Pick<
+    DragMember,
+    'start' | 'duration' | 'offset' | 'loopLength' | 'stretch' | 'trackIndex'
+  >,
+  gridTicks: number
+): DragMember {
+  const next = { ...member }
+  switch (lead.mode) {
+    case 'move': {
+      next.start = Math.max(0, member.origStart + (resolved.start - lead.origStart))
+      next.trackIndex = Math.max(
+        0,
+        member.origTrackIndex + (resolved.trackIndex - lead.origTrackIndex)
+      )
+      return next
+    }
+    case 'resize-l': {
+      const dStart = resolved.start - lead.origStart
+      const maxStart = member.origStart + member.origDuration - gridTicks
+      const minStart = member.hasAsset ? member.origStart - member.origOffset : 0
+      next.start = Math.min(maxStart, Math.max(minStart, Math.max(0, member.origStart + dStart)))
+      next.duration = member.origStart + member.origDuration - next.start
+      next.offset = member.hasAsset
+        ? member.origOffset + (next.start - member.origStart)
+        : member.origOffset
+      return next
+    }
+    case 'stretch-r': {
+      // Share the FACTOR, not the length: each clip stretches by the same
+      // proportion, so a slow-down applies evenly across the selection.
+      const factor = resolved.stretch / lead.origStretch
+      next.stretch = Math.min(
+        MAX_STRETCH,
+        Math.max(MIN_STRETCH, member.origStretch * factor)
+      )
+      next.duration = Math.max(
+        1,
+        Math.round((member.origDuration * next.stretch) / member.origStretch)
+      )
+      next.loopLength =
+        member.origLoop > 0
+          ? Math.round((member.origLoop * next.stretch) / member.origStretch)
+          : 0
+      return next
+    }
+    case 'loop-r': {
+      const dDuration = resolved.duration - lead.origDuration
+      const base = member.origLoop > 0 ? member.origLoop : member.origDuration
+      next.duration = Math.max(gridTicks, member.origDuration + dDuration)
+      next.loopLength = next.duration > base ? base : 0
+      return next
+    }
+    default: {
+      const dDuration = resolved.duration - lead.origDuration
+      next.duration = Math.max(gridTicks, member.origDuration + dDuration)
+      return next
+    }
+  }
 }
 
 export function TimelineView(): React.JSX.Element {
   const state = useProjectState()
-  const selectedClipId = useSelectedClipId()
+  // Re-render on any selection change; the sets are read off `selection`.
+  useSelectionVersion()
   const openCommentAnchor = useCommentUi().anchor
 
   // Open (unresolved) thread counts per clip, for the clip chips.
@@ -133,6 +232,16 @@ export function TimelineView(): React.JSX.Element {
     setReorderState(value)
   }
   const [colorMenu, setColorMenu] = useState<{ clipId: ClipId; x: number; y: number } | null>(null)
+  /** Files are hovering the trailing drop bar (highlight only). */
+  const [dropBarActive, setDropBarActive] = useState(false)
+  // Rubber-band select. Mirrored in a ref because pointermove batching can
+  // otherwise let pointerup read a stale rectangle.
+  const [marquee, setMarqueeState] = useState<MarqueeState | null>(null)
+  const marqueeRef = useRef<MarqueeState | null>(null)
+  const setMarquee = (value: MarqueeState | null): void => {
+    marqueeRef.current = value
+    setMarqueeState(value)
+  }
   // Loop-region drag (ephemeral preview; the transport is updated on release).
   const [loopDrag, setLoopDragState] = useState<LoopDrag | null>(null)
   const loopDragRef = useRef<LoopDrag | null>(null)
@@ -143,6 +252,7 @@ export function TimelineView(): React.JSX.Element {
   // Redraw when the transport's loop region changes (it is not React state).
   const [, forceTransport] = useReducer((c: number) => c + 1, 0)
   useEffect(() => transport.subscribe(forceTransport), [])
+  const markerTicks = transport.markerTicks
   const scrollRef = useRef<HTMLDivElement>(null)
   const gridRef = useRef<HTMLDivElement>(null)
   const pendingScrollX = useRef<number | null>(null)
@@ -202,12 +312,14 @@ export function TimelineView(): React.JSX.Element {
   }
   const lastGridRow =
     2 + rowMeta.reduce((n, m) => n + (m.auto ? 2 : 1), 0)
+  // A trailing drop bar always closes the list: it is where files land to
+  // become new tracks, and it doubles as the empty-project call to action.
   const rowTemplate =
     trackCount === 0
-      ? `${RULER_H}px ${laneH}px`
+      ? `${RULER_H}px ${DROP_BAR_H}px`
       : `${RULER_H}px ${rowMeta
           .map((m) => (m.auto ? `${laneH}px ${AUTO_H}px` : `${laneH}px`))
-          .join(' ')}`
+          .join(' ')} ${DROP_BAR_H}px`
 
   /** Track index for a y position in content coordinates (below the ruler). */
   const trackIndexAtY = (y: number): number => {
@@ -288,31 +400,16 @@ export function TimelineView(): React.JSX.Element {
     return () => window.removeEventListener('pointerdown', onPointerDown)
   }, [colorMenu])
 
-  const beginDrag = (
-    e: React.PointerEvent,
-    clipId: ClipId,
-    mode: DragState['mode']
-  ): void => {
-    if (e.button !== 0) return
-    e.stopPropagation()
+  /** Snapshot a clip's pre-drag values; null if it can't take part. */
+  const dragMemberOf = (clipId: ClipId): DragMember | null => {
     const clip = projectStore.state.clips[clipId]
-    if (!clip) return
-    // Frozen tracks are locked: their render would go stale if clips moved.
-    // Unfreeze to edit (selection and comments still work).
-    if (projectStore.state.tracks[clip.trackId]?.frozenAssetId) {
-      selection.select(clipId, clip.trackId)
-      return
-    }
+    if (!clip) return null
+    if (projectStore.state.tracks[clip.trackId]?.frozenAssetId) return null
     const trackIndex = rowIndexOfTrack.get(clip.trackId) ?? -1
-    if (trackIndex === -1) return
-    selection.select(clipId, clip.trackId)
-    capturePointer(e)
-    setDrag({
-      mode,
+    if (trackIndex === -1) return null
+    return {
       clipId,
       hasAsset: clip.assetId !== null,
-      originX: e.clientX,
-      originY: e.clientY,
       origStart: clip.start,
       origDuration: clip.duration,
       origOffset: clip.offset,
@@ -324,9 +421,98 @@ export function TimelineView(): React.JSX.Element {
       offset: clip.offset,
       loopLength: clip.loopLength,
       stretch: clip.stretch,
-      trackIndex,
-      moved: false
+      trackIndex
+    }
+  }
+
+  const beginDrag = (
+    e: React.PointerEvent,
+    clipId: ClipId,
+    mode: DragState['mode']
+  ): void => {
+    if (e.button !== 0) return
+    e.stopPropagation()
+    const clip = projectStore.state.clips[clipId]
+    if (!clip) return
+    // Ctrl/Cmd-click extends the selection instead of starting a drag, so
+    // several clips can be gathered before moving them together.
+    if (e.ctrlKey || e.metaKey) {
+      selection.toggleClip(clipId, clip.trackId)
+      return
+    }
+    // Frozen tracks are locked: their render would go stale if clips moved.
+    // Unfreeze to edit (selection and comments still work).
+    if (projectStore.state.tracks[clip.trackId]?.frozenAssetId) {
+      selection.select(clipId, clip.trackId)
+      return
+    }
+    const member = dragMemberOf(clipId)
+    if (!member) return
+    // Grabbing a clip that is already part of a multi-selection drags the
+    // whole set; grabbing anything else collapses the selection to it.
+    const inSelection = selection.isClipSelected(clipId) && selection.selectedClipIds.size > 1
+    if (inSelection) selection.selectClips(selection.selectedClipIds, clipId)
+    else selection.select(clipId, clip.trackId)
+    const others = inSelection
+      ? [...selection.selectedClipIds]
+          .filter((id) => id !== clipId)
+          .map(dragMemberOf)
+          .filter((m): m is DragMember => m !== null)
+      : []
+    capturePointer(e)
+    setDrag({ ...member, mode, originX: e.clientX, originY: e.clientY, others, moved: false })
+  }
+
+  /** Pointer position in lane-content pixels (scroll-independent). */
+  const contentPoint = (e: { clientX: number; clientY: number }): { x: number; y: number } => {
+    const rect = gridRef.current?.getBoundingClientRect()
+    if (!rect) return { x: 0, y: 0 }
+    return {
+      x: Math.max(0, e.clientX - rect.left - HEADER_W),
+      y: Math.max(0, e.clientY - rect.top - RULER_H)
+    }
+  }
+
+  /**
+   * Rubber-band select: drag from empty lane space to gather every clip the
+   * box touches. Pure selection — no ops, nothing to undo.
+   */
+  const beginMarquee = (e: React.PointerEvent): void => {
+    if (e.button !== 0) return
+    const additive = e.ctrlKey || e.metaKey
+    const { x, y } = contentPoint(e)
+    capturePointer(e)
+    setMarquee({
+      originX: x,
+      originY: y,
+      x,
+      y,
+      additive,
+      base: additive ? [...selection.selectedClipIds] : []
     })
+    // A plain click on empty space still clears, as it always did; the
+    // marquee only adds to that once the pointer actually moves.
+    if (!additive) selection.select(null)
+  }
+
+  /** Clip ids whose rectangles intersect the dragged box. */
+  const clipsInMarquee = (box: MarqueeState): ClipId[] => {
+    const left = Math.min(box.originX, box.x)
+    const right = Math.max(box.originX, box.x)
+    const top = Math.min(box.originY, box.y)
+    const bottom = Math.max(box.originY, box.y)
+    const hits: ClipId[] = []
+    for (const clip of Object.values(state.clips)) {
+      const index = rowIndexOfTrack.get(clip.trackId)
+      if (index === undefined) continue // hidden inside a collapsed folder
+      const clipTop = trackTops[index]
+      if (clipTop + laneH < top || clipTop > bottom) continue
+      const clipLeft = clip.start * pxPerTick
+      const clipRight = (clip.start + clip.duration) * pxPerTick
+      if (clipRight < left || clipLeft > right) continue
+      hits.push(clip.id)
+    }
+    return hits
   }
 
   /** Drag a track header vertically to reorder tracks (ONE op on release). */
@@ -334,6 +520,8 @@ export function TimelineView(): React.JSX.Element {
     if (e.button !== 0) return
     // Buttons, inputs and popovers inside the header keep their own gestures.
     if ((e.target as HTMLElement).closest('button, input, .comment-layer-anchor')) return
+    // Ctrl/Cmd and Shift are selection modifiers on a header, not drags.
+    if (e.ctrlKey || e.metaKey || e.shiftKey) return
     // NOTE: pointer capture is deliberately deferred until the gesture is a
     // real drag (see onPointerMove). Capturing here would retarget the
     // follow-up clicks and swallow the double-click that renames a track.
@@ -388,6 +576,15 @@ export function TimelineView(): React.JSX.Element {
 
   const onPointerMove = (e: React.PointerEvent): void => {
     shareCursor(e)
+    if (marqueeRef.current) {
+      const { x, y } = contentPoint(e)
+      const box = { ...marqueeRef.current, x, y }
+      setMarquee(box)
+      // Selection follows the box live, so the result is visible before
+      // release. Ephemeral state only — no ops, nothing to undo.
+      selection.selectClips([...box.base, ...clipsInMarquee(box)])
+      return
+    }
     if (loopDragRef.current) {
       onLoopDragMove(e)
       return
@@ -482,11 +679,31 @@ export function TimelineView(): React.JSX.Element {
         loopLength !== prev.origLoop ||
         stretch !== prev.origStretch ||
         trackIndex !== prev.origTrackIndex
-      return { ...prev, start, duration, offset, loopLength, stretch, trackIndex, moved }
+      // The rest of the selection follows by the SAME deltas the grabbed
+      // clip resolved to (it did the snapping), so relative spacing holds.
+      const others = prev.others.map((m) =>
+        followDrag(m, prev, { start, duration, offset, loopLength, stretch, trackIndex }, gridTicks)
+      )
+      return {
+        ...prev,
+        start,
+        duration,
+        offset,
+        loopLength,
+        stretch,
+        trackIndex,
+        others,
+        moved
+      }
     })
   }
 
   const onPointerUp = (): void => {
+    if (marqueeRef.current) {
+      // The selection was already applied as the box moved.
+      setMarquee(null)
+      return
+    }
     if (loopDragRef.current) {
       onLoopDragEnd()
       return
@@ -571,37 +788,44 @@ export function TimelineView(): React.JSX.Element {
     // on release. Keeps undo atomic and (later) the network op stream lean â€”
     // intermediate motion becomes presence data, not document ops.
     if (drag.moved) {
+      const members: DragMember[] = [drag, ...drag.others]
       if (drag.mode === 'move') {
-        const targetTrack = tracks[drag.trackIndex]
         // Folder and frozen lanes never accept clips (the reducer would
         // reject the folder case anyway; skip the no-op dispatch).
-        if (targetTrack && targetTrack.kind !== 'folder' && !targetTrack.frozenAssetId) {
-          projectStore.dispatch({
-            type: 'clip/move',
-            clipId: drag.clipId,
-            trackId: targetTrack.id,
-            start: drag.start
-          })
+        const moves = members.flatMap((m) => {
+          const targetTrack = tracks[m.trackIndex]
+          if (!targetTrack || targetTrack.kind === 'folder' || targetTrack.frozenAssetId) return []
+          return [{ clipId: m.clipId, trackId: targetTrack.id, start: m.start }]
+        })
+        // A whole multi-clip move must land or not land together: if any
+        // clip's destination is unusable, the group would tear apart.
+        if (moves.length === members.length && moves.length > 0) {
+          projectStore.dispatch(
+            moves.length === 1
+              ? { type: 'clip/move', ...moves[0] }
+              : { type: 'clip/moveMany', moves }
+          )
         }
       } else {
-        projectStore.dispatch({
-          type: 'clip/resize',
-          clipId: drag.clipId,
-          start: drag.start,
-          duration: drag.duration,
-          offset: drag.offset,
-          // The loop handle sets the period and the stretch handle sets the
-          // time factor with the same gesture; a plain trim leaves both
-          // untouched (fields absent). Stretching a looped clip scales its
-          // period so the repeat count is preserved.
-          ...(drag.mode === 'loop-r' ? { loopLength: drag.loopLength } : {}),
+        // The loop handle sets the period and the stretch handle sets the
+        // time factor with the same gesture; a plain trim leaves both
+        // untouched (fields absent). Stretching a looped clip scales its
+        // period so the repeat count is preserved.
+        const edits = members.map((m) => ({
+          clipId: m.clipId,
+          start: m.start,
+          duration: m.duration,
+          offset: m.offset,
+          ...(drag.mode === 'loop-r' ? { loopLength: m.loopLength } : {}),
           ...(drag.mode === 'stretch-r'
-            ? {
-                stretch: drag.stretch,
-                ...(drag.origLoop > 0 ? { loopLength: drag.loopLength } : {})
-              }
+            ? { stretch: m.stretch, ...(m.origLoop > 0 ? { loopLength: m.loopLength } : {}) }
             : {})
-        })
+        }))
+        projectStore.dispatch(
+          edits.length === 1
+            ? { type: 'clip/resize', ...edits[0] }
+            : { type: 'clip/resizeMany', edits }
+        )
       }
     }
     setDrag(null)
@@ -670,12 +894,20 @@ export function TimelineView(): React.JSX.Element {
   const onRulerPointerDown = (e: React.PointerEvent): void => {
     const rect = (e.currentTarget as HTMLElement).getBoundingClientRect()
     const ticks = Math.max(0, snapTicks((e.clientX - rect.left) / pxPerTick, gridTicks))
+    // Shift pins the edit marker instead of moving the playhead, so edits
+    // have a fixed target while the song keeps playing.
+    if (e.shiftKey) {
+      transport.setMarker(ticks)
+      return
+    }
     const inLoopStrip = e.clientY - rect.top < LOOP_STRIP_H
     if (inLoopStrip || e.altKey) {
       capturePointer(e)
       setLoopDrag({ mode: 'new', anchorTicks: ticks, start: ticks, end: ticks })
       return
     }
+    // Scrubbing means "edit here" again: drop any pinned marker.
+    transport.clearMarker()
     transport.setPosition((e.clientX - rect.left) / pxPerTick)
   }
 
@@ -726,7 +958,9 @@ export function TimelineView(): React.JSX.Element {
     else if (drag.mode === 'new') transport.clearLoop() // a click clears it
   }
 
-  const addTrack = (kind: TrackKind): void => createTrack(kind)
+  const addTrack = (kind: TrackKind): void => {
+    createTrack(kind)
+  }
 
   // Ruler labels for the active mode, thinned to stay legible.
   const rulerLabels: Array<{ x: number; text: string }> = []
@@ -765,6 +999,25 @@ export function TimelineView(): React.JSX.Element {
 
   // Silent = own mute/solo state OR any ancestor folder-bus closed.
   const isSilent = (trackId: string): boolean => !isTrackEffectivelyAudible(state, trackId)
+
+  // Live drag previews by clip id — the grabbed clip and everything else
+  // in a multi-clip selection all move at once.
+  const dragPreviews = new Map<
+    ClipId,
+    Pick<DragMember, 'start' | 'duration' | 'offset' | 'loopLength' | 'stretch' | 'trackIndex'>
+  >()
+  if (drag) {
+    for (const m of [drag, ...drag.others]) {
+      dragPreviews.set(m.clipId, {
+        start: m.start,
+        duration: m.duration,
+        offset: m.offset,
+        loopLength: m.loopLength,
+        stretch: m.stretch,
+        trackIndex: m.trackIndex
+      })
+    }
+  }
 
   return (
     <div className="timeline" ref={scrollRef}>
@@ -859,12 +1112,47 @@ export function TimelineView(): React.JSX.Element {
               track.kind === 'folder' ? 'lane-folder' : ''
             }`}
             style={{ gridRow: gridRowOfTrack[i], gridColumn: 2, ...laneBackground }}
-            onPointerDown={() => selection.select(null)}
+            onPointerDown={(e) => {
+              // Shift anywhere on the timeline pins the edit marker, so you
+              // don't have to reach for the ruler mid-take.
+              if (e.shiftKey) {
+                const rect = (e.currentTarget as HTMLElement).getBoundingClientRect()
+                transport.setMarker(snapTicks((e.clientX - rect.left) / pxPerTick, gridTicks))
+                return
+              }
+              beginMarquee(e)
+            }}
             onDoubleClick={(e) => onLaneDoubleClick(e, i)}
             onDragOver={(e) => onLaneDragOver(e, i)}
             onDrop={(e) => onLaneDrop(e, i)}
           />
         ))}
+
+        <div
+          className={`track-drop-bar ${dropBarActive ? 'track-drop-bar-over' : ''}`}
+          style={{ gridRow: lastGridRow, gridColumn: '1 / 3' }}
+          title="Drop audio or MIDI files here, or click to browse"
+          onClick={() => void browseForMediaFiles()}
+          onDragOver={(e) => {
+            if (!e.dataTransfer.types.includes('Files')) return
+            e.preventDefault()
+            e.dataTransfer.dropEffect = 'copy'
+            setDropBarActive(true)
+          }}
+          onDragLeave={() => setDropBarActive(false)}
+          onDrop={(e) => {
+            e.preventDefault()
+            setDropBarActive(false)
+            const files = Array.from(e.dataTransfer.files)
+            if (files.length > 0) void importFilesAsNewTracks(files)
+          }}
+        >
+          <span className="track-drop-bar-text">
+            {trackCount === 0
+              ? 'Drop audio or MIDI files here to start — or click to browse'
+              : 'Drop files here to add tracks — or click to browse'}
+          </span>
+        </div>
 
         {tracks.map(
           (track, i) =>
@@ -895,19 +1183,8 @@ export function TimelineView(): React.JSX.Element {
                   clip={clip}
                   trackColor={track.color}
                   trackIndex={trackIndex}
-                  preview={
-                    drag && drag.clipId === clip.id
-                      ? {
-                          start: drag.start,
-                          duration: drag.duration,
-                          offset: drag.offset,
-                          loopLength: drag.loopLength,
-                          stretch: drag.stretch,
-                          trackIndex: drag.trackIndex
-                        }
-                      : null
-                  }
-                  selected={clip.id === selectedClipId}
+                  preview={dragPreviews.get(clip.id) ?? null}
+                  selected={selection.isClipSelected(clip.id)}
                   dimmed={isSilent(track.id) || track.frozenAssetId !== null}
                   pxPerTick={pxPerTick}
                   tempo={state.tempo}
@@ -921,7 +1198,11 @@ export function TimelineView(): React.JSX.Element {
                   onContextMenu={(e) => {
                     e.preventDefault()
                     e.stopPropagation()
-                    selection.select(clip.id, clip.trackId)
+                    // Right-clicking inside a multi-selection keeps it, so
+                    // the menu can act on the whole set.
+                    if (!selection.isClipSelected(clip.id)) {
+                      selection.select(clip.id, clip.trackId)
+                    }
                     setColorMenu({ clipId: clip.id, x: e.clientX, y: e.clientY })
                   }}
                   onOpenEditor={
@@ -940,6 +1221,39 @@ export function TimelineView(): React.JSX.Element {
               style={{
                 left: shownLoop.start * pxPerTick,
                 width: Math.max(2, (shownLoop.end - shownLoop.start) * pxPerTick)
+              }}
+            />
+          </div>
+        )}
+
+        {trackCount > 0 && markerTicks !== null && (
+          <div className="marker-layer" style={{ gridRow: `1 / ${lastGridRow}`, gridColumn: 2 }}>
+            <div
+              className="edit-marker"
+              style={{ left: markerTicks * pxPerTick }}
+              title="Edit marker — slices and pastes land here. Click the flag to clear it."
+            >
+              <button
+                className="edit-marker-flag"
+                title="Clear the edit marker"
+                onPointerDown={(e) => e.stopPropagation()}
+                onClick={() => transport.clearMarker()}
+              >
+                ✕
+              </button>
+            </div>
+          </div>
+        )}
+
+        {marquee && (
+          <div className="marquee-layer" style={{ gridRow: `2 / ${lastGridRow}`, gridColumn: 2 }}>
+            <div
+              className="marquee"
+              style={{
+                left: Math.min(marquee.originX, marquee.x),
+                top: Math.min(marquee.originY, marquee.y),
+                width: Math.abs(marquee.x - marquee.originX),
+                height: Math.abs(marquee.y - marquee.originY)
               }}
             />
           </div>

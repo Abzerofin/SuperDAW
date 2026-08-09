@@ -1,4 +1,4 @@
-import type { TrackId, TrackKind } from '@core/model/types'
+import type { ProjectState, Track, TrackId, TrackKind } from '@core/model/types'
 import { pluginsOfTrack } from '@core/model/types'
 import { newId } from '@core/model/ids'
 import { synthDefaults } from '@core/model/effects'
@@ -23,26 +23,30 @@ import { selection } from '@/state/selection'
  * session peers), then dispatch the op that references it by id.
  */
 
-/** Create an empty track (audio, MIDI, or a folder bus) at the end. */
-export function createTrack(kind: TrackKind): void {
+/**
+ * Create an empty track (audio, MIDI, or a folder bus) at the end.
+ * Returns it so callers that follow up with clip ops (file import) can
+ * reference the track they just made.
+ */
+export function createTrack(kind: TrackKind, name?: string): Track {
   const count = projectStore.state.trackOrder.length
   const label = kind === 'audio' ? 'Audio' : kind === 'midi' ? 'MIDI' : 'Folder'
-  const trackId = newId('trk')
+  const track: Track = {
+    id: newId('trk'),
+    kind,
+    name: name?.trim() || `${label} ${count + 1}`,
+    color: nextTrackColor(count),
+    muted: false,
+    soloed: false,
+    parentId: null,
+    frozenAssetId: null,
+    volume: 1,
+    pan: 0,
+    synth: kind === 'midi' ? synthDefaults() : {}
+  }
   projectStore.dispatch({
     type: 'track/create',
-    track: {
-      id: trackId,
-      kind,
-      name: `${label} ${count + 1}`,
-      color: nextTrackColor(count),
-      muted: false,
-      soloed: false,
-      parentId: null,
-      frozenAssetId: null,
-      volume: 1,
-      pan: 0,
-      synth: kind === 'midi' ? synthDefaults() : {}
-    },
+    track,
     index: count,
     clips: [],
     automation: [],
@@ -51,7 +55,98 @@ export function createTrack(kind: TrackKind): void {
   })
   // A brand-new track is what you're about to work on — the Effects dock
   // follows the selection.
-  selection.selectTrack(trackId)
+  selection.selectTrack(track.id)
+  return track
+}
+
+/**
+ * Shift-click a header: select every track between the focused one and
+ * this one, in trackOrder terms.
+ */
+export function selectTrackRange(state: ProjectState, trackId: TrackId): void {
+  const anchor = selection.selectedTrackId
+  const order = state.trackOrder
+  const to = order.indexOf(trackId)
+  const from = anchor ? order.indexOf(anchor) : -1
+  if (to === -1 || from === -1) {
+    selection.selectTrack(trackId)
+    return
+  }
+  const [lo, hi] = from <= to ? [from, to] : [to, from]
+  // Focus stays on the clicked track so a further Shift-click extends from
+  // the original anchor rather than walking away from it.
+  selection.selectTracks(order.slice(lo, hi + 1), anchor ?? trackId)
+}
+
+/**
+ * Wrap the selected tracks in a new folder bus — one op, so undo removes
+ * the folder and restores every track's place in a single step. Tracks
+ * already inside the selection's own folders come along; a folder that is
+ * itself selected brings its subtree implicitly (its children keep it as
+ * their parent).
+ */
+export function groupTracksIntoFolder(trackIds: readonly TrackId[]): void {
+  const state = projectStore.state
+  // Drop any track whose ancestor is also selected: moving the ancestor
+  // already moves it, and re-parenting both would flatten the nesting.
+  const selected = new Set(trackIds)
+  const members = state.trackOrder.filter((id) => {
+    if (!selected.has(id)) return false
+    let parent = state.tracks[id]?.parentId ?? null
+    while (parent) {
+      if (selected.has(parent)) return false
+      parent = state.tracks[parent]?.parentId ?? null
+    }
+    return true
+  })
+  if (members.length === 0) return
+  const count = state.trackOrder.length
+  const folderId = newId('trk')
+  projectStore.dispatch({
+    type: 'track/group',
+    folder: {
+      id: folderId,
+      kind: 'folder',
+      name: `Group ${count + 1}`,
+      color: nextTrackColor(count),
+      muted: false,
+      soloed: false,
+      // The new folder takes the shared parent of its members when they
+      // all live in the same one, so grouping inside a folder stays inside.
+      parentId: commonParentOf(state, members),
+      frozenAssetId: null,
+      volume: 1,
+      pan: 0,
+      synth: {}
+    },
+    index: Math.min(...members.map((id) => state.trackOrder.indexOf(id))),
+    trackIds: members
+  })
+  selection.selectTrack(folderId)
+}
+
+/** Dissolve a folder, leaving its tracks where they are. */
+export function ungroupFolder(folderId: TrackId): void {
+  const state = projectStore.state
+  const folder = state.tracks[folderId]
+  if (!folder || folder.kind !== 'folder') return
+  const children = state.trackOrder.filter((id) => state.tracks[id]?.parentId === folderId)
+  if (children.length === 0) {
+    projectStore.dispatch({ type: 'track/delete', trackId: folderId })
+    return
+  }
+  // The folder's own index is where its first child lands once it is gone.
+  const at = state.trackOrder.indexOf(folderId)
+  projectStore.dispatch({
+    type: 'track/ungroup',
+    folderId,
+    restore: children.map((id, i) => ({ trackId: id, parentId: folder.parentId, index: at + i }))
+  })
+}
+
+function commonParentOf(state: ProjectState, trackIds: readonly TrackId[]): TrackId | null {
+  const first = state.tracks[trackIds[0]]?.parentId ?? null
+  return trackIds.every((id) => (state.tracks[id]?.parentId ?? null) === first) ? first : null
 }
 
 /** Tracks currently rendering a freeze (ephemeral; drives the ❄ spinner). */

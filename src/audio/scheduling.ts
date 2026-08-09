@@ -1,6 +1,7 @@
 import { PPQ, ticksPerBeat } from '@core/model/timebase'
 import type { Clip, ProjectState } from '@core/model/types'
 import { clipRate, isClipLooped } from '@core/model/types'
+import { synthIsAudible } from '@core/model/effects'
 
 /**
  * Pure scheduling math: project state + a time anchor -> what to play when.
@@ -193,6 +194,9 @@ export function scheduleNotes(
     const track = state.tracks[clip.trackId]
     if (!track || track.kind !== 'midi') continue
     if (track.frozenAssetId !== null) continue // frozen: the render replaces the synth
+    // Removed or bypassed instrument: the notes stay in the document, they
+    // just make no sound. Gated here so playback and offline renders agree.
+    if (!synthIsAudible(track.synth)) continue
 
     // A looped clip plays its notes once per repeat; a note is cut at its
     // segment's end just as it is cut at an ordinary clip's end.

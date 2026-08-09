@@ -8,6 +8,7 @@ import { useProjectState } from '@/state/hooks'
 import { settingsUi } from '@/state/settingsUi'
 import { newProject, openProject, openRecentProject } from '@/lib/projectFile'
 import { recentProjects } from '@/state/recentProjects'
+import { collab } from '@/state/collab'
 
 /**
  * The launcher: shown before any project is open (and via "Return to
@@ -21,15 +22,21 @@ export function HomeScreen(): React.JSX.Element {
   const { dirty } = useSessionFile()
   const currentName = useProjectState().name
   const [query, setQuery] = useState('')
+  const [joinCode, setJoinCode] = useState('')
 
   const q = query.trim().toLowerCase()
   const filtered = q ? recents.filter((r) => r.name.toLowerCase().includes(q)) : recents
 
   const join = (): void => {
+    const code = joinCode.trim()
+    if (!code) return
     // Joining replaces the document with the host's snapshot; an empty
-    // scratch project is the natural place to do that from.
+    // scratch project is the natural place to do that from. The collab
+    // panel is opened (enterProject's collab flag) so connection status,
+    // the roster and any join error are visible immediately.
     if (!shell.projectOpen) newProject()
     appShell.enterProject({ collab: true })
+    void collab.join(code)
   }
 
   return (
@@ -62,10 +69,23 @@ export function HomeScreen(): React.JSX.Element {
             <span className="home-action-title">Open Project…</span>
             <span className="home-action-sub">Browse for a .sdaw file</span>
           </button>
-          <button className="home-action" onClick={join}>
+          <div className="home-action home-action-join">
             <span className="home-action-title">Join Collaboration</span>
-            <span className="home-action-sub">Enter a session join code</span>
-          </button>
+            <div className="home-join-row">
+              <input
+                className="home-join-input mono"
+                placeholder="Join code"
+                value={joinCode}
+                onChange={(e) => setJoinCode(e.target.value)}
+                onKeyDown={(e) => {
+                  if (e.key === 'Enter') join()
+                }}
+              />
+              <button className="home-join-btn" disabled={!joinCode.trim()} onClick={join}>
+                Join
+              </button>
+            </div>
+          </div>
         </div>
 
         <div className="home-recents">

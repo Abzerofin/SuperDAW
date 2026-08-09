@@ -175,9 +175,11 @@ suite('invert', () => {
     { type: 'plugin/add', instance: plugin('fx1', 't1', 'compressor') },
     { type: 'plugin/remove', instanceId: 'fxA' },
     { type: 'plugin/setParam', instanceId: 'fxA', param: 'low', value: 6 },
+    { type: 'plugin/setParams', instanceId: 'fxA', params: { low: 4, high: -3 } },
     { type: 'plugin/setEnabled', instanceId: 'fxA', enabled: false },
     { type: 'plugin/setState', instanceId: 'fxA', stateBlob: '{"component":"AAECAw=="}' },
     { type: 'track/setSynthParam', trackId: 'tm', param: 'cutoff', value: 3 },
+    { type: 'track/setSynthParams', trackId: 'tm', params: { present: 0, on: 0, cutoff: 9 } },
     { type: 'note/add', note: { id: 'n1', clipId: 'c1', pitch: 64, start: 240, duration: 240, velocity: 90 } },
     { type: 'note/addMany', notes: [
       { id: 'n2', clipId: 'c1', pitch: 62, start: 0, duration: 240, velocity: 80 },
@@ -201,6 +203,15 @@ suite('invert', () => {
     { type: 'clip/create', clip: clip('c9', 't2', 480), notes: [] },
     { type: 'clip/delete', clipId: 'c1' },
     { type: 'clip/move', clipId: 'c1', trackId: 't2', start: 4800 },
+    { type: 'clip/moveMany', moves: [
+      { clipId: 'c1', trackId: 't2', start: 1920 },
+      { clipId: 'c2', trackId: 't1', start: 480 }
+    ] },
+    { type: 'clip/resizeMany', edits: [
+      { clipId: 'c1', start: 240, duration: 1440, offset: 0 },
+      { clipId: 'c2', start: 1920, duration: 480, offset: 0, loopLength: 240 }
+    ] },
+    { type: 'track/group', folder: { ...track('grp', 'Group'), kind: 'folder' }, index: 0, trackIds: ['t1', 't2'] },
     { type: 'clip/resize', clipId: 'c2', start: 960, duration: 1920, offset: 480 },
     { type: 'clip/rename', clipId: 'c2', name: 'Renamed Clip' },
     { type: 'clip/setColor', clipId: 'c1', color: '#e06c75' },
@@ -212,6 +223,11 @@ suite('invert', () => {
     // c1 (0..960) and c2 (1920..2880) are non-adjacent: the merge/split
     // round-trip must restore the gap via leftDuration.
     { type: 'clip/merge', clipId: 'c1', rightClipId: 'c2' },
+    { type: 'clip/slice', slices: [{ clipId: 'c1', at: [320, 640], newClipIds: ['cq1', 'cq2'] }] },
+    { type: 'clip/slice', slices: [
+      { clipId: 'c1', at: [480], newClipIds: ['cs2'] },
+      { clipId: 'c2', at: [2400], newClipIds: ['cs3'] }
+    ] },
     { type: 'file/create', nodes: [fileNode('f9', null, 'folder'), fileNode('a9', 'f9')] },
     { type: 'file/delete', nodeIds: ['f1'] }, // subtree: f1, f2, a1
     { type: 'file/delete', nodeIds: ['a2', 'f2'] },
@@ -234,6 +250,150 @@ suite('invert', () => {
       expect(apply(after, inverse!)).toEqual(before)
     })
   }
+})
+
+suite('clip/slice', () => {
+  // c1 on t1 spans 0..960.
+  test('cuts a clip into equal pieces that tile the original span', () => {
+    const s = apply(baseState(), {
+      type: 'clip/slice',
+      slices: [{ clipId: 'c1', at: [240, 480, 720], newClipIds: ['p1', 'p2', 'p3'] }]
+    })
+    const pieces = ['c1', 'p1', 'p2', 'p3'].map((id) => s.clips[id])
+    expect(pieces.every(Boolean)).toBe(true)
+    expect(pieces.map((c) => [c.start, c.duration])).toEqual([
+      [0, 240],
+      [240, 240],
+      [480, 240],
+      [720, 240]
+    ])
+    expect(pieces.every((c) => c.trackId === 't1')).toBe(true)
+  })
+
+  test('re-applying the same slice changes nothing (idempotent)', () => {
+    const op: Operation = {
+      type: 'clip/slice',
+      slices: [{ clipId: 'c1', at: [240, 480], newClipIds: ['p1', 'p2'] }]
+    }
+    const once = apply(baseState(), op)
+    expect(apply(once, op)).toBe(once)
+  })
+
+  test('cuts outside the clip are skipped, the rest still land', () => {
+    const s = apply(baseState(), {
+      type: 'clip/slice',
+      slices: [{ clipId: 'c1', at: [-100, 480, 99999], newClipIds: ['p1', 'p2', 'p3'] }]
+    })
+    expect(s.clips['p1']).toBeUndefined() // before the clip
+    expect(s.clips['p3']).toBeUndefined() // past its end
+    expect(s.clips['p2']).toBeDefined()
+    expect(s.clips['c1'].duration).toBe(480)
+  })
+
+  test('unslice puts a sliced clip back together', () => {
+    const before = baseState()
+    const op: Operation = {
+      type: 'clip/slice',
+      slices: [{ clipId: 'c1', at: [240, 480, 720], newClipIds: ['p1', 'p2', 'p3'] }]
+    }
+    const sliced = apply(before, op)
+    expect(apply(sliced, invert(before, op)!)).toEqual(before)
+  })
+
+  test('slicing several clips at once round-trips', () => {
+    const before = baseState()
+    const op: Operation = {
+      type: 'clip/slice',
+      slices: [
+        { clipId: 'c1', at: [480], newClipIds: ['p1'] },
+        { clipId: 'c2', at: [2400], newClipIds: ['p2'] }
+      ]
+    }
+    const sliced = apply(before, op)
+    expect(sliced.clips['p1']).toBeDefined()
+    expect(sliced.clips['p2']).toBeDefined()
+    expect(apply(sliced, invert(before, op)!)).toEqual(before)
+  })
+
+  test('slicing a clip that is gone is a no-op', () => {
+    const s = baseState()
+    expect(
+      apply(s, { type: 'clip/slice', slices: [{ clipId: 'ghost', at: [10], newClipIds: ['p1'] }] })
+    ).toBe(s)
+  })
+})
+
+suite('track/group', () => {
+  const folder = (): Track => ({ ...track('grp', 'Group'), kind: 'folder' })
+
+  test('wraps the tracks in a new folder, in order, right after it', () => {
+    const s = apply(baseState(), {
+      type: 'track/group',
+      folder: folder(),
+      index: 0,
+      trackIds: ['t2', 't1']
+    })
+    expect(s.trackOrder).toEqual(['grp', 't2', 't1', 'tm'])
+    expect(s.tracks['t1'].parentId).toBe('grp')
+    expect(s.tracks['t2'].parentId).toBe('grp')
+    expect(s.tracks['tm'].parentId).toBeNull()
+  })
+
+  test('ungroup restores the previous order and parents exactly', () => {
+    const before = baseState()
+    const op: Operation = {
+      type: 'track/group',
+      folder: folder(),
+      index: 2,
+      trackIds: ['t1', 'tm']
+    }
+    const grouped = apply(before, op)
+    expect(grouped.tracks['grp']).toBeDefined()
+    const inverse = invert(before, op)
+    expect(apply(grouped, inverse!)).toEqual(before)
+  })
+
+  test('grouping tracks that are already in a folder re-parents them', () => {
+    let s = folderState() // t1 lives in 'fold'
+    expect(s.tracks['t1'].parentId).toBe('fold')
+    s = apply(s, { type: 'track/group', folder: folder(), index: 0, trackIds: ['t1'] })
+    expect(s.tracks['t1'].parentId).toBe('grp')
+  })
+
+  test('a folder id that already exists is refused', () => {
+    const s = folderState()
+    const dup: Track = { ...s.tracks['fold'] }
+    expect(apply(s, { type: 'track/group', folder: dup, index: 0, trackIds: ['t2'] })).toBe(s)
+  })
+
+  test('grouping no usable tracks is a no-op', () => {
+    const s = baseState()
+    expect(apply(s, { type: 'track/group', folder: folder(), index: 0, trackIds: ['ghost'] })).toBe(s)
+  })
+
+  test('a folder cannot be grouped into itself', () => {
+    const s = baseState()
+    const f = folder()
+    // The folder is not in state yet, so listing its own id must be ignored
+    // rather than producing a self-parenting cycle.
+    expect(apply(s, { type: 'track/group', folder: f, index: 0, trackIds: ['grp'] })).toBe(s)
+  })
+
+  test('ungrouping keeps children a peer added concurrently', () => {
+    let s = folderState() // t1 in 'fold'
+    // A peer moved t2 into the same folder; our ungroup op predates that.
+    s = apply(s, { type: 'track/setParent', trackId: 't2', parentId: 'fold' })
+    const out = apply(s, {
+      type: 'track/ungroup',
+      folderId: 'fold',
+      restore: [{ trackId: 't1', parentId: null, index: 0 }]
+    })
+    expect(out.tracks['fold']).toBeUndefined()
+    expect(out.tracks['t1'].parentId).toBeNull()
+    // t2 inherits the removed folder's own parent instead of being orphaned.
+    expect(out.tracks['t2'].parentId).toBe(s.tracks['fold'].parentId)
+    expect(out.trackOrder).toContain('t2')
+  })
 })
 
 suite('plugin/reorder', () => {

@@ -2,9 +2,19 @@ import { useEffect, useRef, useState } from 'react'
 import { createPortal } from 'react-dom'
 import type { PluginInstance, PluginInstanceId, Track } from '@core/model/types'
 import { pluginsOfTrack } from '@core/model/types'
-import { SYNTH_DEFS, WAVE_TYPES, synthDefaults, type ParamDef } from '@core/model/effects'
+import {
+  SYNTH_DEFS,
+  SYNTH_STATE_PARAMS,
+  WAVE_TYPES,
+  synthDefaults
+} from '@core/model/effects'
 import type { PluginDescriptor } from '@core/plugins/descriptor'
-import { BUILTIN_EFFECT_DESCRIPTORS, paramDefsOf, pluginDefaults } from '@core/plugins/builtin'
+import {
+  BUILTIN_EFFECT_DESCRIPTORS,
+  builtinTypeOf,
+  paramDefsOf,
+  pluginDefaults
+} from '@core/plugins/builtin'
 import { pluginRegistry } from '@audio/pluginRegistry'
 import { newId } from '@core/model/ids'
 import { projectStore } from '@/state/projectStore'
@@ -26,6 +36,8 @@ import { capturePointer } from '@/lib/pointer'
 import { wireEditorEvents } from '@/state/vst3Editors'
 import { useVst3Dock, vst3Dock } from '@/state/vst3Dock'
 import { PluginPlaceholder } from './PluginPlaceholder'
+import { EffectVisual } from './PluginVisuals'
+import { ParamSlider } from './ParamSlider'
 
 /**
  * The Effects tab of the bottom dock: the SELECTED track's synth (MIDI)
@@ -83,10 +95,23 @@ function TrackEffects({ track }: { track: Track }): React.JSX.Element {
 
   const startDrag = (e: React.PointerEvent, id: PluginInstanceId): void => {
     if (e.button !== 0) return
+    // The header doubles as a drag handle, so a press on one of its own
+    // controls (power, remove) must stay a click. The grip itself IS the
+    // handle, hence the currentTarget exemption.
+    const button = (e.target as HTMLElement).closest('button')
+    if (button && button !== e.currentTarget) return
     e.preventDefault()
     capturePointer(e)
     setDrag({ id, order: inserts.map((p) => p.id) })
   }
+
+  /** Pointer props that make an element a reorder handle for one insert. */
+  const dragHandle = (id: PluginInstanceId): React.HTMLAttributes<HTMLElement> => ({
+    onPointerDown: (e) => startDrag(e, id),
+    onPointerMove: moveDrag,
+    onPointerUp: endDrag,
+    onPointerCancel: endDrag
+  })
 
   const moveDrag = (e: React.PointerEvent): void => {
     if (!drag || !chainRef.current) return
@@ -131,30 +156,26 @@ function TrackEffects({ track }: { track: Track }): React.JSX.Element {
         )}
       </div>
       <div className="fx-dock-chain" ref={chainRef}>
-        {track.kind === 'midi' && (
-          <div className="fx-card">
-            <SynthSection track={track} />
-          </div>
-        )}
+        {track.kind === 'midi' &&
+          ((track.synth.present ?? 1) >= 0.5 ? (
+            <div className="fx-card">
+              <SynthSection track={track} />
+            </div>
+          ) : (
+            <AddSynthCard track={track} />
+          ))}
         {shown.map((instance) => (
           <div
             key={instance.id}
             className={`fx-card fx-insert ${drag?.id === instance.id ? 'fx-insert-dragging' : ''} ${
               isGuiInsert(instance) ? 'fx-card-expanded' : ''
-            }`}
+            } ${builtinTypeOf(instance.descriptor) === 'paraeq' ? 'fx-card-wide' : ''}`}
           >
-            <button
-              className="fx-grip"
-              title="Drag to reorder"
-              onPointerDown={(e) => startDrag(e, instance.id)}
-              onPointerMove={moveDrag}
-              onPointerUp={endDrag}
-              onPointerCancel={endDrag}
-            >
+            <button className="fx-grip" title="Drag to reorder" {...dragHandle(instance.id)}>
               ⠿
             </button>
             <div className="fx-insert-body">
-              <PluginSection instance={instance} />
+              <PluginSection instance={instance} dragHandle={dragHandle(instance.id)} />
             </div>
           </div>
         ))}
@@ -333,10 +354,18 @@ function SynthSection({ track }: { track: Track }): React.JSX.Element {
   const setParam = (param: string, value: number): void => {
     projectStore.dispatch({ type: 'track/setSynthParam', trackId: track.id, param, value })
   }
+  const enabled = params.on >= 0.5
 
   return (
-    <div className="fx-section">
+    <div className={`fx-section ${enabled ? '' : 'fx-bypassed'}`}>
       <div className="fx-section-head">
+        <button
+          className={`fx-power ${enabled ? 'fx-power-on' : ''}`}
+          title={enabled ? 'Bypass the instrument' : 'Enable the instrument'}
+          onClick={() => setParam('on', enabled ? 0 : 1)}
+        >
+          ⏻
+        </button>
         <span className="fx-section-title">Synth</span>
         <div className="fx-waves">
           {WAVE_TYPES.map((wave, index) => (
@@ -350,9 +379,16 @@ function SynthSection({ track }: { track: Track }): React.JSX.Element {
             </button>
           ))}
         </div>
+        <button
+          className="fx-remove"
+          title="Remove the instrument from this track (its notes are kept)"
+          onClick={() => setParam('present', 0)}
+        >
+          ×
+        </button>
       </div>
       {Object.entries(SYNTH_DEFS)
-        .filter(([key]) => key !== 'wave')
+        .filter(([key]) => key !== 'wave' && !SYNTH_STATE_PARAMS.includes(key as 'on' | 'present'))
         .map(([key, def]) => (
           <ParamSlider key={key} def={def} value={params[key]} onCommit={(v) => setParam(key, v)} />
         ))}
@@ -360,9 +396,43 @@ function SynthSection({ track }: { track: Track }): React.JSX.Element {
   )
 }
 
-function PluginSection({ instance }: { instance: PluginInstance }): React.JSX.Element {
+/** What stands in for a removed instrument: one click puts it back. */
+function AddSynthCard({ track }: { track: Track }): React.JSX.Element {
+  return (
+    <div className="fx-card fx-add-card">
+      <button
+        className="fx-add-open fx-add-open-text"
+        title="Add the built-in instrument back to this track"
+        // Re-adding gives a working instrument at its defaults, like adding
+        // any other plugin — a removal that came back silent (or still
+        // bypassed) would read as broken. Undo brings the old sound back.
+        onClick={() =>
+          projectStore.dispatch({
+            type: 'track/setSynthParams',
+            trackId: track.id,
+            params: synthDefaults()
+          })
+        }
+      >
+        + Synth
+      </button>
+    </div>
+  )
+}
+
+function PluginSection({
+  instance,
+  dragHandle
+}: {
+  instance: PluginInstance
+  /** Makes the card header a reorder handle (see TrackEffects). */
+  dragHandle?: React.HTMLAttributes<HTMLElement>
+}): React.JSX.Element {
   usePluginRegistry() // re-render when a plugin gets installed mid-session
   const dock = useVst3Dock()
+  // In-flight slider previews, so the card's visualization tracks a drag
+  // before the plugin/setParam op lands on release.
+  const [previewParams, setPreviewParams] = useState<Record<string, number>>({})
   const status = pluginRegistry.status(instance.descriptor)
   // 'offline' plugins (VST3) are installed here but hosted out of process:
   // their params ARE editable, they just cannot be previewed live, so they
@@ -375,10 +445,18 @@ function PluginSection({ instance }: { instance: PluginInstance }): React.JSX.El
   // builtins and as the fallback when a plugin has no editor (or its
   // editor failed to open).
   const guiMode = offline && !dock.isFailed(instance.id)
-  const defs = guiMode ? {} : (paramDefsOf(instance.descriptor) ?? {})
+  const builtinType = builtinTypeOf(instance.descriptor)
+  // The parametric EQ's editor IS its controls — its 40 band params would
+  // be unusable as a wall of generic sliders.
+  const defs =
+    guiMode || builtinType === 'paraeq' ? {} : (paramDefsOf(instance.descriptor) ?? {})
   return (
     <div className={`fx-section ${instance.enabled ? '' : 'fx-bypassed'}`}>
-      <div className="fx-section-head">
+      <div
+        className={`fx-section-head ${dragHandle ? 'fx-section-head-drag' : ''}`}
+        title={dragHandle ? 'Drag to reorder' : undefined}
+        {...dragHandle}
+      >
         <button
           className={`fx-power ${instance.enabled ? 'fx-power-on' : ''}`}
           title={instance.enabled ? 'Bypass' : 'Enable'}
@@ -409,6 +487,13 @@ function PluginSection({ instance }: { instance: PluginInstance }): React.JSX.El
           ×
         </button>
       </div>
+      {builtinType && (
+        <EffectVisual
+          type={builtinType}
+          instanceId={instance.id}
+          params={{ ...pluginDefaults(instance.descriptor), ...instance.params, ...previewParams }}
+        />
+      )}
       {Object.entries(defs).map(([key, paramDef]) => (
         <ParamSlider
           key={key}
@@ -417,16 +502,27 @@ function PluginSection({ instance }: { instance: PluginInstance }): React.JSX.El
           // No live preview for out-of-process plugins: there are no nodes
           // in the graph to push a value into.
           onPreview={
-            offline ? undefined : (v) => audioEngine.previewPluginParam(instance.id, key, v)
+            offline
+              ? undefined
+              : (v) => {
+                  audioEngine.previewPluginParam(instance.id, key, v)
+                  setPreviewParams((p) => (p[key] === v ? p : { ...p, [key]: v }))
+                }
           }
-          onCommit={(v) =>
+          onCommit={(v) => {
             projectStore.dispatch({
               type: 'plugin/setParam',
               instanceId: instance.id,
               param: key,
               value: v
             })
-          }
+            setPreviewParams((p) => {
+              if (!(key in p)) return p
+              const next = { ...p }
+              delete next[key]
+              return next
+            })
+          }}
         />
       ))}
       {guiMode && <DockedEditor instance={instance} />}
@@ -534,62 +630,3 @@ function DockedEditor({ instance }: { instance: PluginInstance }): React.JSX.Ele
   )
 }
 
-const SLIDER_W = 116
-
-function ParamSlider({
-  def,
-  value,
-  onPreview,
-  onCommit
-}: {
-  def: ParamDef
-  value: number
-  onPreview?: (value: number) => void
-  onCommit: (value: number) => void
-}): React.JSX.Element {
-  const [dragValue, setDragValue] = useState<number | null>(null)
-  const shown = dragValue ?? value
-  const fraction = (shown - def.min) / (def.max - def.min)
-
-  const valueAt = (e: React.PointerEvent): number => {
-    const rect = (e.currentTarget as HTMLElement).getBoundingClientRect()
-    const f = Math.min(1, Math.max(0, (e.clientX - rect.left) / rect.width))
-    return def.min + f * (def.max - def.min)
-  }
-
-  return (
-    <div className="fx-param">
-      <span className="fx-param-label">{def.label}</span>
-      <div
-        className="fx-slider"
-        style={{ width: SLIDER_W }}
-        onPointerDown={(e) => {
-          if (e.button !== 0) return
-          capturePointer(e)
-          const v = valueAt(e)
-          setDragValue(v)
-          onPreview?.(v)
-        }}
-        onPointerMove={(e) => {
-          if (dragValue === null) return
-          const v = valueAt(e)
-          setDragValue(v)
-          onPreview?.(v)
-        }}
-        onPointerUp={() => {
-          if (dragValue === null) return
-          if (dragValue !== value) onCommit(dragValue)
-          setDragValue(null)
-        }}
-        onDoubleClick={() => onCommit(def.default)}
-        title="Drag to adjust · double-click to reset"
-      >
-        <div className="fx-slider-fill" style={{ width: `${fraction * 100}%` }} />
-      </div>
-      <span className="fx-param-value mono">
-        {shown.toFixed(def.digits)}
-        {def.unit}
-      </span>
-    </div>
-  )
-}

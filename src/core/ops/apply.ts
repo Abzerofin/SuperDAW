@@ -339,6 +339,29 @@ export function apply(state: ProjectState, op: Operation): ProjectState {
       }
     }
 
+    case 'plugin/setParams': {
+      const instance = state.plugins[op.instanceId]
+      if (!instance) return state
+      const defs = paramDefsOf(instance.descriptor)
+      let changed = false
+      const params = { ...instance.params }
+      for (const [key, raw] of Object.entries(op.params)) {
+        if (!Number.isFinite(raw)) continue
+        const def = defs?.[key]
+        // With known defs, unknown keys are dropped (mirrors plugin/setParam).
+        if (defs && !def) continue
+        const value = def ? clampParam(def, raw) : raw
+        if (params[key] === value) continue
+        params[key] = value
+        changed = true
+      }
+      if (!changed) return state
+      return {
+        ...state,
+        plugins: { ...state.plugins, [op.instanceId]: { ...instance, params } }
+      }
+    }
+
     case 'plugin/setEnabled': {
       const instance = state.plugins[op.instanceId]
       if (!instance || instance.enabled === op.enabled) return state
@@ -406,6 +429,23 @@ export function apply(state: ProjectState, op: Operation): ProjectState {
       }
     }
 
+    case 'track/setSynthParams': {
+      const track = state.tracks[op.trackId]
+      if (!track || track.kind !== 'midi') return state
+      let changed = false
+      const synth = { ...track.synth }
+      for (const [param, raw] of Object.entries(op.params)) {
+        const def = SYNTH_DEFS[param]
+        if (!def) continue
+        const value = clampParam(def, raw)
+        if (synth[param] === value) continue
+        synth[param] = value
+        changed = true
+      }
+      if (!changed) return state
+      return { ...state, tracks: { ...state.tracks, [op.trackId]: { ...track, synth } } }
+    }
+
     case 'track/rename':
       return updateTrack(state, op.trackId, (t) => ({ ...t, name: op.name }))
 
@@ -427,6 +467,56 @@ export function apply(state: ProjectState, op: Operation): ProjectState {
         next = apply(next, { type: 'track/setParent', trackId: op.trackId, parentId: op.parentId })
       }
       return next
+    }
+
+    case 'track/group': {
+      if (state.tracks[op.folder.id]) return state
+      if (op.folder.kind !== 'folder') return state
+      // Nothing to wrap = nothing to do; a lone folder is `track/create`.
+      const members = op.trackIds.filter(
+        (id) => state.tracks[id] && !isTrackSelfOrDescendant(state, id, op.folder.id)
+      )
+      if (members.length === 0) return state
+      const folder: Track = { ...op.folder, parentId: op.folder.parentId ?? null }
+      // Pull the members out, drop the folder in, then re-insert them
+      // directly after it so the folder visually contains its children.
+      const rest = state.trackOrder.filter((id) => !members.includes(id))
+      const at = clamp(op.index, 0, rest.length)
+      const trackOrder = [...rest.slice(0, at), folder.id, ...members, ...rest.slice(at)]
+      const tracks = { ...state.tracks, [folder.id]: folder }
+      for (const id of members) tracks[id] = { ...tracks[id], parentId: folder.id }
+      return { ...state, tracks, trackOrder }
+    }
+
+    case 'track/ungroup': {
+      const folder = state.tracks[op.folderId]
+      if (!folder || folder.kind !== 'folder') return state
+      const tracks = { ...state.tracks }
+      delete tracks[op.folderId]
+      const previous = new Map(op.restore.map((r) => [r.trackId, r]))
+      // Children the op doesn't mention (a peer added them concurrently)
+      // inherit the folder's own parent rather than being orphaned.
+      for (const track of Object.values(state.tracks)) {
+        if (track.parentId !== op.folderId) continue
+        tracks[track.id] = {
+          ...track,
+          parentId: previous.get(track.id)?.parentId ?? folder.parentId
+        }
+      }
+      // Rebuild the order without the folder, then place restored tracks at
+      // their recorded indices (ascending, so earlier ones don't shift later).
+      let trackOrder = state.trackOrder.filter(
+        (id) => id !== op.folderId && !previous.has(id)
+      )
+      for (const entry of [...op.restore].sort((a, b) => a.index - b.index)) {
+        if (!tracks[entry.trackId]) continue
+        trackOrder = [
+          ...trackOrder.slice(0, clamp(entry.index, 0, trackOrder.length)),
+          entry.trackId,
+          ...trackOrder.slice(clamp(entry.index, 0, trackOrder.length))
+        ]
+      }
+      return { ...state, tracks, trackOrder }
     }
 
     case 'clip/create': {
@@ -472,6 +562,36 @@ export function apply(state: ProjectState, op: Operation): ProjectState {
             ? Math.min(MAX_STRETCH, Math.max(MIN_STRETCH, Math.round(op.stretch * 1000) / 1000))
             : c.stretch
       }))
+
+    case 'clip/deleteMany': {
+      let next = state
+      for (const clipId of op.clipIds) next = apply(next, { type: 'clip/delete', clipId })
+      return next
+    }
+
+    case 'clip/createMany': {
+      let next = state
+      for (const clip of op.clips) {
+        next = apply(next, {
+          type: 'clip/create',
+          clip,
+          notes: op.notes.filter((n) => n.clipId === clip.id)
+        })
+      }
+      return next
+    }
+
+    case 'clip/moveMany': {
+      let next = state
+      for (const move of op.moves) next = apply(next, { type: 'clip/move', ...move })
+      return next
+    }
+
+    case 'clip/resizeMany': {
+      let next = state
+      for (const edit of op.edits) next = apply(next, { type: 'clip/resize', ...edit })
+      return next
+    }
 
     case 'clip/rename':
       return updateClip(state, op.clipId, (c) => ({ ...c, name: op.name }))
@@ -555,6 +675,35 @@ export function apply(state: ProjectState, op: Operation): ProjectState {
       }
       if (notesChanged) notes = nextNotes
       return { ...state, clips, notes }
+    }
+
+    case 'clip/slice': {
+      let next = state
+      for (const slice of op.slices) {
+        // Each cut lands in the piece the PREVIOUS cut produced, so the
+        // positions stay absolute and independent of one another.
+        let target = slice.clipId
+        const cuts = slice.at.map((a) => Math.round(a)).sort((a, b) => a - b)
+        cuts.forEach((at, i) => {
+          const rightClipId = slice.newClipIds[i]
+          if (!rightClipId) return
+          next = apply(next, { type: 'clip/split', clipId: target, at, rightClipId })
+          // Missing = that cut fell outside the clip; keep cutting the same
+          // target so later positions still apply.
+          if (next.clips[rightClipId]) target = rightClipId
+        })
+      }
+      return next
+    }
+
+    case 'clip/unslice': {
+      let next = state
+      for (const merge of op.merges) {
+        for (const pieceId of merge.pieceIds) {
+          next = apply(next, { type: 'clip/merge', clipId: merge.clipId, rightClipId: pieceId })
+        }
+      }
+      return next
     }
 
     case 'clip/merge': {

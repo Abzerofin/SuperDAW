@@ -29,6 +29,10 @@ export function describe(state: ProjectState, op: Operation): string | null {
       return `${op.soloed ? 'Soloed' : 'Unsoloed'} "${trackName(state, op.trackId)}"`
     case 'track/reorder':
       return `Reordered track "${trackName(state, op.trackId)}"`
+    case 'track/group':
+      return `Grouped ${op.trackIds.length} track${op.trackIds.length === 1 ? '' : 's'} into "${op.folder.name}"`
+    case 'track/ungroup':
+      return `Ungrouped "${trackName(state, op.folderId)}"`
     case 'track/setParent':
       return op.parentId === null
         ? `Moved "${trackName(state, op.trackId)}" out of its folder`
@@ -101,6 +105,11 @@ export function describe(state: ProjectState, op: Operation): string | null {
         instance.trackId
       )}"`
     }
+    case 'plugin/setParams': {
+      const instance = state.plugins[op.instanceId]
+      if (!instance) return null
+      return `Adjusted ${instance.descriptor.name} on "${trackName(state, instance.trackId)}"`
+    }
     case 'plugin/setEnabled': {
       const instance = state.plugins[op.instanceId]
       if (!instance) return null
@@ -123,7 +132,23 @@ export function describe(state: ProjectState, op: Operation): string | null {
     }
     case 'track/setSynthParam': {
       const def = SYNTH_DEFS[op.param]
-      return `Set synth ${def?.label ?? op.param} on "${trackName(state, op.trackId)}"`
+      const name = trackName(state, op.trackId)
+      if (op.param === 'present') {
+        return op.value >= 0.5 ? `Added the synth to "${name}"` : `Removed the synth from "${name}"`
+      }
+      if (op.param === 'on') {
+        return op.value >= 0.5 ? `Enabled the synth on "${name}"` : `Bypassed the synth on "${name}"`
+      }
+      return `Set synth ${def?.label ?? op.param} on "${name}"`
+    }
+    case 'track/setSynthParams': {
+      const name = trackName(state, op.trackId)
+      if (op.params.present !== undefined) {
+        return op.params.present >= 0.5
+          ? `Added the synth to "${name}"`
+          : `Removed the synth from "${name}"`
+      }
+      return `Adjusted the synth on "${name}"`
     }
     case 'clip/create':
       return `Added clip "${op.clip.name}" to "${trackName(state, op.clip.trackId)}"`
@@ -143,6 +168,29 @@ export function describe(state: ProjectState, op: Operation): string | null {
       return op.loopLength > 0
         ? `Looped clip "${clipName(state, op.clipId)}"`
         : `Unlooped clip "${clipName(state, op.clipId)}"`
+    }
+    case 'clip/deleteMany': {
+      if (op.clipIds.length === 0) return null
+      if (op.clipIds.length === 1) return `Deleted clip "${clipName(state, op.clipIds[0])}"`
+      return `Deleted ${op.clipIds.length} clips`
+    }
+    case 'clip/createMany': {
+      if (op.clips.length === 0) return null
+      if (op.clips.length === 1) return `Added clip "${op.clips[0].name}"`
+      return `Added ${op.clips.length} clips`
+    }
+    case 'clip/moveMany': {
+      if (op.moves.length === 0) return null
+      if (op.moves.length === 1) {
+        return `Moved clip "${clipName(state, op.moves[0].clipId)}"`
+      }
+      return `Moved ${op.moves.length} clips`
+    }
+    case 'clip/resizeMany': {
+      if (op.edits.length === 0) return null
+      if (op.edits.length === 1) return `Resized clip "${clipName(state, op.edits[0].clipId)}"`
+      const looped = op.edits.every((e) => e.loopLength !== undefined)
+      return `${looped ? 'Looped' : 'Resized'} ${op.edits.length} clips`
     }
     case 'clip/rename':
       return `Renamed clip "${clipName(state, op.clipId)}" to "${op.name}"`
@@ -167,6 +215,23 @@ export function describe(state: ProjectState, op: Operation): string | null {
     }
     case 'clip/split':
       return `Split clip "${clipName(state, op.clipId)}"`
+    case 'clip/slice': {
+      const cuts = op.slices.reduce((n, s) => n + s.newClipIds.length, 0)
+      if (cuts === 0) return null
+      if (op.slices.length === 1) {
+        const name = clipName(state, op.slices[0].clipId)
+        return cuts === 1
+          ? `Sliced clip "${name}"`
+          : `Sliced clip "${name}" into ${cuts + 1} parts`
+      }
+      return `Sliced ${op.slices.length} clips into ${cuts / op.slices.length + 1} parts`
+    }
+    case 'clip/unslice': {
+      if (op.merges.length === 0) return null
+      return op.merges.length === 1
+        ? `Rejoined clip "${clipName(state, op.merges[0].clipId)}"`
+        : `Rejoined ${op.merges.length} clips`
+    }
     case 'clip/merge':
       return `Merged clip "${clipName(state, op.rightClipId)}" into "${clipName(state, op.clipId)}"`
     case 'file/create':

@@ -1175,6 +1175,13 @@ input {
   overflow: visible;
 }
 
+/* Text placeholder (removed instrument) rather than the "+" glyph. */
+.fx-add-open-text {
+  font-size: 12px;
+  font-weight: 600;
+  white-space: nowrap;
+}
+
 .fx-add-open {
   font-size: 22px;
   color: var(--text-dim);
@@ -1241,6 +1248,97 @@ input {
   background: var(--bg-3);
 }
 
+/* Rubber-band selection dragged across empty timeline space. */
+.marquee-layer {
+  position: relative;
+  pointer-events: none;
+  overflow: hidden;
+  z-index: 4;
+}
+
+.marquee {
+  position: absolute;
+  border: 1px solid var(--accent);
+  background: color-mix(in srgb, var(--accent) 14%, transparent);
+  border-radius: 2px;
+}
+
+/* Edit marker: a pinned position that edits (slice, paste) target, so the
+   moving playhead doesn't make them unusable during playback. */
+.marker-layer {
+  position: relative;
+  pointer-events: none;
+  overflow: hidden;
+}
+
+.edit-marker {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  width: 0;
+  border-left: 1px dashed var(--mute);
+  z-index: 5;
+}
+
+.edit-marker-flag {
+  position: absolute;
+  top: 0;
+  left: 0;
+  width: 13px;
+  height: 13px;
+  padding: 0;
+  font-size: 8px;
+  line-height: 1;
+  color: var(--bg-0);
+  background: var(--mute);
+  border-radius: 0 0 3px 0;
+  pointer-events: auto;
+  cursor: pointer;
+}
+
+.edit-marker-flag:hover {
+  background: var(--danger);
+  color: #fff;
+}
+
+/* The bar that always closes the track list: drop target for OS files and
+   the empty project's call to action. */
+.track-drop-bar {
+  display: flex;
+  align-items: center;
+  border-top: 1px solid var(--border);
+  border-bottom: 1px dashed var(--border);
+  background: var(--bg-0);
+  cursor: pointer;
+}
+
+.track-drop-bar:hover {
+  background: var(--bg-1);
+}
+
+.track-drop-bar-over {
+  background: color-mix(in srgb, var(--accent) 16%, var(--bg-0));
+  border-bottom-color: var(--accent);
+}
+
+/* The bar spans the whole (very wide) timeline so files can be dropped
+   anywhere along it, but the label sticks to the viewport's left edge so
+   it stays readable however far the timeline is scrolled. */
+.track-drop-bar-text {
+  position: sticky;
+  left: 0;
+  padding-left: 14px;
+  font-size: 11px;
+  color: var(--text-dim);
+  pointer-events: none;
+  white-space: nowrap;
+}
+
+.track-drop-bar:hover .track-drop-bar-text,
+.track-drop-bar-over .track-drop-bar-text {
+  color: var(--text);
+}
+
 .track-header-selected {
   background: var(--bg-3);
   box-shadow: inset 2px 0 0 var(--accent, #5b8def);
@@ -1305,8 +1403,75 @@ input {
 }
 
 .fx-bypassed .fx-param,
+.fx-bypassed .fx-visual,
 .fx-bypassed .fx-section-title {
   opacity: 0.45;
+}
+
+/* Builtin plugin visualization canvas (EQ curve, GR meter, …). */
+.fx-visual {
+  display: block;
+  width: 100%;
+  background: var(--bg-0);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  margin-bottom: 4px;
+}
+
+/* Parametric EQ: a wider card — the graph IS the interface. */
+.fx-card-wide {
+  width: 380px;
+}
+
+.fx-eq-canvas {
+  cursor: crosshair;
+  touch-action: none;
+}
+
+.fx-eq-band-head {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 2px 0;
+}
+
+.fx-eq-band-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  flex-shrink: 0;
+}
+
+.fx-eq-band-title {
+  font-size: 10px;
+  font-weight: 700;
+  white-space: nowrap;
+}
+
+.fx-eq-types {
+  display: flex;
+  gap: 2px;
+  margin-left: auto;
+}
+
+.fx-eq-type {
+  font-size: 9px;
+  padding: 2px 4px;
+  border: 1px solid var(--border);
+  border-radius: 3px;
+  background: var(--bg-2);
+  color: var(--text-dim);
+}
+
+.fx-eq-type-active {
+  background: var(--accent);
+  border-color: var(--accent);
+  color: #fff;
+}
+
+.fx-eq-hint {
+  font-size: 10px;
+  padding: 4px 2px;
 }
 
 .fx-section-head {
@@ -1320,6 +1485,21 @@ input {
   font-size: 11px;
   font-weight: 700;
   flex: 1;
+}
+
+/* The card header doubles as a reorder handle — the ⠿ grip alone is too
+   small a target to be the only way to reorder a chain. */
+.fx-section-head-drag {
+  cursor: grab;
+  touch-action: none;
+}
+
+.fx-section-head-drag:hover .fx-section-title {
+  color: var(--accent);
+}
+
+.fx-insert-dragging .fx-section-head-drag {
+  cursor: grabbing;
 }
 
 .fx-power {
@@ -2661,6 +2841,48 @@ input {
   border-color: var(--accent);
 }
 
+/* The join card is a form, not a button: typing a code lands you straight
+   in the session — no intermediate new-project step. */
+.home-action-join {
+  cursor: default;
+}
+
+.home-join-row {
+  display: flex;
+  gap: 6px;
+  width: 100%;
+  margin-top: 3px;
+}
+
+.home-join-input {
+  flex: 1;
+  min-width: 0;
+  padding: 5px 8px;
+  font-size: 12px;
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  background: var(--bg-0);
+  color: var(--text);
+}
+
+.home-join-input:focus {
+  border-color: var(--accent);
+}
+
+.home-join-btn {
+  padding: 5px 12px;
+  font-size: 12px;
+  font-weight: 600;
+  border-radius: 4px;
+  background: var(--accent);
+  color: #fff;
+}
+
+.home-join-btn:disabled {
+  opacity: 0.4;
+  cursor: default;
+}
+
 .home-action-title {
   font-size: 13px;
   font-weight: 600;
@@ -3323,6 +3545,34 @@ input {
   min-width: 46px;
   text-align: center;
   font-size: 10px;
+}
+
+/* Equal-slice shortcuts: the same numbers the keyboard uses. */
+.clipmenu-parts {
+  display: flex;
+  gap: 2px;
+}
+
+.clipmenu-parts button {
+  width: 20px;
+  height: 18px;
+  border: 1px solid var(--border);
+  border-radius: 3px;
+  background: var(--bg-2);
+  color: var(--text);
+  font-size: 10px;
+  line-height: 1;
+}
+
+.clipmenu-parts button:hover:not(:disabled) {
+  background: var(--accent);
+  border-color: var(--accent);
+  color: #fff;
+}
+
+.clipmenu-parts button:disabled {
+  opacity: 0.35;
+  cursor: default;
 }
 
 .clipmenu-reset {

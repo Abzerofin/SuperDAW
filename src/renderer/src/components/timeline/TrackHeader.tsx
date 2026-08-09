@@ -9,12 +9,21 @@ import { commentUi, useCommentUi } from '@/state/commentUi'
 import { automationUi } from '@/state/automationUi'
 import { recording, useRecording } from '@/state/recording'
 import { panels } from '@/state/panels'
-import { selection, useSelectedTrackId } from '@/state/selection'
+import { selection, useSelectionVersion } from '@/state/selection'
+import { useCollab } from '@/state/collab'
 import { folderUi, useFolderUi } from '@/state/folderUi'
 import { routingUi } from '@/state/routingUi'
 import { trackInputs, useTrackInputs } from '@/state/trackInputs'
 import { trackInputUi, useTrackInputUi } from '@/state/trackInputUi'
-import { freezeTrack, loadTrackPreset, saveTrackPreset, unfreezeTrack } from '@/lib/trackActions'
+import {
+  freezeTrack,
+  groupTracksIntoFolder,
+  loadTrackPreset,
+  saveTrackPreset,
+  selectTrackRange,
+  ungroupFolder,
+  unfreezeTrack
+} from '@/lib/trackActions'
 import { exportTrackAudio } from '@/lib/exportAudio'
 import { CommentThread } from '../comments/CommentThread'
 import { TrackInputPanel } from '../track/TrackInputPanel'
@@ -46,7 +55,13 @@ export function TrackHeader({
     (c) => c.parentId === null && !c.resolved && c.anchor.kind === 'track' && c.anchor.id === track.id
   ).length
   const popoverOpen = openAnchor?.kind === 'track' && openAnchor.id === track.id
-  const isSelected = useSelectedTrackId() === track.id
+  useSelectionVersion()
+  const isSelected = selection.isTrackSelected(track.id)
+  const multi = selection.selectedTrackIds.size > 1
+  // In a session, freezing does double duty: the render it bakes is also
+  // what reaches collaborators who cannot run this track's plugins, so the
+  // action is named for both jobs.
+  const inSession = useCollab().mode !== 'off'
   const hasFx = Object.values(state.plugins).some((p) => p.trackId === track.id)
   const isFolder = track.kind === 'folder'
   const frozen = track.frozenAssetId !== null
@@ -100,11 +115,19 @@ export function TrackHeader({
       style={{ borderLeftColor: track.color, paddingLeft: 9 + depth * 14 }}
       // Any interaction with a header selects its track (the Effects dock
       // follows the selection), including right-click and control clicks
-      // that bubble up.
-      onPointerDown={() => selection.selectTrack(track.id)}
+      // that bubble up. Ctrl/Cmd extends the selection instead, so several
+      // tracks can be gathered and acted on together.
+      onPointerDown={(e) => {
+        if (e.ctrlKey || e.metaKey) selection.toggleTrack(track.id)
+        else if (e.shiftKey) selectTrackRange(projectStore.state, track.id)
+        else selection.selectTrack(track.id)
+      }}
       onContextMenu={(e) => {
         e.preventDefault()
         e.stopPropagation()
+        // Right-clicking inside a multi-selection keeps it, so the menu
+        // can offer actions over the whole set.
+        if (!selection.isTrackSelected(track.id)) selection.selectTrack(track.id)
         openMenuAt(e.clientX, e.clientY)
       }}
     >
@@ -286,11 +309,20 @@ export function TrackHeader({
             {menuItem('Comments…', () => commentUi.open({ kind: 'track', id: track.id }))}
             {menuItem('Show routing…', () => routingUi.open(track.id))}
             <div className="menu-sep" />
+            {multi &&
+              menuItem(`Group ${selection.selectedTrackIds.size} tracks into a folder`, () =>
+                groupTracksIntoFolder([...selection.selectedTrackIds])
+              )}
+            {!multi && menuItem('Group into a folder', () => groupTracksIntoFolder([track.id]))}
+            {isFolder &&
+              menuItem('Ungroup (keep the tracks)', () => ungroupFolder(track.id))}
             {menuItem('Duplicate', duplicate)}
             {!isFolder &&
               (frozen
                 ? menuItem('Unfreeze', () => unfreezeTrack(track.id))
-                : menuItem('Freeze track', () => void freezeTrack(track.id)))}
+                : menuItem(inSession ? 'Freeze/Sync' : 'Freeze', () =>
+                    void freezeTrack(track.id)
+                  ))}
             {menuItem('Export track as WAV…', () => void exportTrackAudio(track.id, 'wav'))}
             {menuItem('Export track as MP3…', () => void exportTrackAudio(track.id, 'mp3'))}
             {menuItem('Save track preset…', () => void saveTrackPreset(track.id))}

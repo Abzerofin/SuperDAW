@@ -6,6 +6,7 @@ import { ticksPerSecond } from '@audio/scheduling'
 import type { ProjectAsset } from '@audio/assets'
 import { audioEngine, assetStore } from '@/state/audioInstance'
 import { projectStore } from '@/state/projectStore'
+import { createTrack } from './trackActions'
 
 const AUDIO_EXTENSIONS = /\.(wav|mp3|flac|ogg|m4a|aac|aiff?)$/i
 const MIDI_EXTENSIONS = /\.(mid|midi)$/i
@@ -183,6 +184,47 @@ export async function importFilesToTrack(
     }
   }
   reportFailedImports(failed)
+}
+
+/**
+ * Import OS files onto NEW tracks — the empty drop bar under the track
+ * list. One track per file, named after it and typed from its contents,
+ * with the clip at the song start.
+ */
+export async function importFilesAsNewTracks(files: readonly File[]): Promise<void> {
+  const failed: string[] = []
+  for (const file of files) {
+    const kind = isMidiFile(file) ? 'midi' : isAudioFile(file) ? 'audio' : null
+    if (!kind) continue
+    try {
+      const asset = await importAsset(file)
+      if (!asset) continue
+      // The track must exist before the clip op referencing it.
+      const track = createTrack(kind, baseName(file.name))
+      dispatchImported(asset, null, { track, startTicks: 0 })
+    } catch (error) {
+      console.error(`Failed to import "${file.name}"`, error)
+      failed.push(file.name)
+    }
+  }
+  reportFailedImports(failed)
+}
+
+/**
+ * Open the OS file picker for audio/MIDI and import the choice as new
+ * tracks. Uses the Electron bridge when present so the dialog is native;
+ * falls back to a hidden <input> in the browser build.
+ */
+export async function browseForMediaFiles(): Promise<void> {
+  const input = document.createElement('input')
+  input.type = 'file'
+  input.multiple = true
+  input.accept = 'audio/*,.wav,.mp3,.flac,.ogg,.m4a,.aac,.aif,.aiff,.mid,.midi'
+  input.onchange = () => {
+    const files = input.files
+    if (files && files.length > 0) void importFilesAsNewTracks(Array.from(files))
+  }
+  input.click()
 }
 
 /** Payload for dragging an asset out of the File Bay (onto a track). */

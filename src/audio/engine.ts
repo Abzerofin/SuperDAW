@@ -8,7 +8,7 @@ import {
 import type { AssetStore } from './assets'
 import { applyClipFades } from './fades'
 import { LivePreview } from './livePreview'
-import { pluginRegistry, type PluginNodes } from './pluginRegistry'
+import { pluginRegistry, type PluginAnalysis, type PluginNodes } from './pluginRegistry'
 import type { ExternalPluginHost } from './render'
 import { buildSynthVoice } from './synth'
 import {
@@ -242,11 +242,22 @@ export class AudioEngine {
 
   /** Live-preview a plugin knob while dragging (no op until release). */
   previewPluginParam(instanceId: PluginInstanceId, param: string, value: number): void {
+    this.previewPluginParams(instanceId, { [param]: value })
+  }
+
+  /**
+   * Live-preview several params at once — gestures like dragging an EQ
+   * band point move freq and gain together (still no op until release).
+   */
+  previewPluginParams(
+    instanceId: PluginInstanceId,
+    partial: Readonly<Record<string, number>>
+  ): void {
     const ctx = this.ctx
     const instance = this.store.state.plugins[instanceId]
     const nodes = this.fxNodes.get(instanceId)
     if (ctx && instance && nodes) {
-      nodes.apply({ ...instance.params, [param]: value }, ctx.currentTime)
+      nodes.apply({ ...instance.params, ...partial }, ctx.currentTime)
     }
   }
 
@@ -327,6 +338,16 @@ export class AudioEngine {
     return Math.min(1, peak)
   }
 
+  /**
+   * Live analysis handle for a plugin instance (spectrum tap, gain
+   * reduction…), or null while its nodes are not in the graph (context not
+   * started, plugin bypassed, track frozen). Read-only; polled by the FX
+   * cards' rAF loops, never through React state.
+   */
+  pluginAnalysis(instanceId: PluginInstanceId): PluginAnalysis | null {
+    return this.fxNodes.get(instanceId)?.analysis ?? null
+  }
+
   // ---------- Transport / state reactions ----------
 
   private onTransportEvent = (event: 'play' | 'stop' | 'seek'): void => {
@@ -342,7 +363,6 @@ export class AudioEngine {
     const ctx = this.ensureContext()
     const go = (): void => {
       void this.restart(() => {
-        this.scheduleAutomation()
         this.startMetronome()
         this.startLoopScheduler()
       })
@@ -366,6 +386,9 @@ export class AudioEngine {
     // Stopped or superseded while rendering: drop it on the floor.
     if (generation !== this.previewGeneration || !this.ctx) return
     this.reanchor()
+    // Clear automation BEFORE the passes arm it: cancelScheduledValues
+    // would otherwise wipe what they just queued.
+    this.resetAutomation()
     this.scheduleAll()
     after()
     this.emitFirstPreviewWindows(first)
@@ -596,7 +619,7 @@ export class AudioEngine {
     const automationEdited = state.automation !== this.prevAutomation
     this.prevAutomation = state.automation
     if (automationEdited && this.transport.isPlaying && this.ctx) {
-      this.scheduleAutomation()
+      this.rearmAutomation()
     }
     const editedAudio =
       state.clips !== this.prevClips ||
@@ -612,10 +635,9 @@ export class AudioEngine {
     // (renames etc.) must never interrupt playback. Already-rendered
     // preview windows bake the OLD state in, so restart() re-renders them.
     if (editedAudio && this.transport.isPlaying && this.ctx) {
-      void this.restart(() => {
-        if (frozenChanged) this.scheduleAutomation() // baked automation goes neutral
-        this.resyncMetronome()
-      })
+      // restart() resets and re-arms automation itself, so a freeze flip
+      // (whose baked automation must go neutral) needs nothing extra here.
+      void this.restart(() => this.resyncMetronome())
     }
   }
 
@@ -646,6 +668,34 @@ export class AudioEngine {
     const fadeGains = new Map<string, GainNode>()
     this.scheduleClipsPass(fromTicks, atSec, untilTicks, fadeGains)
     this.scheduleNotesPass(fromTicks, atSec, untilTicks, fadeGains)
+    // Automation rides along so each loop iteration replays it.
+    this.scheduleAutomationPass(fromTicks, atSec, untilTicks)
+  }
+
+  /**
+   * The pass windows currently inside the lookahead — the same set
+   * scheduleAll would queue. Used to re-arm automation alone, without
+   * restarting clip sources (an automation edit must not glitch playback).
+   */
+  private upcomingPasses(): Array<[fromTicks: number, atSec: number, untilTicks: number]> {
+    const ctx = this.ctx
+    if (!ctx) return []
+    const loop = this.transport.activeLoop()
+    if (!loop) return [[this.anchorTicks, this.anchorSec, Number.POSITIVE_INFINITY]]
+    const tps = ticksPerSecond(this.store.state.tempo)
+    const spanSec = (loop.end - loop.start) / tps
+    const passes: Array<[number, number, number]> = [
+      [this.anchorTicks, this.anchorSec, loop.end]
+    ]
+    if (spanSec <= 0) return passes
+    const horizon = ctx.currentTime + LOOP_LOOKAHEAD_SEC
+    let at = this.anchorSec + (loop.end - this.anchorTicks) / tps
+    let guard = 0
+    while (at < horizon && guard++ < 64) {
+      passes.push([loop.start, at, loop.end])
+      at += spanSec
+    }
+    return passes
   }
 
   /**
@@ -779,42 +829,78 @@ export class AudioEngine {
     }
   }
 
-  /** Compile volume + pan automation to linear ramps from the current position. */
-  private scheduleAutomation(): void {
+  /**
+   * Drop every scheduled automation event from now, and settle the tracks
+   * that have no automation at all onto their static values. Tracks that
+   * DO have points get their curve re-armed per pass — see
+   * scheduleAutomationPass — so cycling repeats the automation instead of
+   * running off the end of the region and holding.
+   */
+  private resetAutomation(): void {
     const ctx = this.ctx
     if (!ctx) return
     const state = this.store.state
-    const tps = ticksPerSecond(state.tempo)
     const now = ctx.currentTime
-    const nowTicks = this.anchorTicks + (now - this.anchorSec) * tps
-    const rampTime = (ticks: number): number => this.anchorSec + (ticks - this.anchorTicks) / tps
-
     for (const trackId of Object.keys(state.tracks)) {
       const chain = this.chain(trackId)
       chain.auto.gain.cancelScheduledValues(now)
+      chain.panner.pan.cancelScheduledValues(now)
       // Frozen tracks baked their volume automation into the render.
       const points = state.tracks[trackId]?.frozenAssetId
         ? []
         : automationOf(state, trackId, 'volume')
-      chain.auto.gain.setValueAtTime(points.length > 0 ? automationValueAt(points, nowTicks) : 1, now)
-      for (const point of points) {
-        if (point.ticks <= nowTicks) continue
-        chain.auto.gain.linearRampToValueAtTime(point.value, rampTime(point.ticks))
-      }
-
+      if (points.length === 0) chain.auto.gain.setValueAtTime(1, now)
       // Pan automation owns the panner while points exist (0..1 → -1..1);
       // when the last point is deleted mid-playback the knob takes back over.
-      const panPoints = automationOf(state, trackId, 'pan')
-      chain.panner.pan.cancelScheduledValues(now)
-      if (panPoints.length > 0) {
-        chain.panner.pan.setValueAtTime(automationValueAt(panPoints, nowTicks) * 2 - 1, now)
-        for (const point of panPoints) {
-          if (point.ticks <= nowTicks) continue
-          chain.panner.pan.linearRampToValueAtTime(point.value * 2 - 1, rampTime(point.ticks))
-        }
-      } else {
+      if (automationOf(state, trackId, 'pan').length === 0) {
         chain.panner.pan.setValueAtTime(state.tracks[trackId]?.pan ?? 0, now)
       }
+    }
+  }
+
+  /**
+   * Compile volume + pan automation to linear ramps for ONE pass, on the
+   * same footing as clips and notes: times are relative to this pass's
+   * anchor, so every loop iteration replays the region's automation. Each
+   * pass re-enters at the region's own start value — a wrap is a jump, not
+   * a ramp from wherever the previous iteration ended.
+   */
+  private scheduleAutomationPass(fromTicks: number, atSec: number, untilTicks: number): void {
+    const state = this.store.state
+    const tps = ticksPerSecond(state.tempo)
+    const rampTime = (ticks: number): number => atSec + (ticks - fromTicks) / tps
+
+    for (const trackId of Object.keys(state.tracks)) {
+      const points = state.tracks[trackId]?.frozenAssetId
+        ? []
+        : automationOf(state, trackId, 'volume')
+      const panPoints = automationOf(state, trackId, 'pan')
+      if (points.length === 0 && panPoints.length === 0) continue
+      const chain = this.chain(trackId)
+
+      if (points.length > 0) {
+        chain.auto.gain.setValueAtTime(automationValueAt(points, fromTicks), atSec)
+        for (const point of points) {
+          if (point.ticks <= fromTicks || point.ticks > untilTicks) continue
+          chain.auto.gain.linearRampToValueAtTime(point.value, rampTime(point.ticks))
+        }
+      }
+
+      if (panPoints.length > 0) {
+        chain.panner.pan.setValueAtTime(automationValueAt(panPoints, fromTicks) * 2 - 1, atSec)
+        for (const point of panPoints) {
+          if (point.ticks <= fromTicks || point.ticks > untilTicks) continue
+          chain.panner.pan.linearRampToValueAtTime(point.value * 2 - 1, rampTime(point.ticks))
+        }
+      }
+    }
+  }
+
+  /** Wipe and re-arm automation across every pass already in the window. */
+  private rearmAutomation(): void {
+    this.resetAutomation()
+    for (const [fromTicks, atSec, untilTicks] of this.upcomingPasses()) {
+      this.scheduleAutomationPass(fromTicks, atSec, untilTicks)
     }
   }
 
@@ -1014,12 +1100,18 @@ export class AudioEngine {
   }
 
   private resyncMetronome(): void {
+    const ctx = this.ctx
+    if (!ctx) return
     const position = this.transport.positionTicks()
     this.nextBeatIndex = beatIndexAt(this.store.state, position)
     // The metronome keeps its own anchor because cycling moves the playhead
-    // backwards, which the clip anchor deliberately does not follow.
-    this.metroAnchorTicks = this.anchorTicks
-    this.metroAnchorSec = this.anchorSec
+    // backwards, which the clip anchor deliberately does not follow. Both
+    // halves of that anchor must be sampled at the SAME instant: pairing
+    // the wrapped position with the clip anchor's linear tick/second pair
+    // offsets every click by however far the loop had already wrapped
+    // (silent at play, wrong when the metronome is switched on mid-cycle).
+    this.metroAnchorTicks = position
+    this.metroAnchorSec = ctx.currentTime
     this.lastMetroPosition = position
   }
 

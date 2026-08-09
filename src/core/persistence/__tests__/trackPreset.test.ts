@@ -1,6 +1,6 @@
 import { describe as suite, expect, test } from 'vitest'
 import type { Track } from '../../model/types'
-import { createEmptyProject } from '../../model/types'
+import { MAX_GAIN, createEmptyProject } from '../../model/types'
 import { synthDefaults } from '../../model/effects'
 import { builtinEffectDescriptor } from '../../plugins/builtin'
 import { apply } from '../../ops/apply'
@@ -59,7 +59,7 @@ suite('track presets', () => {
     doctored.plugins[0].params.mix = 1000
     doctored.plugins.push({ notAPlugin: true })
     const parsed = parseTrackPreset(JSON.stringify(doctored))
-    expect(parsed.track.volume).toBeLessThanOrEqual(1.4)
+    expect(parsed.track.volume).toBe(MAX_GAIN)
     expect(parsed.track.pan).toBe(-1)
     expect(parsed.plugins).toHaveLength(1)
     expect(parsed.plugins[0].params.mix).toBeLessThanOrEqual(1)

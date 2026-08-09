@@ -12,7 +12,8 @@ import {
   cutSelectedClip,
   duplicateSelectedClip,
   pasteClip,
-  splitSelectedClipAtPlayhead
+  sliceSelectionIntoEqualParts,
+  splitSelectedClipAtEditPoint
 } from './clipActions'
 
 /** App-wide keyboard shortcuts. Inactive while a text field has focus. */
@@ -109,7 +110,16 @@ export function useGlobalShortcuts(): void {
       }
       if (mod && e.key.toLowerCase() === 'e') {
         e.preventDefault()
-        splitSelectedClipAtPlayhead()
+        splitSelectedClipAtEditPoint()
+        return
+      }
+
+      // 2..9 slice the selected clips into that many equal pieces. Bare
+      // digits only: Ctrl/Alt combinations belong to the browser and to
+      // future tool switching.
+      if (!mod && !e.altKey && /^[2-9]$/.test(e.key) && selection.selectedClipIds.size > 0) {
+        e.preventDefault()
+        sliceSelectionIntoEqualParts(Number(e.key))
         return
       }
 
@@ -123,10 +133,14 @@ export function useGlobalShortcuts(): void {
       }
 
       if (e.key === 'Delete' || e.key === 'Backspace') {
-        const clipId = selection.selectedClipId
-        if (clipId) {
+        const clipIds = [...selection.selectedClipIds]
+        if (clipIds.length > 0) {
           selection.select(null)
-          projectStore.dispatch({ type: 'clip/delete', clipId })
+          projectStore.dispatch(
+            clipIds.length === 1
+              ? { type: 'clip/delete', clipId: clipIds[0] }
+              : { type: 'clip/deleteMany', clipIds }
+          )
         }
       }
     }

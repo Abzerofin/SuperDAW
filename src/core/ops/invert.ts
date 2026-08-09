@@ -6,6 +6,7 @@ import {
   subtreeOf,
   trackSubtreeOf
 } from '../model/types'
+import { SYNTH_DEFS } from '../model/effects'
 
 function automationOfTrack(state: ProjectState, trackId: string) {
   return Object.values(state.automation).filter((p) => p.trackId === trackId)
@@ -160,6 +161,18 @@ export function invert(state: ProjectState, op: Operation): Operation | null {
       }
     }
 
+    case 'plugin/setParams': {
+      const instance = state.plugins[op.instanceId]
+      if (!instance) return null
+      return {
+        type: 'plugin/setParams',
+        instanceId: op.instanceId,
+        params: Object.fromEntries(
+          Object.keys(op.params).map((key) => [key, instance.params[key] ?? 0])
+        )
+      }
+    }
+
     case 'plugin/setEnabled': {
       const instance = state.plugins[op.instanceId]
       if (!instance) return null
@@ -190,6 +203,21 @@ export function invert(state: ProjectState, op: Operation): Operation | null {
         trackId: op.trackId,
         param: op.param,
         value: track.synth[op.param] ?? 0
+      }
+    }
+
+    case 'track/setSynthParams': {
+      const track = state.tracks[op.trackId]
+      if (!track) return null
+      return {
+        type: 'track/setSynthParams',
+        trackId: op.trackId,
+        params: Object.fromEntries(
+          Object.keys(op.params).map((param) => [
+            param,
+            track.synth[param] ?? SYNTH_DEFS[param]?.default ?? 0
+          ])
+        )
       }
     }
 
@@ -224,6 +252,36 @@ export function invert(state: ProjectState, op: Operation): Operation | null {
       }
     }
 
+    case 'track/group': {
+      // Record where each member sat BEFORE the folder existed, so ungroup
+      // puts them back exactly (order included, not just parentage).
+      const restore = op.trackIds
+        .filter((id) => state.tracks[id])
+        .map((id) => ({
+          trackId: id,
+          parentId: state.tracks[id].parentId,
+          index: state.trackOrder.indexOf(id)
+        }))
+        .filter((entry) => entry.index !== -1)
+      if (restore.length === 0) return null
+      return { type: 'track/ungroup', folderId: op.folder.id, restore }
+    }
+
+    case 'track/ungroup': {
+      const folder = state.tracks[op.folderId]
+      if (!folder) return null
+      const trackIds = state.trackOrder.filter(
+        (id) => state.tracks[id]?.parentId === op.folderId
+      )
+      if (trackIds.length === 0) return null
+      return {
+        type: 'track/group',
+        folder,
+        index: state.trackOrder.indexOf(op.folderId),
+        trackIds
+      }
+    }
+
     case 'clip/create':
       return { type: 'clip/delete', clipId: op.clip.id }
 
@@ -242,6 +300,56 @@ export function invert(state: ProjectState, op: Operation): Operation | null {
         trackId: clip.trackId,
         start: clip.start
       }
+    }
+
+    case 'clip/deleteMany': {
+      const clips = op.clipIds
+        .map((id) => state.clips[id])
+        .filter((c): c is NonNullable<typeof c> => c !== undefined)
+      if (clips.length === 0) return null
+      return {
+        type: 'clip/createMany',
+        clips,
+        notes: clips.flatMap((c) => notesOfClip(state, c.id))
+      }
+    }
+
+    case 'clip/createMany': {
+      const clipIds = op.clips.map((c) => c.id)
+      if (clipIds.length === 0) return null
+      return { type: 'clip/deleteMany', clipIds }
+    }
+
+    case 'clip/moveMany': {
+      const moves = op.moves
+        .filter((m) => state.clips[m.clipId])
+        .map((m) => ({
+          clipId: m.clipId,
+          trackId: state.clips[m.clipId].trackId,
+          start: state.clips[m.clipId].start
+        }))
+      if (moves.length === 0) return null
+      return { type: 'clip/moveMany', moves }
+    }
+
+    case 'clip/resizeMany': {
+      const edits = op.edits
+        .filter((e) => state.clips[e.clipId])
+        .map((e) => {
+          const clip = state.clips[e.clipId]
+          return {
+            clipId: e.clipId,
+            start: clip.start,
+            duration: clip.duration,
+            offset: clip.offset,
+            // Always carried, as in clip/resize: undoing a loop- or
+            // stretch-handle drag must restore that state exactly.
+            loopLength: clip.loopLength,
+            stretch: clip.stretch
+          }
+        })
+      if (edits.length === 0) return null
+      return { type: 'clip/resizeMany', edits }
     }
 
     case 'clip/resize': {
@@ -294,6 +402,34 @@ export function invert(state: ProjectState, op: Operation): Operation | null {
       const clip = state.clips[op.clipId]
       if (!clip) return null
       return { type: 'clip/merge', clipId: op.clipId, rightClipId: op.rightClipId }
+    }
+
+    case 'clip/slice': {
+      const merges = op.slices
+        .filter((s) => state.clips[s.clipId] && s.newClipIds.length > 0)
+        // Absorb right-to-left: each merge extends the source clip to the
+        // piece's end, so the original length comes back one cut at a time.
+        .map((s) => ({ clipId: s.clipId, pieceIds: [...s.newClipIds].reverse() }))
+      if (merges.length === 0) return null
+      return { type: 'clip/unslice', merges }
+    }
+
+    case 'clip/unslice': {
+      const slices = op.merges
+        .map((m) => {
+          const pieces = m.pieceIds
+            .map((id) => state.clips[id])
+            .filter((c): c is NonNullable<typeof c> => c !== undefined)
+            .sort((a, b) => a.start - b.start)
+          return {
+            clipId: m.clipId,
+            at: pieces.map((p) => p.start),
+            newClipIds: pieces.map((p) => p.id)
+          }
+        })
+        .filter((s) => s.at.length > 0)
+      if (slices.length === 0) return null
+      return { type: 'clip/slice', slices }
     }
 
     case 'clip/merge': {

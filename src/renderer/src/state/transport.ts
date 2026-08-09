@@ -48,6 +48,13 @@ export class Transport {
   private loop: LoopRegion | null = null
   private loopOn = false
   private songLoopOn = false
+  /**
+   * A pinned edit position. The playhead moves during playback, which makes
+   * "at the playhead" edits (slice, paste) unusable while the song runs —
+   * the marker is a spot that stays put so you can keep working over the
+   * top of playback. Per-user and ephemeral, like the playhead itself.
+   */
+  private marker: number | null = null
   private timeSource: TimeSource = { now: () => performance.now() / 1000 }
   private frameListeners = new Set<() => void>()
   private eventListeners = new Set<(event: TransportEvent) => void>()
@@ -100,8 +107,9 @@ export class Transport {
   /** Loop the entire song: reaching the end wraps back to the start. */
   setSongLoop(enabled: boolean): void {
     if (this.songLoopOn === enabled) return
+    const resumeAt = this.positionTicks()
     this.songLoopOn = enabled
-    this.reanchorForLoopChange()
+    this.reanchorForLoopChange(resumeAt)
   }
 
   setLoopRegion(start: number, end: number): void {
@@ -109,32 +117,42 @@ export class Transport {
     const hi = Math.max(start, end)
     // Ignore degenerate drags (a click on the ruler is not a region).
     if (hi - lo < 1) return
+    const resumeAt = this.positionTicks()
     this.loop = { start: lo, end: hi }
     this.loopOn = true
-    this.reanchorForLoopChange()
+    this.reanchorForLoopChange(resumeAt)
   }
 
   setLoopEnabled(enabled: boolean): void {
     if (this.loopOn === enabled) return
+    const resumeAt = this.positionTicks()
     this.loopOn = enabled
-    this.reanchorForLoopChange()
+    this.reanchorForLoopChange(resumeAt)
   }
 
   clearLoop(): void {
     if (!this.loop) return
+    const resumeAt = this.positionTicks()
     this.loop = null
     this.loopOn = false
-    this.reanchorForLoopChange()
+    this.reanchorForLoopChange(resumeAt)
   }
 
   /**
-   * Changing the region mid-playback re-bases on the CURRENT (already
-   * wrapped) position, then re-emits a seek so the engine reschedules
-   * against the new region.
+   * Changing the loop mid-playback re-bases on where the playhead audibly
+   * IS, then re-emits a seek so the engine reschedules against the new
+   * region.
+   *
+   * `resumeAt` MUST be sampled by the caller BEFORE it mutates any loop
+   * state. The wrap lives only in positionTicks()'s return value —
+   * baseTicks itself grows linearly for the whole cycling session — so
+   * reading the position after switching cycling off would surface that
+   * runaway value (loop 3× over 4 bars and land at bar 13) and freeze it
+   * into baseTicks permanently.
    */
-  private reanchorForLoopChange(): void {
+  private reanchorForLoopChange(resumeAt: number): void {
     if (this.playing) {
-      this.baseTicks = this.positionTicks()
+      this.baseTicks = resumeAt
       this.startedAt = this.timeSource.now()
       this.emitEvent('seek')
     }
@@ -157,6 +175,35 @@ export class Transport {
     // therefore plays the run-up once, then cycles.
     const span = loop.end - loop.start
     return loop.start + ((raw - loop.end) % span)
+  }
+
+  // ---------- Edit marker ----------
+
+  /** The pinned edit position, or null when edits follow the playhead. */
+  get markerTicks(): number | null {
+    return this.marker
+  }
+
+  setMarker(ticks: number): void {
+    const at = Math.max(0, Math.round(ticks))
+    if (this.marker === at) return
+    this.marker = at
+    this.emitFrame()
+  }
+
+  clearMarker(): void {
+    if (this.marker === null) return
+    this.marker = null
+    this.emitFrame()
+  }
+
+  /**
+   * Where an edit lands: the marker when one is pinned, otherwise the
+   * playhead. Everything that used to read `positionTicks()` for an EDIT
+   * (as opposed to for drawing) goes through this.
+   */
+  editTicks(): number {
+    return this.marker ?? this.positionTicks()
   }
 
   /** Swap the clock (e.g. to AudioContext time) without moving the playhead. */

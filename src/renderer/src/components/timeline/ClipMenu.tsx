@@ -4,7 +4,13 @@ import { ticksPerSecond } from '@audio/scheduling'
 import { projectStore } from '@/state/projectStore'
 import { assetStore } from '@/state/audioInstance'
 import { selection } from '@/state/selection'
-import { canSliceAtPlayhead, duplicateClip, sliceClipAtPlayhead } from '@/lib/clipActions'
+import { transport } from '@/state/transport'
+import {
+  canSliceAtEditPoint,
+  duplicateClip,
+  sliceClipAtEditPoint,
+  sliceSelectionIntoEqualParts
+} from '@/lib/clipActions'
 import { TRACK_COLORS } from '@/lib/colors'
 
 /**
@@ -75,16 +81,35 @@ export function ClipMenu({
 
       <button
         className="menu-item"
-        disabled={!canSliceAtPlayhead(clip.id)}
-        title="Cut the clip in two at the playhead (Ctrl+E)"
+        disabled={!canSliceAtEditPoint(clip.id)}
+        title="Cut the clip in two at the edit point — the marker if one is pinned (Shift+click the timeline), otherwise the playhead"
         onClick={() => {
-          sliceClipAtPlayhead(clip.id)
+          sliceClipAtEditPoint(clip.id)
           onClose()
         }}
       >
-        <span>Slice at playhead</span>
+        <span>Slice at {transport.markerTicks !== null ? 'marker' : 'playhead'}</span>
         <span className="menu-shortcut mono">Ctrl+E</span>
       </button>
+
+      {row(
+        'Slice equally',
+        <span className="clipmenu-parts">
+          {[2, 3, 4, 6, 8].map((parts) => (
+            <button
+              key={parts}
+              disabled={clip.duration < parts}
+              title={`Cut into ${parts} equal parts (press ${parts})`}
+              onClick={() => {
+                sliceSelectionIntoEqualParts(parts)
+                onClose()
+              }}
+            >
+              {parts}
+            </button>
+          ))}
+        </span>
+      )}
 
       {isAudio && (
         <>

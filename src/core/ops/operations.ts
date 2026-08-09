@@ -72,6 +72,12 @@ export type Operation =
   | { type: 'plugin/add'; instance: PluginInstance }
   | { type: 'plugin/remove'; instanceId: PluginInstanceId }
   | { type: 'plugin/setParam'; instanceId: PluginInstanceId; param: string; value: number }
+  /**
+   * Set several params atomically — for gestures that move more than one
+   * value at once (dragging an EQ band point changes freq AND gain), so
+   * one gesture stays one operation.
+   */
+  | { type: 'plugin/setParams'; instanceId: PluginInstanceId; params: Record<string, number> }
   | { type: 'plugin/setEnabled'; instanceId: PluginInstanceId; enabled: boolean }
   /**
    * Whole-chain order for one track, so a reorder drag stays ONE op and
@@ -89,11 +95,39 @@ export type Operation =
    */
   | { type: 'plugin/setState'; instanceId: PluginInstanceId; stateBlob: string | null }
   | { type: 'track/setSynthParam'; trackId: TrackId; param: string; value: number }
+  /**
+   * Set several synth params atomically — re-adding a removed instrument
+   * restores presence, bypass and its sound in one undoable step.
+   */
+  | { type: 'track/setSynthParams'; trackId: TrackId; params: Record<string, number> }
   /** `parentId` present = also re-parent in the same gesture (drag into a folder). */
   | { type: 'track/reorder'; trackId: TrackId; index: number; parentId?: TrackId | null }
+  /**
+   * Wrap existing tracks in a NEW folder bus — one gesture, one op, because
+   * creating the folder and re-parenting the tracks must not be separately
+   * undoable (an undo landing between them would leave an orphan folder).
+   * The folder is inserted at `index`; the tracks follow it in `trackIds`
+   * order. Inverted by `track/ungroup`.
+   */
+  | { type: 'track/group'; folder: Track; index: number; trackIds: TrackId[] }
+  /**
+   * Remove a folder and put its children back where they were. `restore`
+   * carries each child's previous parent and trackOrder index so the
+   * inverse of `track/group` is exact; children NOT listed keep the
+   * folder's own parent (a peer may have added one concurrently).
+   */
+  | {
+      type: 'track/ungroup'
+      folderId: TrackId
+      restore: Array<{ trackId: TrackId; parentId: TrackId | null; index: number }>
+    }
   /** `notes` seeds MIDI content (import, undo-restore); empty for new clips. */
   | { type: 'clip/create'; clip: Clip; notes: Note[] }
   | { type: 'clip/delete'; clipId: ClipId }
+  /** Delete a multi-clip selection as one undoable step. */
+  | { type: 'clip/deleteMany'; clipIds: ClipId[] }
+  /** Restore several clips with their notes — the inverse of the above. */
+  | { type: 'clip/createMany'; clips: Clip[]; notes: Note[] }
   | { type: 'clip/move'; clipId: ClipId; trackId: TrackId; start: number }
   /**
    * `loopLength` present = the gesture also set the loop period (the loop
@@ -110,6 +144,28 @@ export type Operation =
       offset: number
       loopLength?: number
       stretch?: number
+    }
+  /**
+   * Move several clips at once — dragging a multi-clip selection. Absolute
+   * destinations (not deltas), so re-delivery is idempotent. Entries whose
+   * clip or target track is unusable are skipped individually; the rest
+   * still land.
+   */
+  | {
+      type: 'clip/moveMany'
+      moves: Array<{ clipId: ClipId; trackId: TrackId; start: number }>
+    }
+  /** Resize/trim/loop/stretch several clips at once. See `clip/resize`. */
+  | {
+      type: 'clip/resizeMany'
+      edits: Array<{
+        clipId: ClipId
+        start: number
+        duration: number
+        offset: number
+        loopLength?: number
+        stretch?: number
+      }>
     }
   | { type: 'clip/rename'; clipId: ClipId; name: string }
   /** null = revert to the track color. */
@@ -143,6 +199,22 @@ export type Operation =
     }
   /** Extend `clipId` over `rightClipId` and absorb its notes (undo of split). */
   | { type: 'clip/merge'; clipId: ClipId; rightClipId: ClipId }
+  /**
+   * Cut clips at several points in one gesture (slice into N equal parts,
+   * or slice a whole selection at the playhead). Each entry cuts one clip
+   * at ascending absolute tick positions; `newClipIds[i]` names the piece
+   * created by cut `i`, so every peer mints the same ids. Idempotent:
+   * re-delivery finds the pieces already there and does nothing.
+   */
+  | {
+      type: 'clip/slice'
+      slices: Array<{ clipId: ClipId; at: number[]; newClipIds: ClipId[] }>
+    }
+  /** Absorb sliced pieces back into their source clip — inverts the above. */
+  | {
+      type: 'clip/unslice'
+      merges: Array<{ clipId: ClipId; pieceIds: ClipId[] }>
+    }
   /** Plural so that undoing a subtree delete restores everything in one op. */
   | { type: 'file/create'; nodes: FileNode[] }
   /** Deletes each node AND its descendants. */

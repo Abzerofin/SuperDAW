@@ -11,12 +11,33 @@ import { builtinEffectProviders } from './effects'
  * nothing above this interface changes.
  */
 
+/**
+ * Live analysis handles a plugin's nodes may expose so the UI can draw
+ * what the effect is doing to the audio. Purely observational: taps and
+ * read-only values, never part of the processing path.
+ *
+ * IMPORTANT for implementers: the engine calls `output.disconnect()` when
+ * rewiring insert chains, which severs EVERY outgoing connection of the
+ * output node. Analyser taps must therefore hang off an INTERNAL node —
+ * never off `output` itself — or they go silent after the first rewire.
+ */
+export interface PluginAnalysis {
+  /** Post-effect output tap (frequency + time domain). */
+  readonly spectrum?: AnalyserNode
+  /** Pre-effect input tap (for dynamics: where on the curve we operate). */
+  readonly input?: AnalyserNode
+  /** Current gain reduction in dB (≤ 0), from a DynamicsCompressorNode. */
+  reductionDb?(): number
+}
+
 export interface PluginNodes {
   readonly input: AudioNode
   readonly output: AudioNode
   /** Push param values into live AudioParams, smoothed (no zippering). */
   apply(params: Readonly<Record<string, number>>, when: number): void
   dispose(): void
+  /** Optional live-visualization handle (see PluginAnalysis). */
+  readonly analysis?: PluginAnalysis
 }
 
 export interface PluginProvider {

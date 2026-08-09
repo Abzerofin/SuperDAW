@@ -90,3 +90,98 @@ suite('transport loop region', () => {
     expect(transport.positionTicks()).toBe(BEAT * 10)
   })
 })
+
+suite('edit marker', () => {
+  test('edits follow the playhead until a marker is pinned', () => {
+    const { transport, advance } = transportAt()
+    transport.play()
+    advance(1)
+    expect(transport.markerTicks).toBeNull()
+    expect(transport.editTicks()).toBeCloseTo(BEAT * 2)
+
+    transport.setMarker(BEAT * 7)
+    expect(transport.editTicks()).toBe(BEAT * 7)
+  })
+
+  test('the marker stays put while the playhead keeps moving', () => {
+    const { transport, advance } = transportAt()
+    transport.setMarker(BEAT * 3)
+    transport.play()
+    advance(4)
+
+    expect(transport.positionTicks()).toBeCloseTo(BEAT * 8)
+    expect(transport.editTicks()).toBe(BEAT * 3) // the whole point
+  })
+
+  test('clearing hands the edit point back to the playhead', () => {
+    const { transport, advance } = transportAt()
+    transport.setMarker(BEAT * 3)
+    transport.play()
+    advance(1)
+    transport.clearMarker()
+
+    expect(transport.markerTicks).toBeNull()
+    expect(transport.editTicks()).toBeCloseTo(BEAT * 2)
+  })
+
+  test('the marker is clamped to the start of the timeline', () => {
+    const { transport } = transportAt()
+    transport.setMarker(-500)
+    expect(transport.markerTicks).toBe(0)
+  })
+})
+
+/**
+ * Switching cycling off mid-playback must leave the playhead where it is
+ * AUDIBLY, not where a never-wrapped timeline would have reached. The wrap
+ * lives only in positionTicks()'s return value, so these guard the one
+ * ordering that matters: sample the position BEFORE mutating loop state.
+ */
+suite('changing the loop during playback', () => {
+  test('disabling cycling mid-playback keeps the wrapped position', () => {
+    const { transport, advance } = transportAt()
+    transport.setLoopRegion(0, BEAT * 4)
+    transport.play()
+    advance(5) // 10 beats of linear time = 2 beats into the third pass
+
+    expect(transport.positionTicks()).toBeCloseTo(BEAT * 2)
+    transport.setLoopEnabled(false)
+    expect(transport.positionTicks()).toBeCloseTo(BEAT * 2) // not BEAT * 10
+
+    advance(0.5) // and it carries on linearly from there
+    expect(transport.positionTicks()).toBeCloseTo(BEAT * 3)
+  })
+
+  test('clearing the region mid-playback keeps the wrapped position', () => {
+    const { transport, advance } = transportAt()
+    transport.setLoopRegion(0, BEAT * 4)
+    transport.play()
+    advance(5)
+
+    transport.clearLoop()
+    expect(transport.positionTicks()).toBeCloseTo(BEAT * 2)
+  })
+
+  test('stopping after cycling leaves the playhead inside the loop', () => {
+    const { transport, advance } = transportAt()
+    transport.setLoopRegion(0, BEAT * 4)
+    transport.play()
+    advance(5)
+    transport.setLoopEnabled(false)
+    transport.stop()
+
+    expect(transport.positionTicks()).toBeCloseTo(BEAT * 2)
+  })
+
+  test('moving the region mid-playback re-bases on the audible position', () => {
+    const { transport, advance } = transportAt()
+    transport.setLoopRegion(0, BEAT * 4)
+    transport.play()
+    advance(5) // audibly at BEAT * 2
+
+    // The new region starts after that point, so the playhead keeps its
+    // place and plays a run-up into it rather than teleporting.
+    transport.setLoopRegion(BEAT * 8, BEAT * 12)
+    expect(transport.positionTicks()).toBeCloseTo(BEAT * 2)
+  })
+})
