@@ -13,7 +13,13 @@ import { u8ToBase64, base64ToU8 } from './base64'
  */
 
 export const ASSET_CHUNK_BYTES = 256 * 1024
-export const TRANSFER_WINDOW_CHUNKS = 4
+/**
+ * Un-credited chunks the sender may keep in flight. The window bounds both
+ * memory and how far a transfer can crowd the socket; at 12 × 256 KiB it
+ * sustains ~30 MB/s of payload against a 100 ms round trip, where the old
+ * window of 4 capped a fast WAN link at a third of that.
+ */
+export const TRANSFER_WINDOW_CHUNKS = 12
 
 export interface TransferMeta {
   readonly assetId: string
@@ -32,6 +38,13 @@ export type AssetTransferMessage =
       chunkCount: number
       /** First chunk index actually sent (resume support; 0 for fresh transfers). */
       startIndex: number
+      /**
+       * The sender's chunk size. Carried on the wire so the two ends never
+       * have to share a build-time constant — absent (older peers) it is
+       * the historical 256 KiB. This is what lets a future build shrink
+       * chunks without corrupting transfers against an older peer.
+       */
+      chunkBytes?: number
     }
   | { t: 'asset-chunk'; transferId: string; index: number; bytesBase64: string }
   | { t: 'asset-done'; transferId: string }
@@ -73,7 +86,8 @@ export class OutgoingTransfer {
       transferId: this.transferId,
       meta: this.meta,
       chunkCount: this.chunkCount,
-      startIndex: this.nextIndex
+      startIndex: this.nextIndex,
+      chunkBytes: ASSET_CHUNK_BYTES
     })
     this.pump()
   }
@@ -130,6 +144,11 @@ export class IncomingTransfer {
   private buffer: Uint8Array
   private received: Set<number> = new Set()
   private readonly chunkCount: number
+  /** The SENDER's chunk size for this transfer (see asset-begin). */
+  private readonly chunkBytes: number
+  /** First index not yet part of the contiguous prefix (kept incrementally —
+   *  rescanning the set per chunk made long transfers O(n²)). */
+  private contiguous: number
   private finished = false
 
   constructor(
@@ -140,13 +159,16 @@ export class IncomingTransfer {
     /** Partial bytes already held from an interrupted transfer (resume). */
     partial: Uint8Array | null,
     private send: (message: AssetTransferMessage) => void,
-    private callbacks: IncomingTransferCallbacks
+    private callbacks: IncomingTransferCallbacks,
+    chunkBytes: number = ASSET_CHUNK_BYTES
   ) {
     this.chunkCount = beginChunkCount
+    this.chunkBytes = Math.max(1, chunkBytes)
     this.buffer = new Uint8Array(meta.size)
     if (partial) this.buffer.set(partial.subarray(0, meta.size), 0)
     // Chunks below startIndex are covered by the partial prefix.
     for (let i = 0; i < startIndex; i++) this.received.add(i)
+    this.contiguous = startIndex
   }
 
   get done(): boolean {
@@ -155,9 +177,7 @@ export class IncomingTransfer {
 
   /** Contiguous received prefix in bytes — what a resume can skip. */
   get haveBytes(): number {
-    let index = 0
-    while (this.received.has(index)) index += 1
-    return Math.min(this.meta.size, index * ASSET_CHUNK_BYTES)
+    return Math.min(this.meta.size, this.contiguous * this.chunkBytes)
   }
 
   /** Current partial buffer, for stashing across a disconnect. */
@@ -168,8 +188,12 @@ export class IncomingTransfer {
   onChunk(index: number, bytesBase64: string): void {
     if (this.finished || index < 0 || index >= this.chunkCount || this.received.has(index)) return
     const bytes = base64ToU8(bytesBase64)
-    this.buffer.set(bytes.subarray(0, this.meta.size - index * ASSET_CHUNK_BYTES), index * ASSET_CHUNK_BYTES)
+    this.buffer.set(
+      bytes.subarray(0, this.meta.size - index * this.chunkBytes),
+      index * this.chunkBytes
+    )
     this.received.add(index)
+    while (this.received.has(this.contiguous)) this.contiguous += 1
     this.send({ t: 'asset-credit', transferId: this.transferId, upToIndex: index })
     this.callbacks.onProgress?.(this.haveBytes, this.meta.size)
   }

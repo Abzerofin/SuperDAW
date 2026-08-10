@@ -193,7 +193,11 @@ function normalizeState(state: ProjectState): ProjectState {
  */
 function sanitizeRoutes(state: ProjectState): ProjectState {
   const stored = Object.values(state.routes ?? {})
-  let acc: ProjectState = { ...state, routes: {} }
+  // `routes` is mutated in place while `acc` keeps referencing it, so each
+  // edge is validated against the evolving accepted set (duplicate/cycle
+  // checks) without rebuilding the state object per route.
+  const routes: Record<string, (typeof stored)[number]> = {}
+  const acc: ProjectState = { ...state, routes }
   for (const route of stored) {
     if (
       typeof route?.id !== 'string' ||
@@ -204,7 +208,7 @@ function sanitizeRoutes(state: ProjectState): ProjectState {
       continue
     }
     if (!routeIsValid(acc, route)) continue
-    acc = { ...acc, routes: { ...acc.routes, [route.id]: route } }
+    routes[route.id] = route
   }
   return acc
 }

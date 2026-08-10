@@ -3,7 +3,7 @@ import type { TrackId } from '@core/model/types'
 import { newId } from '@core/model/ids'
 import { Recorder } from '@audio/recorder'
 import { buildInputTap, type InputTap } from '@audio/input'
-import { encodeWavPcm16 } from '@audio/wav'
+import { encodeWavPcm16Async } from '@audio/wav'
 import { ticksPerSecond } from '@audio/scheduling'
 import { projectStore } from './projectStore'
 import { transport } from './transport'
@@ -192,7 +192,17 @@ class RecordingStore {
 
     const ctx = audioEngine.ensureContext()
     const startTicks = Math.max(0, Math.round(this.recordStartTicks))
+    // Takes finish asynchronously: the WAV encode is chunked so hitting
+    // Stop after a long multitrack take never freezes the app at the very
+    // moment the user is most anxious about whether the take survived.
+    void this.finishTakes(takes, ctx, startTicks)
+  }
 
+  private async finishTakes(
+    takes: Array<{ capture: TrackCapture; take: ReturnType<Recorder['stop']> }>,
+    ctx: AudioContext,
+    startTicks: number
+  ): Promise<void> {
     for (const { capture, take } of takes) {
       if (!take || take.seconds < 0.05) continue
       const track = projectStore.state.tracks[capture.trackId]
@@ -206,7 +216,7 @@ class RecordingStore {
       take.channels.forEach((data, ch) =>
         buffer.copyToChannel(data as Float32Array<ArrayBuffer>, ch)
       )
-      const wav = encodeWavPcm16(take.channels, take.sampleRate)
+      const wav = await encodeWavPcm16Async(take.channels, take.sampleRate)
 
       const name = `Recording ${this.takeCounter++}.wav`
       const asset = assetStore.addAudio(name, 'wav', wav, buffer)

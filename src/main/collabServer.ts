@@ -58,9 +58,12 @@ export function registerCollabIpc(): void {
 
     try {
       server = await new Promise<WebSocketServer>((resolvePromise, rejectPromise) => {
-        // Port 0: let the OS pick a free port.
-        const wss: WebSocketServer = new WebSocketServer({ port: 0, host: '0.0.0.0' }, () =>
-          resolvePromise(wss)
+        // Port 0: let the OS pick a free port. Deflate: session JSON (ops,
+        // presence, the welcome snapshot) is highly compressible and LAN
+        // CPU is plentiful.
+        const wss: WebSocketServer = new WebSocketServer(
+          { port: 0, host: '0.0.0.0', perMessageDeflate: { threshold: 1024 } },
+          () => resolvePromise(wss)
         )
         wss.on('error', rejectPromise)
       })

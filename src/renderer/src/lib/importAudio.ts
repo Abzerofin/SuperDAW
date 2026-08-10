@@ -1,12 +1,15 @@
-import type { FileNodeId, Note, Track } from '@core/model/types'
+import type { Clip, FileNode, FileNodeId, Note, Track } from '@core/model/types'
 import { newId } from '@core/model/ids'
 import { barsToTicks, ticksPerBar } from '@core/model/timebase'
 import { parseSmf } from '@core/midi/smf'
 import { ticksPerSecond } from '@audio/scheduling'
-import type { ProjectAsset } from '@audio/assets'
+import { digestOf, type ProjectAsset } from '@audio/assets'
 import { audioEngine, assetStore } from '@/state/audioInstance'
 import { projectStore } from '@/state/projectStore'
 import { createTrack } from './trackActions'
+
+/** How many files decode at once. Decoding is off-thread; reads parallelize. */
+const IMPORT_CONCURRENCY = 4
 
 const AUDIO_EXTENSIONS = /\.(wav|mp3|flac|ogg|m4a|aac|aiff?)$/i
 const MIDI_EXTENSIONS = /\.(mid|midi)$/i
@@ -38,11 +41,98 @@ async function importAsset(file: File): Promise<ProjectAsset | null> {
   }
   if (isAudioFile(file)) {
     const encoded = new Uint8Array(await file.arrayBuffer())
+    // Byte-identical content reuses the asset we already hold: no second
+    // decode, no second copy in memory or in the saved project file.
+    const digest = await digestOf(encoded)
+    if (digest !== null) {
+      const existing = assetStore.findByDigest(digest)
+      if (existing && existing.kind === 'audio') return existing
+    }
     // decodeAudioData detaches the buffer it is given — decode a copy.
     const buffer = await audioEngine.decode(encoded.slice().buffer)
-    return assetStore.addAudio(file.name, extOf(file.name), encoded, buffer)
+    return assetStore.addAudio(file.name, extOf(file.name), encoded, buffer, digest ?? undefined)
   }
   return null
+}
+
+/**
+ * Decode a batch with bounded concurrency, preserving input order. Serial
+ * awaiting left three quarters of the machine idle while a folder of drops
+ * trickled in one file at a time.
+ */
+async function importAssetBatch(
+  files: readonly File[],
+  failed: string[]
+): Promise<Array<ProjectAsset | null>> {
+  const results: Array<ProjectAsset | null> = new Array(files.length).fill(null)
+  let next = 0
+  const worker = async (): Promise<void> => {
+    while (next < files.length) {
+      const index = next++
+      const file = files[index]
+      try {
+        results[index] = await importAsset(file)
+      } catch (error) {
+        console.error(`Failed to import "${file.name}"`, error)
+        failed.push(file.name)
+      }
+    }
+  }
+  await Promise.all(
+    Array.from({ length: Math.min(IMPORT_CONCURRENCY, files.length) }, () => worker())
+  )
+  return results
+}
+
+/** A fresh bay entry for an asset, unless one already points at it. */
+function bayNodesFor(assets: readonly ProjectAsset[], folderId: FileNodeId | null): FileNode[] {
+  const existing = new Set<string>()
+  for (const node of Object.values(projectStore.state.files)) {
+    if (node.assetId) existing.add(node.assetId)
+  }
+  const nodes: FileNode[] = []
+  const added = new Set<string>()
+  for (const asset of assets) {
+    if (existing.has(asset.id) || added.has(asset.id)) continue // deduped re-import
+    added.add(asset.id)
+    nodes.push({
+      id: newId('fil'),
+      parentId: folderId,
+      kind: asset.kind,
+      name: baseName(asset.name),
+      assetId: asset.id
+    })
+  }
+  return nodes
+}
+
+/** A clip (with MIDI notes) placing an asset on a track. */
+function clipFor(
+  asset: ProjectAsset,
+  track: Track,
+  startTicks: number
+): { clip: Clip; notes: Note[] } {
+  const clipId = newId('clp')
+  const { notes, totalTicks } = midiNotesFor(asset, clipId)
+  return {
+    clip: {
+      id: clipId,
+      trackId: track.id,
+      name: baseName(asset.name),
+      start: startTicks,
+      duration: clipDurationTicks(asset, totalTicks),
+      assetId: asset.id,
+      offset: 0,
+      color: null,
+      fadeIn: 0,
+      fadeOut: 0,
+      reverse: false,
+      pitch: 0,
+      stretch: 1,
+      loopLength: 0
+    },
+    notes
+  }
 }
 
 /** Notes for a MIDI asset, remapped onto a fresh clip id. */
@@ -67,51 +157,6 @@ function midiNotesFor(asset: ProjectAsset, clipId: string): { notes: Note[]; tot
   }
 }
 
-/** One import = one op per concern: bay entry, then clip (with its notes). */
-function dispatchImported(
-  asset: ProjectAsset,
-  folderId: FileNodeId | null,
-  clipTarget: { track: Track; startTicks: number } | null
-): number {
-  projectStore.dispatch({
-    type: 'file/create',
-    nodes: [
-      {
-        id: newId('fil'),
-        parentId: folderId,
-        kind: asset.kind,
-        name: baseName(asset.name),
-        assetId: asset.id
-      }
-    ]
-  })
-  if (!clipTarget) return clipDurationTicks(asset, 0)
-
-  const clipId = newId('clp')
-  const { notes, totalTicks } = midiNotesFor(asset, clipId)
-  const durationTicks = clipDurationTicks(asset, totalTicks)
-  projectStore.dispatch({
-    type: 'clip/create',
-    clip: {
-      id: clipId,
-      trackId: clipTarget.track.id,
-      name: baseName(asset.name),
-      start: clipTarget.startTicks,
-      duration: durationTicks,
-      assetId: asset.id,
-      offset: 0,
-      color: null,
-      fadeIn: 0,
-      fadeOut: 0,
-      reverse: false,
-      pitch: 0,
-      stretch: 1,
-      loopLength: 0
-    },
-    notes
-  })
-  return durationTicks
-}
 
 export function clipDurationTicks(asset: ProjectAsset, midiTicks = 0): number {
   if (asset.seconds !== null) {
@@ -148,40 +193,51 @@ export async function importFilesToBay(
   folderId: FileNodeId | null
 ): Promise<void> {
   const failed: string[] = []
-  for (const file of files) {
-    try {
-      const asset = await importAsset(file)
-      if (asset) dispatchImported(asset, folderId, null)
-    } catch (error) {
-      console.error(`Failed to import "${file.name}"`, error)
-      failed.push(file.name)
-    }
-  }
+  const assets = (await importAssetBatch(files, failed)).filter(
+    (a): a is ProjectAsset => a !== null
+  )
+  // ONE op for the whole drop: 40 files used to be 40 dispatches, 40
+  // undo entries and 40 engine/UI reactions.
+  const nodes = bayNodesFor(assets, folderId)
+  if (nodes.length > 0) projectStore.dispatch({ type: 'file/create', nodes })
   reportFailedImports(failed)
 }
 
 /**
  * Import OS files dropped on a track: bay entry (at root) + clip per file,
  * laid out back-to-back from the drop position. Clip length derives from
- * audio duration at the current tempo (no time-stretching).
+ * audio duration at the current tempo (no time-stretching). The whole drop
+ * is two ops — one for the bay entries, one for all the clips — so it is
+ * one undo step and one reschedule.
  */
 export async function importFilesToTrack(
   files: readonly File[],
   track: Track,
   startTicks: number
 ): Promise<void> {
-  let cursor = Math.max(0, startTicks)
   const failed: string[] = []
-  for (const file of files) {
-    const accepts = track.kind === 'audio' ? isAudioFile(file) : isMidiFile(file)
-    if (!accepts) continue
-    try {
-      const asset = await importAsset(file)
-      if (asset) cursor += dispatchImported(asset, null, { track, startTicks: cursor })
-    } catch (error) {
-      console.error(`Failed to import "${file.name}"`, error)
-      failed.push(file.name)
-    }
+  const accepted = files.filter((file) =>
+    track.kind === 'audio' ? isAudioFile(file) : isMidiFile(file)
+  )
+  const assets = (await importAssetBatch(accepted, failed)).filter(
+    (a): a is ProjectAsset => a !== null
+  )
+  const nodes = bayNodesFor(assets, null)
+  if (nodes.length > 0) projectStore.dispatch({ type: 'file/create', nodes })
+
+  let cursor = Math.max(0, startTicks)
+  const clips: Clip[] = []
+  const notes: Note[] = []
+  for (const asset of assets) {
+    const placed = clipFor(asset, track, cursor)
+    clips.push(placed.clip)
+    notes.push(...placed.notes)
+    cursor += placed.clip.duration
+  }
+  if (clips.length === 1) {
+    projectStore.dispatch({ type: 'clip/create', clip: clips[0], notes })
+  } else if (clips.length > 1) {
+    projectStore.dispatch({ type: 'clip/createMany', clips, notes })
   }
   reportFailedImports(failed)
 }
@@ -193,19 +249,30 @@ export async function importFilesToTrack(
  */
 export async function importFilesAsNewTracks(files: readonly File[]): Promise<void> {
   const failed: string[] = []
-  for (const file of files) {
-    const kind = isMidiFile(file) ? 'midi' : isAudioFile(file) ? 'audio' : null
-    if (!kind) continue
-    try {
-      const asset = await importAsset(file)
-      if (!asset) continue
-      // The track must exist before the clip op referencing it.
-      const track = createTrack(kind, baseName(file.name))
-      dispatchImported(asset, null, { track, startTicks: 0 })
-    } catch (error) {
-      console.error(`Failed to import "${file.name}"`, error)
-      failed.push(file.name)
-    }
+  const accepted = files.filter((file) => isMidiFile(file) || isAudioFile(file))
+  const assets = await importAssetBatch(accepted, failed)
+
+  const nodes = bayNodesFor(
+    assets.filter((a): a is ProjectAsset => a !== null),
+    null
+  )
+  if (nodes.length > 0) projectStore.dispatch({ type: 'file/create', nodes })
+
+  const clips: Clip[] = []
+  const notes: Note[] = []
+  for (let i = 0; i < accepted.length; i++) {
+    const asset = assets[i]
+    if (!asset) continue
+    // The track must exist before the clip op referencing it.
+    const track = createTrack(asset.kind, baseName(accepted[i].name))
+    const placed = clipFor(asset, track, 0)
+    clips.push(placed.clip)
+    notes.push(...placed.notes)
+  }
+  if (clips.length === 1) {
+    projectStore.dispatch({ type: 'clip/create', clip: clips[0], notes })
+  } else if (clips.length > 1) {
+    projectStore.dispatch({ type: 'clip/createMany', clips, notes })
   }
   reportFailedImports(failed)
 }

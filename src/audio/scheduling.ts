@@ -235,6 +235,12 @@ export function scheduleNotes(
   const tps = ticksPerSecond(state.tempo)
   const out: NoteSchedule[] = []
 
+  // Segments per clip, computed once per pass — a looped clip's tiling is
+  // identical for all of its notes, and recomputing it per note made a
+  // busy looped MIDI track allocate segment lists in the hundreds of
+  // thousands per scheduling pass.
+  const segmentsByClip = new Map<string, ReturnType<typeof clipSegments>>()
+
   for (const note of Object.values(state.notes)) {
     const clip = state.clips[note.clipId]
     if (!clip) continue
@@ -245,9 +251,12 @@ export function scheduleNotes(
     // just make no sound. Gated here so playback and offline renders agree.
     if (!synthIsAudible(track.synth)) continue
 
+    let segments = segmentsByClip.get(clip.id)
+    if (!segments) segmentsByClip.set(clip.id, (segments = clipSegments(clip)))
+
     // A looped clip plays its notes once per repeat; a note is cut at its
     // segment's end just as it is cut at an ordinary clip's end.
-    for (const segment of clipSegments(clip)) {
+    for (const segment of segments) {
       if (note.start >= segment.duration) continue // past this repeat's window
       const absStart = segment.start + note.start
       const absEnd = Math.min(absStart + note.duration, segment.start + segment.duration, untilTicks)

@@ -11,6 +11,9 @@ export interface AutomationTarget {
   readonly instanceId?: PluginInstanceId
 }
 
+/** Stable default so `targetOf` can back a useSyncExternalStore snapshot. */
+const DEFAULT_TARGET: AutomationTarget = { param: 'volume' }
+
 class AutomationUiStore {
   private open = new Set<TrackId>()
   private targets = new Map<TrackId, AutomationTarget>()
@@ -22,7 +25,7 @@ class AutomationUiStore {
   }
 
   targetOf(trackId: TrackId): AutomationTarget {
-    return this.targets.get(trackId) ?? { param: 'volume' }
+    return this.targets.get(trackId) ?? DEFAULT_TARGET
   }
 
   setTarget(trackId: TrackId, target: AutomationTarget): void {

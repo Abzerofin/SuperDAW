@@ -10,7 +10,7 @@ import {
   trackFromPreset
 } from '@core/persistence/trackPreset'
 import { renderTrackFreeze } from '@audio/render'
-import { encodeWavPcm16 } from '@audio/wav'
+import { encodeWavPcm16Async } from '@audio/wav'
 import { projectStore } from '@/state/projectStore'
 import { assetStore } from '@/state/audioInstance'
 import { externalPluginHost } from '@/state/externalPlugins'
@@ -174,7 +174,7 @@ export async function freezeTrack(trackId: TrackId): Promise<void> {
     for (let ch = 0; ch < rendered.numberOfChannels; ch++) {
       channels.push(rendered.getChannelData(ch))
     }
-    const wav = encodeWavPcm16(channels, rendered.sampleRate)
+    const wav = await encodeWavPcm16Async(channels, rendered.sampleRate)
     const asset = assetStore.addAudio(`Frozen — ${track.name}.wav`, 'wav', wav, rendered)
     projectStore.dispatch({ type: 'track/freeze', trackId, assetId: asset.id })
   } finally {

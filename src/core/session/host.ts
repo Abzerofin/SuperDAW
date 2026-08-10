@@ -49,9 +49,25 @@ export interface HostPeer {
   /** Live transfers with THIS peer, keyed by transferId. */
   readonly outgoing: Map<string, OutgoingTransfer>
   readonly incoming: Map<string, IncomingTransfer>
-  /** asset-pulls issued to this peer awaiting its asset-begin. */
-  readonly expectedUploads: Map<string, string>
+  /** asset-pulls issued to this peer awaiting its asset-begin: transferId → what was offered. */
+  readonly expectedUploads: Map<string, { assetId: string; size: number }>
+  /** Requested assets waiting for a serve slot (FIFO). */
+  readonly pendingServes: Array<{ assetId: string; haveBytes: number }>
+  /** Offered uploads waiting for a pull slot (FIFO). */
+  readonly pendingOffers: TransferMeta[]
 }
+
+/**
+ * Per-peer transfer concurrency. A joining guest asks for EVERY missing
+ * asset at once; unbounded serving used to shove the whole project into
+ * one socket in a single synchronous burst — tens of MB queued ahead of
+ * every op, so editing latency exploded exactly when someone joined.
+ * Queued requests start as running ones finish.
+ */
+const MAX_CONCURRENT_SERVES = 3
+const MAX_CONCURRENT_UPLOADS = 3
+/** Hard ceiling per transferred asset (a .wav tops out near 4 GiB anyway). */
+const MAX_TRANSFER_BYTES = 1024 * 1024 * 1024
 
 export interface HostSessionOptions {
   hostName: string
@@ -94,7 +110,9 @@ export class HostSession {
       user: null,
       outgoing: new Map(),
       incoming: new Map(),
-      expectedUploads: new Map()
+      expectedUploads: new Map(),
+      pendingServes: [],
+      pendingOffers: []
     }
     this.peers.add(peer)
     return peer
@@ -112,6 +130,8 @@ export class HostSession {
     peer.outgoing.clear()
     peer.incoming.clear()
     peer.expectedUploads.clear()
+    peer.pendingServes.length = 0
+    peer.pendingOffers.length = 0
   }
 
   /**
@@ -229,18 +249,12 @@ export class HostSession {
         for (const live of peer.outgoing.values()) {
           if (live.meta.assetId === message.assetId) return
         }
-        const asset = this.options.assetProvider?.get(message.assetId)
-        if (!asset) return
-        const transfer = new OutgoingTransfer(
-          newId('xfr'),
-          asset.meta,
-          asset.bytes,
-          message.haveBytes,
-          (m) => peer.sink.send(m),
-          () => peer.outgoing.delete(transfer.transferId)
-        )
-        peer.outgoing.set(transfer.transferId, transfer)
-        transfer.start()
+        if (peer.pendingServes.some((p) => p.assetId === message.assetId)) return
+        if (peer.outgoing.size >= MAX_CONCURRENT_SERVES) {
+          peer.pendingServes.push({ assetId: message.assetId, haveBytes: message.haveBytes })
+          return
+        }
+        this.startServe(peer, message.assetId, message.haveBytes)
         return
       }
 
@@ -252,9 +266,19 @@ export class HostSession {
           this.broadcast({ t: 'asset-available', meta: message.meta }, peer)
           return
         }
-        const transferId = newId('xfr')
-        peer.expectedUploads.set(transferId, message.meta.assetId)
-        peer.sink.send({ t: 'asset-pull', assetId: message.meta.assetId, transferId })
+        // Offers arrive one per imported file; pulling them all at once
+        // multiplies full-size receive buffers and floods the guest's
+        // uplink. Beyond the cap they wait for a slot.
+        if (
+          peer.expectedUploads.size + peer.incoming.size >= MAX_CONCURRENT_UPLOADS ||
+          peer.pendingOffers.length > 0
+        ) {
+          if (!peer.pendingOffers.some((m) => m.assetId === message.meta.assetId)) {
+            peer.pendingOffers.push(message.meta)
+          }
+          return
+        }
+        this.issuePull(peer, message.meta)
         return
       }
 
@@ -268,13 +292,82 @@ export class HostSession {
     }
   }
 
+  /** Start serving one asset to a peer (a slot is known to be free). */
+  private startServe(peer: HostPeer, assetId: string, haveBytes: number): void {
+    const asset = this.options.assetProvider?.get(assetId)
+    if (!asset) {
+      this.startNextServe(peer)
+      return
+    }
+    const transfer = new OutgoingTransfer(
+      newId('xfr'),
+      asset.meta,
+      asset.bytes,
+      haveBytes,
+      (m) => peer.sink.send(m),
+      () => {
+        peer.outgoing.delete(transfer.transferId)
+        this.startNextServe(peer)
+      }
+    )
+    peer.outgoing.set(transfer.transferId, transfer)
+    transfer.start()
+  }
+
+  private startNextServe(peer: HostPeer): void {
+    while (peer.outgoing.size < MAX_CONCURRENT_SERVES && peer.pendingServes.length > 0) {
+      const next = peer.pendingServes.shift()!
+      this.startServe(peer, next.assetId, next.haveBytes)
+    }
+  }
+
+  private issuePull(peer: HostPeer, meta: TransferMeta): void {
+    const transferId = newId('xfr')
+    peer.expectedUploads.set(transferId, { assetId: meta.assetId, size: meta.size })
+    peer.sink.send({ t: 'asset-pull', assetId: meta.assetId, transferId })
+  }
+
+  private startNextPull(peer: HostPeer): void {
+    while (
+      peer.expectedUploads.size + peer.incoming.size < MAX_CONCURRENT_UPLOADS &&
+      peer.pendingOffers.length > 0
+    ) {
+      const meta = peer.pendingOffers.shift()!
+      if (this.options.assetProvider?.has(meta.assetId)) continue
+      this.issuePull(peer, meta)
+    }
+  }
+
   /** Routes chunk-level traffic to the transfer it belongs to. */
   private handleTransferMessage(peer: HostPeer, message: AssetTransferMessage): void {
     switch (message.t) {
       case 'asset-begin': {
-        // Only transfers the host explicitly pulled are accepted.
-        const expectedAssetId = peer.expectedUploads.get(message.transferId)
-        if (expectedAssetId === undefined || message.meta.assetId !== expectedAssetId) return
+        // Only transfers the host explicitly pulled are accepted — and the
+        // frame's numbers are PEER-CONTROLLED input: the size must match
+        // what was offered (it is about to size a real allocation), and
+        // the chunk geometry must be self-consistent. Anything off is
+        // dropped, never trusted.
+        const expected = peer.expectedUploads.get(message.transferId)
+        if (expected === undefined || message.meta.assetId !== expected.assetId) return
+        const size = message.meta.size
+        const chunkBytes = message.chunkBytes ?? 256 * 1024
+        const valid =
+          Number.isInteger(size) &&
+          size >= 0 &&
+          size <= MAX_TRANSFER_BYTES &&
+          size === expected.size &&
+          Number.isInteger(chunkBytes) &&
+          chunkBytes > 0 &&
+          Number.isInteger(message.chunkCount) &&
+          message.chunkCount === Math.max(1, Math.ceil(size / chunkBytes)) &&
+          Number.isInteger(message.startIndex) &&
+          message.startIndex >= 0 &&
+          message.startIndex < message.chunkCount
+        if (!valid) {
+          peer.expectedUploads.delete(message.transferId)
+          this.startNextPull(peer)
+          return
+        }
         peer.expectedUploads.delete(message.transferId)
         const provider = this.options.assetProvider
         if (!provider) return
@@ -288,6 +381,7 @@ export class HostSession {
           {
             onComplete: (bytes) => {
               peer.incoming.delete(message.transferId)
+              this.startNextPull(peer)
               // The uploader has it by definition; everyone else fetches.
               // Announce only once the provider can actually SERVE it —
               // storing is async app-side (decode), and a guest that
@@ -299,8 +393,12 @@ export class HostSession {
               if (stored instanceof Promise) void stored.then(announce)
               else announce()
             },
-            onError: () => peer.incoming.delete(message.transferId)
-          }
+            onError: () => {
+              peer.incoming.delete(message.transferId)
+              this.startNextPull(peer)
+            }
+          },
+          chunkBytes
         )
         peer.incoming.set(message.transferId, transfer)
         return
@@ -312,16 +410,20 @@ export class HostSession {
         const transfer = peer.incoming.get(message.transferId)
         peer.incoming.delete(message.transferId)
         transfer?.onDone()
+        this.startNextPull(peer)
         return
       }
       case 'asset-credit':
         peer.outgoing.get(message.transferId)?.onCredit(message.upToIndex)
         return
       case 'asset-cancel': {
-        peer.outgoing.get(message.transferId)?.abort()
+        const wasServing = peer.outgoing.get(message.transferId)
+        wasServing?.abort()
         peer.outgoing.delete(message.transferId)
         peer.incoming.get(message.transferId)?.abort()
         peer.incoming.delete(message.transferId)
+        if (wasServing) this.startNextServe(peer)
+        else this.startNextPull(peer)
         return
       }
     }

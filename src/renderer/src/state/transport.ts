@@ -29,13 +29,26 @@ export interface LoopRegion {
   readonly end: number
 }
 
-/** Timeline end of the current project, in ticks (0 = empty project). */
+/**
+ * Timeline end of the current project, in ticks (0 = empty project).
+ * Cached on the clips record's identity: positionTicks() calls this on
+ * every animation frame from several subscribers, and scanning a
+ * thousand clips per frame purely to recompute a constant would waste
+ * hundreds of thousands of iterations per second.
+ */
+let songEndFor: unknown = null
+let songEndValue = 0
 function songEndTicks(): number {
-  let end = 0
-  for (const clip of Object.values(projectStore.state.clips)) {
-    end = Math.max(end, clip.start + clip.duration)
+  const clips = projectStore.state.clips
+  if (songEndFor !== clips) {
+    let end = 0
+    for (const clip of Object.values(clips)) {
+      end = Math.max(end, clip.start + clip.duration)
+    }
+    songEndFor = clips
+    songEndValue = end
   }
-  return end
+  return songEndValue
 }
 
 export class Transport {
@@ -57,6 +70,7 @@ export class Transport {
   private marker: number | null = null
   private timeSource: TimeSource = { now: () => performance.now() / 1000 }
   private frameListeners = new Set<() => void>()
+  private uiListeners = new Set<() => void>()
   private eventListeners = new Set<(event: TransportEvent) => void>()
   private rafId: number | null = null
 
@@ -156,7 +170,7 @@ export class Transport {
       this.startedAt = this.timeSource.now()
       this.emitEvent('seek')
     }
-    this.emitFrame()
+    this.emitDiscrete()
   }
 
   /**
@@ -188,13 +202,13 @@ export class Transport {
     const at = Math.max(0, Math.round(ticks))
     if (this.marker === at) return
     this.marker = at
-    this.emitFrame()
+    this.emitDiscrete()
   }
 
   clearMarker(): void {
     if (this.marker === null) return
     this.marker = null
-    this.emitFrame()
+    this.emitDiscrete()
   }
 
   /**
@@ -220,7 +234,7 @@ export class Transport {
     this.startedAt = this.timeSource.now()
     this.tick()
     this.emitEvent('play')
-    this.emitFrame()
+    this.emitDiscrete()
   }
 
   stop(): void {
@@ -228,7 +242,7 @@ export class Transport {
       // Second stop returns to project start, like most DAWs.
       this.baseTicks = 0
       this.emitEvent('seek')
-      this.emitFrame()
+      this.emitDiscrete()
       return
     }
     this.baseTicks = this.positionTicks()
@@ -236,7 +250,7 @@ export class Transport {
     if (this.rafId !== null) cancelAnimationFrame(this.rafId)
     this.rafId = null
     this.emitEvent('stop')
-    this.emitFrame()
+    this.emitDiscrete()
   }
 
   toggle(): void {
@@ -271,13 +285,29 @@ export class Transport {
     this.baseTicks = Math.max(0, ticks)
     if (this.playing) this.startedAt = this.timeSource.now()
     this.emitEvent('seek')
-    this.emitFrame()
+    this.emitDiscrete()
   }
 
-  /** Fires every animation frame while playing, and on play/stop/seek. For display. */
+  /**
+   * Fires every animation frame while playing, and on play/stop/seek. ONLY
+   * for things that track the moving playhead (leaf components writing a
+   * transform). Anything that renders layout must use subscribeUi instead —
+   * a frame subscription re-renders it at 60 fps for the whole of playback.
+   */
   subscribe = (listener: () => void): (() => void) => {
     this.frameListeners.add(listener)
     return () => this.frameListeners.delete(listener)
+  }
+
+  /**
+   * Fires only on discrete transport-state changes: play/stop/seek, loop
+   * region and cycling toggles, marker moves. Never per frame. This is what
+   * views subscribe to when they draw transport STATE (loop strip, marker,
+   * button states) rather than the moving playhead.
+   */
+  subscribeUi = (listener: () => void): (() => void) => {
+    this.uiListeners.add(listener)
+    return () => this.uiListeners.delete(listener)
   }
 
   /** Discrete transport events. For the audio engine. */
@@ -294,6 +324,12 @@ export class Transport {
 
   private emitFrame(): void {
     for (const listener of this.frameListeners) listener()
+  }
+
+  /** A discrete transport-state change: both audiences hear about it. */
+  private emitDiscrete(): void {
+    for (const listener of this.uiListeners) listener()
+    this.emitFrame()
   }
 
   private emitEvent(event: TransportEvent): void {

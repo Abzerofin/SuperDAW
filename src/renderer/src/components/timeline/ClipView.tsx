@@ -1,5 +1,5 @@
-import { useEffect, useRef, useState, useSyncExternalStore } from 'react'
-import type { Clip, Note } from '@core/model/types'
+import { memo, useEffect, useRef, useState, useSyncExternalStore } from 'react'
+import type { Clip, ClipId, Note } from '@core/model/types'
 import { clipRate, MIN_LOOP_TICKS } from '@core/model/types'
 import { effectiveFades, ticksPerSecond } from '@audio/scheduling'
 import type { ProjectAsset } from '@audio/assets'
@@ -35,18 +35,22 @@ interface Props {
   notes: Note[]
   /** Fade handles are shown and draggable (audio clip on an unfrozen track). */
   fadesEditable: boolean
+  // The callbacks receive the clip id so ONE stable handler serves every
+  // clip — per-clip lambdas would defeat the React.memo below for the
+  // whole project on every timeline render.
   onPointerDown: (
     e: React.PointerEvent,
+    clipId: ClipId,
     mode: 'move' | 'resize-l' | 'resize-r' | 'loop-r' | 'stretch-r'
   ) => void
-  onOpenComments: () => void
+  onOpenComments: (clipId: ClipId) => void
   /** Right-click: the clip menu (slice, reverse, pitch, length, colour). */
-  onContextMenu: (e: React.MouseEvent) => void
+  onContextMenu: (e: React.MouseEvent, clipId: ClipId, trackId: string) => void
   /** Double-click action (MIDI: open the piano roll). */
-  onOpenEditor?: () => void
+  onOpenEditor?: (clipId: ClipId) => void
 }
 
-export function ClipView({
+export const ClipView = memo(function ClipView({
   clip,
   trackColor,
   trackIndex,
@@ -203,12 +207,12 @@ export function ClipView({
         height,
         '--clip-color': color
       } as React.CSSProperties}
-      onPointerDown={(e) => onPointerDown(e, 'move')}
-      onContextMenu={onContextMenu}
+      onPointerDown={(e) => onPointerDown(e, clip.id, 'move')}
+      onContextMenu={(e) => onContextMenu(e, clip.id, clip.trackId)}
       onDoubleClick={(e) => {
         if (onOpenEditor) {
           e.stopPropagation()
-          onOpenEditor()
+          onOpenEditor(clip.id)
         }
       }}
     >
@@ -226,6 +230,9 @@ export function ClipView({
         />
       )}
       {looped &&
+        loopLength * pxPerTick >= 6 &&
+        // Dividers only where they are visually separable — a 200-repeat
+        // loop at low zoom must not mint 200 DOM nodes nobody can see.
         Array.from({ length: Math.ceil(repeats) - 1 }, (_, i) => (
           <div
             key={i}
@@ -297,7 +304,7 @@ export function ClipView({
           title="View comments"
           onPointerDown={(e) => {
             e.stopPropagation()
-            onOpenComments()
+            onOpenComments(clip.id)
           }}
         >
           {commentCount}
@@ -306,14 +313,14 @@ export function ClipView({
       <div
         className="clip-handle clip-handle-l"
         title="Trim — drag · double-click to restore the trimmed start"
-        onPointerDown={(e) => onPointerDown(e, 'resize-l')}
+        onPointerDown={(e) => onPointerDown(e, clip.id, 'resize-l')}
         onDoubleClick={(e) => resetTrim(e, 'l')}
       />
       {/* Right edge, stacked: loop (repeat), stretch (slower/faster), trim. */}
       <div
         className={`clip-handle clip-handle-loop ${clip.assetId === null ? 'clip-handle-half' : ''}`}
         title="Loop — drag right to repeat the clip"
-        onPointerDown={(e) => onPointerDown(e, 'loop-r')}
+        onPointerDown={(e) => onPointerDown(e, clip.id, 'loop-r')}
       >
         ↻
       </div>
@@ -325,7 +332,7 @@ export function ClipView({
               ? 'Stretch — drag to make the audio play slower (longer) or faster (shorter)'
               : `Stretch ×${clip.stretch} — drag to adjust · double-click for 1×`
           }
-          onPointerDown={(e) => onPointerDown(e, 'stretch-r')}
+          onPointerDown={(e) => onPointerDown(e, clip.id, 'stretch-r')}
           onDoubleClick={resetStretch}
         >
           ↔
@@ -334,12 +341,12 @@ export function ClipView({
       <div
         className={`clip-handle clip-handle-r ${clip.assetId === null ? 'clip-handle-half' : ''}`}
         title="Trim — lengthen or shorten the clip · double-click for the material's full length"
-        onPointerDown={(e) => onPointerDown(e, 'resize-r')}
+        onPointerDown={(e) => onPointerDown(e, clip.id, 'resize-r')}
         onDoubleClick={(e) => resetTrim(e, 'r')}
       />
     </div>
   )
-}
+})
 
 /**
  * Shades the attenuated regions of a faded clip with the raised-cosine
@@ -397,6 +404,9 @@ function NotePreview({
   width: number
   height: number
 }): React.JSX.Element {
+  // Below ~8px there is nothing meaningful to draw; skip the SVG entirely.
+  if (width < 8) return <svg className="clip-notes" width={width} height={height} />
+
   let min = 127
   let max = 0
   for (const note of notes) {
@@ -409,9 +419,17 @@ function NotePreview({
 
   // One pass per repeat, mirroring scheduleNotes: each repeat replays the
   // pattern from its own start, cut at the period (and the clip end).
+  // Rect budget: a long loop drag must not tile thousands of invisible
+  // rectangles — past the cap, later repeats simply draw nothing (the
+  // dashed dividers still show the tiling).
+  const MAX_RECTS = 400
   const period = loopTicks > 0 ? loopTicks : duration
   const rects: React.JSX.Element[] = []
-  for (let repeat = 0, into = 0; into < duration; repeat++, into += period) {
+  for (
+    let repeat = 0, into = 0;
+    into < duration && rects.length < MAX_RECTS;
+    repeat++, into += period
+  ) {
     const windowTicks = Math.min(period, duration - into)
     for (const note of notes) {
       if (note.start >= windowTicks) continue
@@ -452,6 +470,19 @@ interface WaveformProps {
   loopTicks: number
 }
 
+/**
+ * Wave ink resolved once per theme, not per canvas per paint — a forced
+ * getComputedStyle for every waveform in a zoom burst is layout poison.
+ */
+let waveInkCache: { themeId: string; ink: string } | null = null
+function waveInkFor(canvas: HTMLCanvasElement, themeId: string): string {
+  if (waveInkCache?.themeId === themeId) return waveInkCache.ink
+  const ink =
+    getComputedStyle(canvas).getPropertyValue('--wave-ink').trim() || 'rgba(255, 255, 255, 0.55)'
+  waveInkCache = { themeId, ink }
+  return ink
+}
+
 function Waveform({
   asset,
   width,
@@ -486,9 +517,7 @@ function Waveform({
     g.clearRect(0, 0, w, h)
     // Canvas can't read CSS variables itself; themes that put dark ink on a
     // light clip would otherwise paint white on white.
-    g.fillStyle =
-      getComputedStyle(canvas).getPropertyValue('--wave-ink').trim() ||
-      'rgba(255, 255, 255, 0.55)'
+    g.fillStyle = waveInkFor(canvas, themeId)
     // The drawn region must match what scheduling will read: resampling
     // scales timeline position into buffer position, and a reversed clip
     // reads its region back-to-front.

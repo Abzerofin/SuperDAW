@@ -2,6 +2,7 @@ import { useEffect, useRef } from 'react'
 import type { EffectType } from '@core/model/effects'
 import type { PluginInstanceId } from '@core/model/types'
 import { audioEngine } from '@/state/audioInstance'
+import { transport } from '@/state/transport'
 import {
   bandpass,
   freqToX,
@@ -26,6 +27,40 @@ import { ParametricEq } from './ParametricEq'
  */
 
 type Params = Readonly<Record<string, number>>
+
+/**
+ * Frame gate for the card visuals. At full rate only while audio can be
+ * flowing (transport rolling) or a param is being dragged; otherwise the
+ * loop idles at ~2 fps — enough to track dock resizes and theme changes —
+ * and a hidden tab paints nothing. Ten open cards used to cost ten full
+ * 60 fps analyser+canvas loops around the clock; now a stopped, untouched
+ * dock costs effectively nothing.
+ */
+interface PaintGate {
+  lastParams: unknown
+  countdown: number
+}
+
+const IDLE_REPAINT_FRAMES = 30
+
+export function newPaintGate(): PaintGate {
+  return { lastParams: null, countdown: 0 }
+}
+
+export function shouldPaint(gate: PaintGate, params: unknown): boolean {
+  if (document.hidden) return false
+  if (transport.isPlaying || gate.lastParams !== params) {
+    gate.lastParams = params
+    gate.countdown = 0
+    return true
+  }
+  if (gate.countdown > 0) {
+    gate.countdown--
+    return false
+  }
+  gate.countdown = IDLE_REPAINT_FRAMES
+  return true
+}
 
 export function EffectVisual({
   type,
@@ -79,6 +114,7 @@ function FilterVisual({
     const colors = theme()
     const spectrumBuf: { current: Uint8Array<ArrayBuffer> | null } = { current: null }
     let raf = 0
+    const gate = newPaintGate()
 
     const curveOf = (cutoff: number, q: number): Biquad => {
       switch (type) {
@@ -95,6 +131,7 @@ function FilterVisual({
 
     const draw = (): void => {
       raf = requestAnimationFrame(draw)
+      if (!shouldPaint(gate, paramsRef.current)) return
       const canvas = canvasRef.current
       if (!canvas) return
       const ctx = fitCanvas(canvas)
@@ -159,6 +196,7 @@ function LfoVisual({ params }: { params: Params }): React.JSX.Element {
   useEffect(() => {
     const colors = theme()
     let raf = 0
+    const gate = newPaintGate()
 
     const waveAt = (phase: number, wave: string): number => {
       switch (wave) {
@@ -175,6 +213,7 @@ function LfoVisual({ params }: { params: Params }): React.JSX.Element {
 
     const draw = (): void => {
       raf = requestAnimationFrame(draw)
+      if (!shouldPaint(gate, paramsRef.current)) return
       const canvas = canvasRef.current
       if (!canvas) return
       const ctx = fitCanvas(canvas)
@@ -346,9 +385,11 @@ function EqVisual({
     const colors = theme()
     const spectrumBuf: { current: Uint8Array<ArrayBuffer> | null } = { current: null }
     let raf = 0
+    const gate = newPaintGate()
 
     const draw = (): void => {
       raf = requestAnimationFrame(draw)
+      if (!shouldPaint(gate, paramsRef.current)) return
       const canvas = canvasRef.current
       if (!canvas) return
       const ctx = fitCanvas(canvas)
@@ -444,9 +485,11 @@ function CompressorVisual({
     let shownIn = -80
     const levelBuf: { current: Float32Array<ArrayBuffer> | null } = { current: null }
     const spectrumBuf: { current: Uint8Array<ArrayBuffer> | null } = { current: null }
+    const gate = newPaintGate()
 
     const draw = (): void => {
       raf = requestAnimationFrame(draw)
+      if (!shouldPaint(gate, paramsRef.current)) return
       const canvas = canvasRef.current
       if (!canvas) return
       const ctx = fitCanvas(canvas)
@@ -563,9 +606,11 @@ function LimiterVisual({
     const levelBuf: { current: Float32Array<ArrayBuffer> | null } = { current: null }
     const spectrumBuf: { current: Uint8Array<ArrayBuffer> | null } = { current: null }
     const LIM_FLOOR = -30 // meter scale: -30..0 dB
+    const gate = newPaintGate()
 
     const draw = (): void => {
       raf = requestAnimationFrame(draw)
+      if (!shouldPaint(gate, paramsRef.current)) return
       const canvas = canvasRef.current
       if (!canvas) return
       const ctx = fitCanvas(canvas)
@@ -650,9 +695,11 @@ function DelayVisual({
     const colors = theme()
     const spectrumBuf: { current: Uint8Array<ArrayBuffer> | null } = { current: null }
     let raf = 0
+    const gate = newPaintGate()
 
     const draw = (): void => {
       raf = requestAnimationFrame(draw)
+      if (!shouldPaint(gate, paramsRef.current)) return
       const canvas = canvasRef.current
       if (!canvas) return
       const ctx = fitCanvas(canvas)
@@ -719,9 +766,11 @@ function ReverbVisual({
     const colors = theme()
     const spectrumBuf: { current: Uint8Array<ArrayBuffer> | null } = { current: null }
     let raf = 0
+    const gate = newPaintGate()
 
     const draw = (): void => {
       raf = requestAnimationFrame(draw)
+      if (!shouldPaint(gate, paramsRef.current)) return
       const canvas = canvasRef.current
       if (!canvas) return
       const ctx = fitCanvas(canvas)

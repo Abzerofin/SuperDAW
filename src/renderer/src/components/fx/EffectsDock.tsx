@@ -486,7 +486,15 @@ function DockedEditor({ instance }: { instance: PluginInstance }): React.JSX.Ele
     // this channel; docked editors are the only thing that opens one now.
     wireEditorEvents()
     let raf = 0
-    let lastSent = ''
+    let lastSent: {
+      x: number
+      y: number
+      clipLeft: number
+      clipTop: number
+      clipRight: number
+      clipBottom: number
+      visible: boolean
+    } | null = null
     let cancelled = false
 
     const report = (): void => {
@@ -523,9 +531,21 @@ function DockedEditor({ instance }: { instance: PluginInstance }): React.JSX.Ele
           r.bottom > viewport.top &&
           r.top < viewport.bottom
       }
-      const key = JSON.stringify(rect)
-      if (key === lastSent) return
-      lastSent = key
+      // Field compare, not JSON.stringify — this runs every frame forever
+      // while an editor is docked, and serializing per frame is pure waste.
+      if (
+        lastSent &&
+        lastSent.x === rect.x &&
+        lastSent.y === rect.y &&
+        lastSent.clipLeft === rect.clipLeft &&
+        lastSent.clipTop === rect.clipTop &&
+        lastSent.clipRight === rect.clipRight &&
+        lastSent.clipBottom === rect.clipBottom &&
+        lastSent.visible === rect.visible
+      ) {
+        return
+      }
+      lastSent = rect
       void api
         .vst3DockEditor({
           instanceId: instance.id,

@@ -1,6 +1,5 @@
 import type { PluginInstance, PluginInstanceId, ProjectState, Route, TrackId } from '@core/model/types'
 import {
-  automationOf,
   automationValueAt,
   isTrackAudible,
   pluginsOfTrack,
@@ -83,6 +82,17 @@ const PREVIEW_WINDOW_SEC = 2
 const PREVIEW_LOOKAHEAD_SEC = 4
 const PREVIEW_INTERVAL_MS = 250
 
+interface AutomationIndex {
+  /** Track volume curves (points without an instanceId), sorted by ticks. */
+  readonly volumeByTrack: Map<TrackId, AutomationPoint[]>
+  /** Track pan curves, sorted by ticks. */
+  readonly panByTrack: Map<TrackId, AutomationPoint[]>
+  /** Insert-parameter curves per instance and param, sorted by ticks. */
+  readonly byInstance: Map<PluginInstanceId, Map<string, AutomationPoint[]>>
+}
+
+const NO_POINTS: AutomationPoint[] = []
+
 interface TrackChain {
   /** Where sources and synth voices connect; head of the insert chain. */
   input: GainNode
@@ -111,8 +121,9 @@ export class AudioEngine {
   private graphPorts = new Map<PluginInstanceId, { inlet: GainNode; outlet: GainNode }>()
   /** Everything currently scheduled: clip buffer sources AND synth oscillators. */
   private sources = new Set<AudioScheduledSourceNode>()
-  /** Per-clip fade envelope gains for the current scheduling pass. */
-  private fadeNodes = new Set<GainNode>()
+  /** Per-clip fade envelope gains, mapped to the clock time their pass ends
+   *  (Infinity for open-ended passes) so loop iterations can be swept. */
+  private fadeNodes = new Map<GainNode, number>()
   /** Live input monitors feeding track chains, by track. */
   private monitors = new Map<TrackId, AudioNode>()
 
@@ -172,6 +183,52 @@ export class AudioEngine {
   private prevNotes: ProjectState['notes']
   private prevPlugins: ProjectState['plugins']
   private prevRoutes: ProjectState['routes']
+
+  /**
+   * Automation grouped once per document change instead of re-scanning and
+   * re-sorting the whole record per track per call: resetAutomation was
+   * O(tracks × points) and the 20 Hz FX sampler rebuilt (and re-sorted!)
+   * every group on every tick — millions of wasted visits per second at
+   * scale, i.e. steady GC pressure exactly where buffer underruns hurt.
+   */
+  private automationIndexSource: ProjectState['automation'] | null = null
+  private automationIndexCache: AutomationIndex = {
+    volumeByTrack: new Map(),
+    panByTrack: new Map(),
+    byInstance: new Map()
+  }
+
+  private automationIndex(): AutomationIndex {
+    const automation = this.store.state.automation
+    if (this.automationIndexSource === automation) return this.automationIndexCache
+    const volumeByTrack = new Map<TrackId, AutomationPoint[]>()
+    const panByTrack = new Map<TrackId, AutomationPoint[]>()
+    const byInstance = new Map<PluginInstanceId, Map<string, AutomationPoint[]>>()
+    for (const point of Object.values(automation)) {
+      if (point.instanceId !== undefined) {
+        let params = byInstance.get(point.instanceId)
+        if (!params) byInstance.set(point.instanceId, (params = new Map()))
+        const list = params.get(point.param)
+        if (list) list.push(point)
+        else params.set(point.param, [point])
+        continue
+      }
+      const map = point.param === 'volume' ? volumeByTrack : point.param === 'pan' ? panByTrack : null
+      if (!map) continue
+      const list = map.get(point.trackId)
+      if (list) list.push(point)
+      else map.set(point.trackId, [point])
+    }
+    const byTicks = (a: AutomationPoint, b: AutomationPoint): number => a.ticks - b.ticks
+    for (const list of volumeByTrack.values()) list.sort(byTicks)
+    for (const list of panByTrack.values()) list.sort(byTicks)
+    for (const params of byInstance.values()) {
+      for (const list of params.values()) list.sort(byTicks)
+    }
+    this.automationIndexSource = automation
+    this.automationIndexCache = { volumeByTrack, panByTrack, byInstance }
+    return this.automationIndexCache
+  }
 
   constructor(
     private store: StoreLike,
@@ -428,10 +485,17 @@ export class AudioEngine {
     const ctx = this.ensureContext()
     const go = (): void => {
       void this.restart(() => {
-        this.startMetronome()
-        this.startLoopScheduler()
-        this.startTrackLoopScheduler()
-        this.startFxAutomation()
+        // Each helper timer runs only while its precondition holds — four
+        // unconditional intervals were 50+ main-thread wakeups per second
+        // doing nothing on a plain, non-looping, un-automated play.
+        if (this.metroEnabled) this.startMetronome()
+        else this.stopMetronome()
+        if (this.transport.activeLoop()) this.startLoopScheduler()
+        else this.stopLoopScheduler()
+        if (this.trackLoops.size > 0) this.startTrackLoopScheduler()
+        else this.stopTrackLoopScheduler()
+        if (this.automationIndex().byInstance.size > 0) this.startFxAutomation()
+        else this.stopFxAutomation()
       })
     }
     if (ctx.state === 'suspended') void ctx.resume().then(go)
@@ -677,16 +741,16 @@ export class AudioEngine {
   }
 
   private stopFxAutomation(): void {
-    if (this.fxAutoTimer !== null) clearInterval(this.fxAutoTimer)
+    if (this.fxAutoTimer === null) return // never ran — nothing to settle
+    clearInterval(this.fxAutoTimer)
     this.fxAutoTimer = null
     // Settle every automated insert back onto its stored params, so a
     // stopped transport leaves the knobs meaning what they say.
     const ctx = this.ctx
     if (!ctx) return
     const state = this.store.state
-    for (const point of Object.values(state.automation)) {
-      if (point.instanceId === undefined) continue
-      const instance = state.plugins[point.instanceId]
+    for (const instanceId of this.automationIndex().byInstance.keys()) {
+      const instance = state.plugins[instanceId]
       if (instance) this.fxNodes.get(instance.id)?.apply(instance.params, ctx.currentTime)
     }
   }
@@ -696,18 +760,10 @@ export class AudioEngine {
     const ctx = this.ctx
     if (!ctx || !this.transport.isPlaying) return
     const state = this.store.state
-    // Group plugin-param points; skip everything when there are none.
-    let groups: Map<PluginInstanceId, Map<string, AutomationPoint[]>> | null = null
-    for (const point of Object.values(state.automation)) {
-      if (point.instanceId === undefined) continue
-      groups ??= new Map()
-      let params = groups.get(point.instanceId)
-      if (!params) groups.set(point.instanceId, (params = new Map()))
-      const list = params.get(point.param)
-      if (list) list.push(point)
-      else params.set(point.param, [point])
-    }
-    if (!groups) return
+    // Groups are prebuilt (and pre-sorted) once per document change — this
+    // runs 20× a second and must not rescan the automation record.
+    const groups = this.automationIndex().byInstance
+    if (groups.size === 0) return
     const nowTicks = this.transport.positionTicks()
     for (const [instanceId, params] of groups) {
       const instance = state.plugins[instanceId]
@@ -718,7 +774,6 @@ export class AudioEngine {
       const defs = paramDefsOf(instance.descriptor)
       const merged: Record<string, number> = { ...instance.params }
       for (const [param, points] of params) {
-        points.sort((a, b) => a.ticks - b.ticks)
         const v = automationValueAt(points, nowTicks)
         const def = defs?.[param]
         merged[param] = def ? denormalizeParam(def, v) : v
@@ -803,54 +858,92 @@ export class AudioEngine {
     // Synth param edits must reschedule voices (envelopes bake params in);
     // freeze flips swap a track between live processing and its render.
     let synthChanged = false
-    let frozenChanged = false
+    const frozenFlipped = new Set<TrackId>()
     if (state.tracks !== this.prevTracks) {
       for (const [id, track] of Object.entries(state.tracks)) {
         const prev = this.prevTracks[id]
         if (prev && prev.synth !== track.synth) synthChanged = true
-        if (prev && prev.frozenAssetId !== track.frozenAssetId) frozenChanged = true
+        if (prev && prev.frozenAssetId !== track.frozenAssetId) frozenFlipped.add(id)
       }
     }
+    const frozenChanged = frozenFlipped.size > 0
     if (state.tracks !== this.prevTracks || state.masterVolume !== this.prevMasterVolume) {
       this.prevTracks = state.tracks
       this.prevMasterVolume = state.masterVolume
       if (this.ctx) {
         this.syncMixer()
-        // Freeze/unfreeze re-wires inserts (bypass vs live).
-        if (frozenChanged) this.syncPlugins()
+        // Freeze/unfreeze re-wires inserts (bypass vs live) — only on the
+        // tracks that actually flipped.
+        if (frozenChanged) this.syncPluginsFor(frozenFlipped)
       }
     }
     // External-plugin edits change what preview windows SOUND like, so
     // they are audible edits. Builtin edits are not: their nodes apply
     // params live with smoothing and must not interrupt playback.
+    //
+    // Rewires are scoped to the tracks whose chain TOPOLOGY changed
+    // (add/remove/enable/rank/descriptor). A param-only change pushes the
+    // values into the live nodes directly; graph positions and state blobs
+    // never touch the audio graph. One knob on track 3 must not tear down
+    // and rebuild track 97's chain — mid-playback that connect/disconnect
+    // storm is an audible glitch factory.
     let externalPluginChanged = false
     if (state.plugins !== this.prevPlugins) {
       const prev = this.prevPlugins
+      const rewire = new Set<TrackId>()
+      const now = this.ctx?.currentTime ?? 0
       for (const [id, instance] of Object.entries(state.plugins)) {
-        if (instance.descriptor.format !== 'builtin' && prev[id] !== instance) {
-          externalPluginChanged = true
+        const before = prev[id]
+        if (before === instance) continue
+        if (instance.descriptor.format !== 'builtin') externalPluginChanged = true
+        if (!before) {
+          rewire.add(instance.trackId)
+          continue
+        }
+        if (
+          before.trackId !== instance.trackId ||
+          before.enabled !== instance.enabled ||
+          before.rank !== instance.rank ||
+          before.descriptor !== instance.descriptor
+        ) {
+          rewire.add(before.trackId)
+          rewire.add(instance.trackId)
+        } else if (before.params !== instance.params && this.ctx) {
+          // Remote peer edits and committed ops land here; local drags
+          // already previewed the same values through the same call.
+          this.fxNodes.get(id)?.apply(instance.params, now)
         }
       }
       for (const [id, instance] of Object.entries(prev)) {
-        if (instance.descriptor.format !== 'builtin' && !state.plugins[id]) {
-          externalPluginChanged = true
+        if (!state.plugins[id]) {
+          if (instance.descriptor.format !== 'builtin') externalPluginChanged = true
+          rewire.add(instance.trackId)
         }
       }
       this.prevPlugins = state.plugins
-      if (this.ctx) this.syncPlugins()
+      if (this.ctx) this.syncPluginsFor(rewire)
     }
     // Routing-graph edits rewire chains; on a track previewed through
     // external plugins they also change what the windows sound like.
     let routesChanged = false
     if (state.routes !== this.prevRoutes) {
       routesChanged = true
+      const rewire = new Set<TrackId>()
+      for (const [id, route] of Object.entries(state.routes)) {
+        if (this.prevRoutes[id] !== route) rewire.add(route.trackId)
+      }
+      for (const [id, route] of Object.entries(this.prevRoutes)) {
+        if (!state.routes[id]) rewire.add(route.trackId)
+      }
       this.prevRoutes = state.routes
-      if (this.ctx) this.syncPlugins()
+      if (this.ctx) this.syncPluginsFor(rewire)
     }
     const automationEdited = state.automation !== this.prevAutomation
     this.prevAutomation = state.automation
     if (automationEdited && this.transport.isPlaying && this.ctx) {
       this.rearmAutomation()
+      // The first insert-param point mid-play needs the sampler running.
+      if (this.automationIndex().byInstance.size > 0) this.startFxAutomation()
     }
     const editedAudio =
       state.clips !== this.prevClips ||
@@ -868,15 +961,38 @@ export class AudioEngine {
     if (editedAudio && this.transport.isPlaying && this.ctx) {
       // restart() resets and re-arms automation itself, so a freeze flip
       // (whose baked automation must go neutral) needs nothing extra here.
-      void this.restart(() => this.resyncMetronome())
+      this.queueRestart()
     }
   }
 
   private onAssetsChanged = (): void => {
     // A newly decoded asset may belong to an already-scheduled silent clip.
     if (this.transport.isPlaying && this.ctx) {
-      void this.restart(() => {})
+      this.queueRestart()
     }
+  }
+
+  /**
+   * Coalesce restarts: importing a folder of files fires an asset
+   * registration plus ops PER FILE, and every one of those used to tear
+   * down and rebuild every scheduled source in the song. At most one
+   * restart per ~120 ms keeps a burst to a handful of reschedules while a
+   * lone edit still responds immediately.
+   */
+  private restartPending = false
+  private lastRestartAt = 0
+  private queueRestart(): void {
+    if (this.restartPending) return
+    this.restartPending = true
+    const since = performance.now() - this.lastRestartAt
+    const delay = Math.max(0, 120 - since)
+    setTimeout(() => {
+      this.restartPending = false
+      this.lastRestartAt = performance.now()
+      if (this.transport.isPlaying && this.ctx) {
+        void this.restart(() => this.resyncMetronome())
+      }
+    }, delay)
   }
 
   // ---------- Internals ----------
@@ -940,6 +1056,7 @@ export class AudioEngine {
     fadeGains: Map<string, GainNode>,
     fromTicks: number,
     atSec: number,
+    untilTicks: number,
     state: ProjectState = this.store.state
   ): AudioNode {
     const ctx = this.ctx!
@@ -957,7 +1074,10 @@ export class AudioEngine {
       // region tapers identically on every iteration.
       applyClipFades(gain.gain, clip, state.tempo, fromTicks, atSec)
       fadeGains.set(clipId, gain)
-      this.fadeNodes.add(gain)
+      const endSec = Number.isFinite(untilTicks)
+        ? atSec + (untilTicks - fromTicks) / ticksPerSecond(state.tempo)
+        : Number.POSITIVE_INFINITY
+      this.fadeNodes.set(gain, endSec)
     }
     return gain
   }
@@ -989,6 +1109,7 @@ export class AudioEngine {
     const ctx = this.ctx
     const loop = this.transport.activeLoop()
     if (!ctx || !loop || this.loopNextIterationSec === null) return
+    this.purgeExpiredFades(ctx.currentTime)
     const tps = ticksPerSecond(this.store.state.tempo)
     const spanSec = (loop.end - loop.start) / tps
     if (spanSec <= 0) return
@@ -1028,7 +1149,15 @@ export class AudioEngine {
       source.buffer = buffer
       // Resampling: pitch and stretch both land here (see clipRate).
       if (s.rate !== 1) source.playbackRate.value = s.rate
-      const dest = this.destinationFor(s.clipId, s.trackId, fadeGains, fromTicks, atSec, state)
+      const dest = this.destinationFor(
+        s.clipId,
+        s.trackId,
+        fadeGains,
+        fromTicks,
+        atSec,
+        untilTicks,
+        state
+      )
       source.connect(dest)
       source.onended = () => this.sources.delete(source)
       source.start(s.when, s.offsetSec, s.durationSec)
@@ -1055,7 +1184,15 @@ export class AudioEngine {
       // Previewed tracks get their audio as rendered windows (synth included).
       if (this.previewTracks.has(s.trackId)) continue
       // Voices go through the clip's fade envelope, so MIDI tapers too.
-      const dest = this.destinationFor(s.clipId, s.trackId, fadeGains, fromTicks, atSec, state)
+      const dest = this.destinationFor(
+        s.clipId,
+        s.trackId,
+        fadeGains,
+        fromTicks,
+        atSec,
+        untilTicks,
+        state
+      )
       const voices = buildSynthVoice(
         ctx,
         dest,
@@ -1078,6 +1215,7 @@ export class AudioEngine {
     const ctx = this.ctx
     if (!ctx) return
     const state = this.store.state
+    const index = this.automationIndex()
     const now = ctx.currentTime
     for (const trackId of Object.keys(state.tracks)) {
       const chain = this.chain(trackId)
@@ -1085,12 +1223,12 @@ export class AudioEngine {
       chain.panner.pan.cancelScheduledValues(now)
       // Frozen tracks baked their volume automation into the render.
       const points = state.tracks[trackId]?.frozenAssetId
-        ? []
-        : automationOf(state, trackId, 'volume')
+        ? NO_POINTS
+        : (index.volumeByTrack.get(trackId) ?? NO_POINTS)
       if (points.length === 0) chain.auto.gain.setValueAtTime(1, now)
       // Pan automation owns the panner while points exist (0..1 → -1..1);
       // when the last point is deleted mid-playback the knob takes back over.
-      if (automationOf(state, trackId, 'pan').length === 0) {
+      if ((index.panByTrack.get(trackId) ?? NO_POINTS).length === 0) {
         chain.panner.pan.setValueAtTime(state.tracks[trackId]?.pan ?? 0, now)
       }
     }
@@ -1105,14 +1243,15 @@ export class AudioEngine {
    */
   private scheduleAutomationPass(fromTicks: number, atSec: number, untilTicks: number): void {
     const state = this.store.state
+    const index = this.automationIndex()
     const tps = ticksPerSecond(state.tempo)
     const rampTime = (ticks: number): number => atSec + (ticks - fromTicks) / tps
 
     for (const trackId of Object.keys(state.tracks)) {
       const points = state.tracks[trackId]?.frozenAssetId
-        ? []
-        : automationOf(state, trackId, 'volume')
-      const panPoints = automationOf(state, trackId, 'pan')
+        ? NO_POINTS
+        : (index.volumeByTrack.get(trackId) ?? NO_POINTS)
+      const panPoints = index.panByTrack.get(trackId) ?? NO_POINTS
       if (points.length === 0 && panPoints.length === 0) continue
       const chain = this.chain(trackId)
 
@@ -1144,7 +1283,9 @@ export class AudioEngine {
 
   private stopAllSources(): void {
     for (const source of this.sources) {
-      source.onended = null
+      // onended stays attached: synth voices disconnect their filter/env
+      // nodes there, and nulling it used to orphan two nodes per voice
+      // (with scheduled AudioParam events) on every stop at 4 nodes/note.
       try {
         source.stop()
       } catch {
@@ -1153,8 +1294,22 @@ export class AudioEngine {
       source.disconnect()
     }
     this.sources.clear()
-    for (const gain of this.fadeNodes) gain.disconnect()
+    for (const gain of this.fadeNodes.keys()) gain.disconnect()
     this.fadeNodes.clear()
+  }
+
+  /**
+   * Drop fade gains whose pass is entirely in the past. Looped playback
+   * mints fresh fade nodes per iteration; without this sweep an hour of
+   * cycling a faded region accumulates thousands of connected gains.
+   */
+  private purgeExpiredFades(now: number): void {
+    for (const [gain, endSec] of this.fadeNodes) {
+      if (endSec < now - 0.5) {
+        gain.disconnect()
+        this.fadeNodes.delete(gain)
+      }
+    }
   }
 
   private chain(trackId: TrackId): TrackChain {
@@ -1173,9 +1328,11 @@ export class AudioEngine {
     const parentId = this.store.state.tracks[trackId]?.parentId ?? null
     panner.connect(this.busFor(parentId))
     // Metering is a side-tap: the analyser has no onward connection, so it
-    // observes the post-fader/pan signal without altering the path.
+    // observes the post-fader/pan signal without altering the path. A peak
+    // meter needs no frequency resolution — 256 samples per read is a 4×
+    // cheaper scan than the old 1024 across every track every frame.
     const analyser = ctx.createAnalyser()
-    analyser.fftSize = 1024
+    analyser.fftSize = 256
     panner.connect(analyser)
     const chain: TrackChain = {
       input,
@@ -1207,8 +1364,19 @@ export class AudioEngine {
    * a missing plugin never breaks playback or the project.
    */
   private syncPlugins(): void {
+    if (!this.ctx) return
+    this.syncPluginsFor(new Set(this.chains.keys()))
+  }
+
+  /**
+   * Scoped rewire: dispose nodes of removed instances (map-sized, cheap),
+   * then rebuild the insert wiring ONLY for the given tracks. Everything
+   * else keeps its live graph untouched — the difference between one
+   * track's worth of connect calls and a full-project storm per edit.
+   */
+  private syncPluginsFor(trackIds: ReadonlySet<TrackId>): void {
     const ctx = this.ctx
-    if (!ctx) return
+    if (!ctx || trackIds.size === 0) return
     const state = this.store.state
     for (const [instanceId, nodes] of this.fxNodes) {
       if (!state.plugins[instanceId]) {
@@ -1223,7 +1391,10 @@ export class AudioEngine {
         this.graphPorts.delete(instanceId)
       }
     }
-    for (const [trackId, chain] of this.chains) this.wireInserts(trackId, chain)
+    for (const trackId of trackIds) {
+      const chain = this.chains.get(trackId)
+      if (chain) this.wireInserts(trackId, chain)
+    }
   }
 
   private wireInserts(trackId: TrackId, chain: TrackChain): void {
@@ -1233,6 +1404,11 @@ export class AudioEngine {
     const inserts = pluginsOfTrack(this.store.state, trackId)
 
     chain.input.disconnect()
+    // The blanket disconnect above also severed the wire-oscilloscope tap
+    // (graphSourceAnalyser) if one exists — re-attach it, or the routing
+    // view's scopes go flat after the first rewire and never recover.
+    const inputTap = this.inputWaveTaps.get(chain.input)
+    if (inputTap) chain.input.connect(inputTap)
     for (const instance of inserts) {
       this.fxNodes.get(instance.id)?.output.disconnect()
       const ports = this.graphPorts.get(instance.id)
@@ -1322,12 +1498,6 @@ export class AudioEngine {
     })
   }
 
-  private hasPanAutomation(trackId: TrackId): boolean {
-    return Object.values(this.store.state.automation).some(
-      (p) => p.trackId === trackId && p.param === 'pan'
-    )
-  }
-
   private isAudible(trackId: TrackId): boolean {
     return isTrackAudible(this.store.state, trackId)
   }
@@ -1339,11 +1509,59 @@ export class AudioEngine {
     return this.isAudible(trackId) ? track.volume : 0
   }
 
+  /**
+   * Solo/mute audibility for every track in one pass. isTrackAudible walks
+   * subtrees per call — fine for a single fader, O(T²·depth) when syncMixer
+   * asked it once per track on every track edit. The closure answers from
+   * the soloed set and each track's own ancestor path instead.
+   */
+  private audibilityResolver(): (trackId: TrackId) => boolean {
+    const state = this.store.state
+    const solo = new Set<TrackId>()
+    for (const track of Object.values(state.tracks)) {
+      if (track.soloed) solo.add(track.id)
+    }
+    if (solo.size === 0) {
+      return (trackId) => {
+        const track = state.tracks[trackId]
+        return track !== undefined && !track.muted
+      }
+    }
+    // A soloed track keeps itself, its ancestor buses (they carry its
+    // signal) and its whole subtree audible — same relation isTrackAudible
+    // expresses pairwise.
+    const closure = new Set<TrackId>()
+    for (const id of solo) {
+      let current: TrackId | null = id
+      const seen = new Set<TrackId>()
+      while (current !== null && !seen.has(current)) {
+        closure.add(current)
+        seen.add(current)
+        current = state.tracks[current]?.parentId ?? null
+      }
+    }
+    return (trackId) => {
+      const track = state.tracks[trackId]
+      if (!track || track.muted) return false
+      if (closure.has(trackId)) return true
+      let current: TrackId | null = track.parentId
+      const seen = new Set<TrackId>()
+      while (current !== null && !seen.has(current)) {
+        if (solo.has(current)) return true
+        seen.add(current)
+        current = state.tracks[current]?.parentId ?? null
+      }
+      return false
+    }
+  }
+
   private syncMixer(): void {
     const ctx = this.ctx
     if (!ctx) return
     const now = ctx.currentTime
     this.master!.gain.setTargetAtTime(this.store.state.masterVolume, now, GAIN_SMOOTHING_SEC)
+    const audible = this.audibilityResolver()
+    const panAutomated = this.automationIndex().panByTrack
     for (const [trackId, chain] of this.chains) {
       const track = this.store.state.tracks[trackId]
       if (!track) {
@@ -1363,9 +1581,13 @@ export class AudioEngine {
         this.chains.delete(trackId)
         continue
       }
-      chain.fader.gain.setTargetAtTime(this.effectiveGain(trackId), now, GAIN_SMOOTHING_SEC)
+      chain.fader.gain.setTargetAtTime(
+        audible(trackId) ? track.volume : 0,
+        now,
+        GAIN_SMOOTHING_SEC
+      )
       // While pan automation is playing, its ramps own the panner.
-      if (!(this.transport.isPlaying && this.hasPanAutomation(trackId))) {
+      if (!(this.transport.isPlaying && (panAutomated.get(trackId)?.length ?? 0) > 0)) {
         chain.panner.pan.setTargetAtTime(track.pan, now, GAIN_SMOOTHING_SEC)
       }
     }
@@ -1456,7 +1678,14 @@ export class AudioEngine {
     gain.gain.exponentialRampToValueAtTime(0.001, when + 0.05)
     osc.connect(gain)
     gain.connect(this.master!)
+    // Tracked like every other source, so pressing stop also silences the
+    // clicks already queued inside the lookahead window.
+    osc.onended = () => {
+      this.sources.delete(osc)
+      gain.disconnect()
+    }
     osc.start(when)
     osc.stop(when + 0.06)
+    this.sources.add(osc)
   }
 }

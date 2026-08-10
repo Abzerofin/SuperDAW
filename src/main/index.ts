@@ -1,5 +1,5 @@
 import { app, BrowserWindow, dialog, ipcMain, Menu, shell } from 'electron'
-import { readFile, writeFile } from 'node:fs/promises'
+import { open, readFile, rename } from 'node:fs/promises'
 import { basename, join } from 'node:path'
 import { readAppData, setAppData } from './appData'
 import { registerCollabIpc } from './collabServer'
@@ -8,6 +8,28 @@ import { checkForUpdates } from './updater'
 import { ensureScanned } from './pluginScan'
 
 const PROJECT_FILTERS = [{ name: 'SuperDAW Project', extensions: ['sdaw'] }]
+
+/**
+ * Durable atomic write: temp file + fsync + rename. A crash, power loss or
+ * full disk mid-write must never destroy the previous good save — a .sdaw
+ * is a ZIP whose central directory sits at the end, so a truncated file is
+ * unreadable in full, not partially.
+ */
+async function writeFileAtomic(filePath: string, data: Uint8Array): Promise<void> {
+  const tmp = `${filePath}.tmp`
+  const handle = await open(tmp, 'w')
+  try {
+    await handle.writeFile(data)
+    await handle.sync()
+  } finally {
+    await handle.close()
+  }
+  await rename(tmp, filePath)
+}
+
+/** Wrap IPC-delivered bytes without copying (Buffer.from(u8) would copy). */
+const asBuffer = (data: Uint8Array): Buffer =>
+  Buffer.from(data.buffer, data.byteOffset, data.byteLength)
 
 function registerAppDataIpc(): void {
   ipcMain.handle('appdata:get', async (_event, key: string): Promise<unknown> => {
@@ -39,7 +61,7 @@ function registerIpc(): void {
         if (result.canceled || !result.filePath) return null
         filePath = result.filePath
       }
-      await writeFile(filePath, Buffer.from(args.data))
+      await writeFileAtomic(filePath, asBuffer(args.data))
       return filePath
     }
   )
@@ -55,8 +77,10 @@ function registerIpc(): void {
       })
       if (result.canceled || result.filePaths.length === 0) return null
       const path = result.filePaths[0]
+      // A Buffer IS a Uint8Array; returning it directly avoids copying the
+      // whole project file before the IPC clone (which copies once anyway).
       const data = await readFile(path)
-      return { path, name: basename(path), data: new Uint8Array(data) }
+      return { path, name: basename(path), data }
     }
   )
 
@@ -67,7 +91,7 @@ function registerIpc(): void {
     async (_event, path: string): Promise<{ path: string; name: string; data: Uint8Array } | null> => {
       try {
         const data = await readFile(path)
-        return { path, name: basename(path), data: new Uint8Array(data) }
+        return { path, name: basename(path), data }
       } catch {
         return null
       }
@@ -90,7 +114,7 @@ function registerIpc(): void {
       if (result.canceled || result.filePaths.length === 0) return null
       const path = result.filePaths[0]
       const data = await readFile(path)
-      return { path, name: basename(path), data: new Uint8Array(data) }
+      return { path, name: basename(path), data }
     }
   )
 
@@ -108,7 +132,7 @@ function registerIpc(): void {
         filters: [{ name: args.filterName, extensions: [args.ext] }]
       })
       if (result.canceled || !result.filePath) return null
-      await writeFile(result.filePath, Buffer.from(args.data))
+      await writeFileAtomic(result.filePath, asBuffer(args.data))
       return result.filePath
     }
   )

@@ -1,20 +1,20 @@
-import { useEffect, useState, useSyncExternalStore } from 'react'
+import { memo, useEffect, useState, useSyncExternalStore } from 'react'
 import { createPortal } from 'react-dom'
 import type { Track } from '@core/model/types'
 import { childTracksOf } from '@core/model/types'
 import { buildDuplicateTrackOp } from '@core/ops/duplicateTrack'
 import { projectStore } from '@/state/projectStore'
-import { useProjectState } from '@/state/hooks'
-import { commentUi, useCommentUi } from '@/state/commentUi'
-import { automationUi, useAutomationUi } from '@/state/automationUi'
-import { recording, useRecording } from '@/state/recording'
+import { useProjectSelector } from '@/state/hooks'
+import { commentUi } from '@/state/commentUi'
+import { automationUi } from '@/state/automationUi'
+import { recording } from '@/state/recording'
 import { panels } from '@/state/panels'
-import { selection, useSelectionVersion } from '@/state/selection'
-import { useCollab } from '@/state/collab'
-import { folderUi, useFolderUi } from '@/state/folderUi'
+import { selection } from '@/state/selection'
+import { collab } from '@/state/collab'
+import { folderUi } from '@/state/folderUi'
 import { routingUi } from '@/state/routingUi'
-import { trackInputs, useTrackInputs } from '@/state/trackInputs'
-import { trackInputUi, useTrackInputUi } from '@/state/trackInputUi'
+import { trackInputs } from '@/state/trackInputs'
+import { trackInputUi } from '@/state/trackInputUi'
 import {
   freezeTrack,
   groupTracksIntoFolder,
@@ -39,7 +39,7 @@ import { TrackStripControls } from './TrackStripControls'
  * automation, comments, duplicate, freeze, presets, routing, delete) sits
  * behind the ⋯ menu, which is the same menu right-click opens.
  */
-export function TrackHeader({
+export const TrackHeader = memo(function TrackHeader({
   track,
   depth = 0,
   compact = false
@@ -52,31 +52,52 @@ export function TrackHeader({
   const [editing, setEditing] = useState(false)
   const [name, setName] = useState('')
   const [menu, setMenu] = useState<{ x: number; y: number } | null>(null)
-  const openAnchor = useCommentUi().anchor
-  const state = useProjectState()
-  const commentCount = Object.values(state.comments).filter(
-    (c) => c.parentId === null && !c.resolved && c.anchor.kind === 'track' && c.anchor.id === track.id
-  ).length
-  const popoverOpen = openAnchor?.kind === 'track' && openAnchor.id === track.id
-  useSelectionVersion()
-  const isSelected = selection.isTrackSelected(track.id)
-  const multi = selection.selectedTrackIds.size > 1
+  // Every subscription below snapshots ONLY what this one row displays —
+  // booleans and counts — so React bails out of re-rendering the other 99
+  // headers when one track's state changes. At scale this is the
+  // difference between 1 render and a full column repaint per toggle.
+  const popoverOpen = useSyncExternalStore(
+    commentUi.subscribe,
+    () => commentUi.anchor?.kind === 'track' && commentUi.anchor.id === track.id
+  )
+  const commentCount = useProjectSelector(
+    (s) =>
+      Object.values(s.comments).filter(
+        (c) =>
+          c.parentId === null && !c.resolved && c.anchor.kind === 'track' && c.anchor.id === track.id
+      ).length
+  )
+  const isSelected = useSyncExternalStore(selection.subscribe, () =>
+    selection.isTrackSelected(track.id)
+  )
+  const multi = useSyncExternalStore(selection.subscribe, () => selection.selectedTrackIds.size > 1)
   // In a session, freezing does double duty: the render it bakes is also
   // what reaches collaborators who cannot run this track's plugins, so the
   // action is named for both jobs.
-  const inSession = useCollab().mode !== 'off'
-  const hasFx = Object.values(state.plugins).some((p) => p.trackId === track.id)
+  const inSession = useSyncExternalStore(collab.subscribe, () => collab.mode !== 'off')
+  const hasFx = useProjectSelector((s) =>
+    Object.values(s.plugins).some((p) => p.trackId === track.id)
+  )
   const isFolder = track.kind === 'folder'
   const frozen = track.frozenAssetId !== null
   const canRecord = track.kind === 'audio' && !frozen
-  const inputOpen = useTrackInputUi().trackId === track.id
-  const monitoring = useTrackInputs().isMonitoring(track.id)
+  const inputOpen = useSyncExternalStore(
+    trackInputUi.subscribe,
+    () => trackInputUi.trackId === track.id
+  )
+  const monitoring = useSyncExternalStore(trackInputs.subscribe, () =>
+    trackInputs.isMonitoring(track.id)
+  )
   const looping = useSyncExternalStore(audioEngine.subscribeTrackLoops, () =>
     audioEngine.isTrackLooping(track.id)
   )
-  const autoOpen = useAutomationUi().isOpen(track.id)
-  const collapsed = useFolderUi().isCollapsed(track.id)
-  const childCount = isFolder ? childTracksOf(state, track.id).length : 0
+  const autoOpen = useSyncExternalStore(automationUi.subscribe, () =>
+    automationUi.isOpen(track.id)
+  )
+  const collapsed = useSyncExternalStore(folderUi.subscribe, () => folderUi.isCollapsed(track.id))
+  const childCount = useProjectSelector((s) =>
+    isFolder ? childTracksOf(s, track.id).length : 0
+  )
 
   useEffect(() => {
     if (!menu) return
@@ -391,13 +412,13 @@ export function TrackHeader({
         )}
     </div>
   )
-}
+})
 
 function ArmToggle({ trackId }: { trackId: string }): React.JSX.Element {
-  const rec = useRecording()
+  const armed = useSyncExternalStore(recording.subscribe, () => recording.isArmed(trackId))
   return (
     <button
-      className={`track-toggle ${rec.isArmed(trackId) ? 'track-toggle-armed' : ''}`}
+      className={`track-toggle ${armed ? 'track-toggle-armed' : ''}`}
       title="Arm for recording"
       onClick={() => recording.toggleArm(trackId)}
     >

@@ -1,4 +1,4 @@
-import { useEffect, useReducer, useRef, useState } from 'react'
+import { useEffect, useMemo, useReducer, useRef, useState } from 'react'
 import type { Clip, Note, NoteId } from '@core/model/types'
 import { notesOfClip } from '@core/model/types'
 import { PPQ, snapTicks, ticksPerBar } from '@core/model/timebase'
@@ -101,6 +101,26 @@ export function PianoRoll({ clipId }: { clipId: string }): React.JSX.Element | n
   const clip = state.clips[clipId]
   const track = clip ? state.tracks[clip.trackId] : undefined
 
+  // Note and clip indexes, rebuilt only when the underlying records change
+  // — notesOfClip per clip per render is O(clips × notes) and dominates
+  // render cost on busy tracks. (Hooks stay above the early return below.)
+  const notesByClip = useMemo(() => {
+    const map = new Map<string, Note[]>()
+    for (const note of Object.values(state.notes)) {
+      const list = map.get(note.clipId)
+      if (list) list.push(note)
+      else map.set(note.clipId, [note])
+    }
+    for (const list of map.values()) list.sort((a, b) => a.start - b.start)
+    return map
+  }, [state.notes])
+  const trackClips = useMemo(() => {
+    if (!track) return []
+    return Object.values(state.clips)
+      .filter((c) => c.trackId === track.id && c.assetId === null)
+      .sort((a, b) => a.start - b.start)
+  }, [state.clips, track])
+
   // Close if the clip vanishes (deleted locally or by a peer).
   useEffect(() => {
     if (!clip) pianoRollUi.close()
@@ -144,17 +164,13 @@ export function PianoRoll({ clipId }: { clipId: string }): React.JSX.Element | n
   const gridTicks = pxPerBeat >= 36 ? PPQ / 4 : PPQ / 2
   const barTicks = ticksPerBar(state.timeSignature)
 
-  // Every MIDI clip on this track, in song order, each with a possible
-  // end-drag preview applied.
-  const trackClips = Object.values(state.clips)
-    .filter((c) => c.trackId === track.id && c.assetId === null)
-    .sort((a, b) => a.start - b.start)
+  // Each clip with a possible end-drag preview applied.
   const shownDuration = (c: Clip): number =>
     endPreview?.clipId === c.id ? endPreview.duration : c.duration
 
   /** All notes on the track, each with its owning clip. */
   const laid = trackClips.flatMap((c) =>
-    notesOfClip(state, c.id).map((note) => ({ note, clip: c }))
+    (notesByClip.get(c.id) ?? []).map((note) => ({ note, clip: c }))
   )
   const clipOf = new Map(laid.map(({ note, clip: c }) => [note.id, c]))
 
@@ -167,12 +183,15 @@ export function PianoRoll({ clipId }: { clipId: string }): React.JSX.Element | n
   const contentW = Math.ceil(contentTicks * pxPerTick)
   const selectedNote = selected.size === 1 ? state.notes[[...selected][0]] : undefined
 
+  // Map lookup, not a linear scan per note — a large multi-selection drag
+  // is otherwise O(notes × selected) per frame.
+  const dragOthers = drag ? new Map(drag.others.map((m) => [m.noteId, m])) : null
   const withPreview = (note: Note): Note => {
     if (!drag) return note
     if (drag.noteId === note.id) {
       return { ...note, start: drag.start, pitch: drag.pitch, duration: drag.duration }
     }
-    const member = drag.others.find((m) => m.noteId === note.id)
+    const member = dragOthers?.get(note.id)
     return member ? { ...note, start: member.start, pitch: member.pitch } : note
   }
 
@@ -311,8 +330,23 @@ export function PianoRoll({ clipId }: { clipId: string }): React.JSX.Element | n
       const { x, y } = lanePoint(e)
       const box = { ...marqueeRef.current, x, y }
       setMarquee(box)
-      // Selection follows the box live — ephemeral, nothing to undo.
-      setSelected(new Set([...box.base, ...notesInMarquee(box)]))
+      // Selection follows the box live — ephemeral, nothing to undo. Keep
+      // the previous set's identity when membership is unchanged so React
+      // can skip the (large) note field re-render.
+      const next = new Set([...box.base, ...notesInMarquee(box)])
+      setSelected((prev) => {
+        if (prev.size === next.size) {
+          let same = true
+          for (const id of next) {
+            if (!prev.has(id)) {
+              same = false
+              break
+            }
+          }
+          if (same) return prev
+        }
+        return next
+      })
       return
     }
     const preview = endPreviewRef.current
@@ -623,8 +657,11 @@ function RollRuler({
   gridTicks: number
   barTicks: number
 }): React.JSX.Element {
+  // Transport STATE only (loop region, marker, play state) — never the
+  // frame feed, which would rebuild the whole ruler at 60 fps during
+  // playback. The moving playhead is RollPlayhead's job.
   const [, force] = useReducer((c: number) => c + 1, 0)
-  useEffect(() => transport.subscribe(force), [])
+  useEffect(() => transport.subscribeUi(force), [])
   const laneRef = useRef<HTMLDivElement>(null)
   const [drag, setDragState] = useState<{ anchor: number; start: number; end: number } | null>(
     null

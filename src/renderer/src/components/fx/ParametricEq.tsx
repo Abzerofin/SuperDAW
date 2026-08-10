@@ -6,7 +6,7 @@ import { audioEngine } from '@/state/audioInstance'
 import { capturePointer } from '@/lib/pointer'
 import { freqToX, magnitudeDb, paraeqBand, xToFreq, type Biquad } from '@/lib/biquad'
 import { ParamSlider } from './ParamSlider'
-import { drawSpectrum, fitCanvas, theme, useParamsRef } from './PluginVisuals'
+import { drawSpectrum, fitCanvas, newPaintGate, shouldPaint, theme, useParamsRef } from './PluginVisuals'
 
 /**
  * The parametric EQ editor: bands are points ON the response curve.
@@ -235,9 +235,16 @@ export function ParametricEq({
     const colors = theme()
     const spectrumBuf: { current: Uint8Array<ArrayBuffer> | null } = { current: null }
     let raf = 0
+    const gate = newPaintGate()
+    let lastSelected: number | null = null
 
     const draw = (): void => {
       raf = requestAnimationFrame(draw)
+      // Full rate only while audio flows or a param moves; a selection
+      // change alone (the band ring) also forces a repaint.
+      const painting = shouldPaint(gate, effectiveRef.current)
+      if (!painting && lastSelected === selectedRef.current) return
+      lastSelected = selectedRef.current
       const canvas = canvasRef.current
       if (!canvas) return
       const ctx = fitCanvas(canvas)

@@ -51,6 +51,8 @@ export class AssetStore {
   private assets = new Map<string, ProjectAsset>()
   private reversed = new Map<string, AudioBuffer>()
   private listeners = new Set<(event?: AssetEvent) => void>()
+  /** SHA-256 (hex) of encoded bytes → asset id, for import dedup. */
+  private byDigest = new Map<string, string>()
 
   /**
    * A mirrored copy of an asset's buffer, for clips playing in reverse.
@@ -75,8 +77,8 @@ export class AssetStore {
     return mirrored
   }
 
-  addAudio(name: string, ext: string, encoded: Uint8Array, buffer: AudioBuffer): ProjectAsset {
-    return this.register(newId('ast'), name, 'audio', ext, encoded, buffer, 'local')
+  addAudio(name: string, ext: string, encoded: Uint8Array, buffer: AudioBuffer, digest?: string): ProjectAsset {
+    return this.register(newId('ast'), name, 'audio', ext, encoded, buffer, 'local', digest)
   }
 
   addMidi(name: string, ext: string, encoded: Uint8Array): ProjectAsset {
@@ -95,6 +97,17 @@ export class AssetStore {
     return this.register(id, name, kind, ext, encoded, buffer, 'restored')
   }
 
+  /**
+   * An already-held asset with byte-identical content, if any. Importing
+   * the same file twice (or a file that matches a loaded project asset)
+   * reuses the existing asset instead of decoding and holding a second
+   * copy — dropping one 100 MB loop on three tracks must cost one asset.
+   */
+  findByDigest(digest: string): ProjectAsset | undefined {
+    const id = this.byDigest.get(digest)
+    return id !== undefined ? this.assets.get(id) : undefined
+  }
+
   private register(
     id: string,
     name: string,
@@ -102,7 +115,8 @@ export class AssetStore {
     ext: string,
     encoded: Uint8Array,
     buffer: AudioBuffer | null,
-    origin: 'local' | 'restored'
+    origin: 'local' | 'restored',
+    digest?: string
   ): ProjectAsset {
     const asset: ProjectAsset = {
       id,
@@ -112,12 +126,45 @@ export class AssetStore {
       encoded,
       buffer,
       seconds: buffer ? buffer.length / buffer.sampleRate : null,
-      peaks: buffer ? computePeaks(buffer, PEAKS_PER_SECOND) : null,
+      // Peaks arrive asynchronously (see below): scanning every sample of
+      // a long file on the UI thread froze the app for hundreds of
+      // milliseconds per import. The asset is usable immediately — clips
+      // draw their placeholder until the waveform lands.
+      peaks: null,
       peaksPerSecond: PEAKS_PER_SECOND
     }
     this.assets.set(asset.id, asset)
+    if (digest !== undefined && !this.byDigest.has(digest)) this.byDigest.set(digest, id)
+    else if (digest === undefined) this.recordDigestLater(id, encoded)
     for (const listener of this.listeners) listener({ asset, origin })
+    if (buffer) this.fillPeaksLater(id, buffer)
     return asset
+  }
+
+  /** Chunked, off-the-hot-path peak fill; swaps the asset when done. */
+  private fillPeaksLater(id: string, buffer: AudioBuffer): void {
+    void computePeaksAsync(buffer, PEAKS_PER_SECOND).then((peaks) => {
+      const current = this.assets.get(id)
+      // Cleared or replaced while computing (project switch) — drop it.
+      if (!current || current.buffer !== buffer) return
+      this.assets.set(id, { ...current, peaks })
+      for (const listener of this.listeners) listener()
+    })
+  }
+
+  /**
+   * Hash in the background so later imports can dedupe against assets that
+   * arrived without a digest (project loads, collab transfers, recordings).
+   * crypto.subtle runs off-thread; a hash failing (non-secure context)
+   * just means no dedup — never an error.
+   */
+  private recordDigestLater(id: string, encoded: Uint8Array): void {
+    void digestOf(encoded)
+      .then((digest) => {
+        if (digest === null) return
+        if (this.assets.has(id) && !this.byDigest.has(digest)) this.byDigest.set(digest, id)
+      })
+      .catch(() => {})
   }
 
   get(id: string): ProjectAsset | undefined {
@@ -137,6 +184,7 @@ export class AssetStore {
   clear(): void {
     this.assets.clear()
     this.reversed.clear()
+    this.byDigest.clear()
     for (const listener of this.listeners) listener()
   }
 
@@ -153,12 +201,48 @@ export function computePeaks(buffer: AudioBufferLike, bucketsPerSecond: number):
   const peaks = new Float32Array(bucketCount * 2)
   const channels: Float32Array[] = []
   for (let c = 0; c < buffer.numberOfChannels; c++) channels.push(buffer.getChannelData(c))
+  fillPeakRange(peaks, channels, buffer.length, bucketSize, 0, bucketCount)
+  return peaks
+}
 
-  for (let b = 0; b < bucketCount; b++) {
+/**
+ * The same peaks, computed in slices with the event loop released between
+ * them — a ten-minute file is tens of millions of sample reads, which as
+ * one synchronous pass visibly froze the UI on every import, load and
+ * record-stop.
+ */
+export async function computePeaksAsync(
+  buffer: AudioBufferLike,
+  bucketsPerSecond: number
+): Promise<Float32Array> {
+  const bucketSize = Math.max(1, Math.round(buffer.sampleRate / bucketsPerSecond))
+  const bucketCount = Math.ceil(buffer.length / bucketSize)
+  const peaks = new Float32Array(bucketCount * 2)
+  const channels: Float32Array[] = []
+  for (let c = 0; c < buffer.numberOfChannels; c++) channels.push(buffer.getChannelData(c))
+  // ~4M samples of work per slice ≈ a few ms; long files take many slices.
+  const bucketsPerSlice = Math.max(1, Math.floor(4_000_000 / Math.max(1, bucketSize * channels.length)))
+  for (let from = 0; from < bucketCount; from += bucketsPerSlice) {
+    const to = Math.min(bucketCount, from + bucketsPerSlice)
+    fillPeakRange(peaks, channels, buffer.length, bucketSize, from, to)
+    if (to < bucketCount) await new Promise((resolve) => setTimeout(resolve, 0))
+  }
+  return peaks
+}
+
+function fillPeakRange(
+  peaks: Float32Array,
+  channels: readonly Float32Array[],
+  length: number,
+  bucketSize: number,
+  fromBucket: number,
+  toBucket: number
+): void {
+  for (let b = fromBucket; b < toBucket; b++) {
     let min = 0
     let max = 0
     const from = b * bucketSize
-    const to = Math.min(buffer.length, from + bucketSize)
+    const to = Math.min(length, from + bucketSize)
     for (const data of channels) {
       for (let i = from; i < to; i++) {
         const v = data[i]
@@ -169,5 +253,14 @@ export function computePeaks(buffer: AudioBufferLike, bucketsPerSecond: number):
     peaks[b * 2] = min
     peaks[b * 2 + 1] = max
   }
-  return peaks
+}
+
+/** SHA-256 of raw bytes as hex, or null where WebCrypto is unavailable. */
+export async function digestOf(bytes: Uint8Array): Promise<string | null> {
+  const subtle = globalThis.crypto?.subtle
+  if (!subtle) return null
+  // A copy: digest() needs a plain ArrayBuffer view it can read while the
+  // caller's buffer may be a view into something larger.
+  const hash = await subtle.digest('SHA-256', bytes.slice().buffer as ArrayBuffer)
+  return [...new Uint8Array(hash)].map((b) => b.toString(16).padStart(2, '0')).join('')
 }

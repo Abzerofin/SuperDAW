@@ -8,6 +8,7 @@ import { useProjectState } from '@/state/hooks'
 import { capturePointer } from '@/lib/pointer'
 import { audioEngine } from '@/state/audioInstance'
 import { AddPluginCard } from './AddPluginCard'
+import { newPaintGate, shouldPaint } from './PluginVisuals'
 
 /**
  * The node view of a track's effects: every insert is a node with an in
@@ -449,10 +450,15 @@ function WireScope({
   useEffect(() => {
     let raf = 0
     let buf: Float32Array<ArrayBuffer> | null = null
+    const gate = newPaintGate()
     const ink =
       getComputedStyle(document.documentElement).getPropertyValue('--accent').trim() || '#5b8def'
     const draw = (): void => {
       raf = requestAnimationFrame(draw)
+      // Live trace only while the transport rolls; stopped scopes settle
+      // to a flat line at the idle repaint rate instead of polling
+      // analysers at 60 fps per wire forever.
+      if (!shouldPaint(gate, null)) return
       const canvas = canvasRef.current
       const g = canvas?.getContext('2d')
       if (!canvas || !g) return

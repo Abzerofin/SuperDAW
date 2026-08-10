@@ -653,6 +653,20 @@ body.middle-panning * {
 .lane {
   background-color: var(--bg-0);
   border-bottom: 1px solid var(--border);
+  /* Bar/beat grid lines. Driven by two custom properties the timeline sets
+   * ONCE on .timeline-grid — an inline gradient per lane would make every
+   * render rewrite (and re-rasterize) an up-to-50k-px-wide layer per row. */
+  background-image:
+    repeating-linear-gradient(to right, var(--grid-bar) 0 1px, transparent 1px var(--bar-px, 128px)),
+    repeating-linear-gradient(to right, var(--grid-beat) 0 1px, transparent 1px var(--beat-px, 32px));
+  contain: layout paint;
+}
+
+/* Zoomed far out the beat lines merge into noise — bars only. */
+.timeline-grid-no-beats .lane,
+.timeline-grid-no-beats .auto-row {
+  background-image:
+    repeating-linear-gradient(to right, var(--grid-bar) 0 1px, transparent 1px var(--bar-px, 128px));
 }
 
 .lane-muted {
@@ -674,6 +688,9 @@ body.middle-panning * {
   border-left: 3px solid var(--clip-color);
   overflow: hidden;
   cursor: grab;
+  /* Everything a clip draws stays inside its box (overflow is hidden), so
+   * the browser can skip layout/paint work for offscreen or unchanged clips. */
+  contain: layout paint;
 }
 
 .clip:hover {
@@ -1307,6 +1324,9 @@ body.middle-panning * {
   background-color: var(--bg-0);
   border-bottom: 1px solid var(--border);
   position: relative;
+  background-image:
+    repeating-linear-gradient(to right, var(--grid-bar) 0 1px, transparent 1px var(--bar-px, 128px)),
+    repeating-linear-gradient(to right, var(--grid-beat) 0 1px, transparent 1px var(--beat-px, 32px));
 }
 
 .auto-lane {

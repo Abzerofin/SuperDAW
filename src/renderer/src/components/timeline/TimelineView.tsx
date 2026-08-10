@@ -1,5 +1,5 @@
-﻿import { useEffect, useLayoutEffect, useReducer, useRef, useState } from 'react'
-import type { ClipId, Track, TrackKind } from '@core/model/types'
+﻿import { useCallback, useEffect, useLayoutEffect, useMemo, useReducer, useRef, useState } from 'react'
+import type { ClipId, Note, Track, TrackKind } from '@core/model/types'
 import {
   childTracksOf,
   isTrackEffectivelyAudible,
@@ -30,7 +30,7 @@ import { capturePointer } from '@/lib/pointer'
 import { onMiddleClick } from '@/lib/middleMouse'
 import { buildPeakSnapTargets, peakSnapStart, type PeakSnapTargets } from '@/lib/peakSnap'
 import { commentUi, useCommentUi } from '@/state/commentUi'
-import { useAutomationUi } from '@/state/automationUi'
+import { automationUi, useAutomationUi } from '@/state/automationUi'
 import { pianoRollUi } from '@/state/pianoRollUi'
 import { useRecording } from '@/state/recording'
 import { folderUi, useFolderUi } from '@/state/folderUi'
@@ -74,6 +74,8 @@ interface ReorderState {
 const LOOP_STRIP_H = 12
 /** How close (px) a transient must come to another's to peak-snap. */
 const PEAK_SNAP_PX = 10
+/** Shared empty list so audio clips get an identical `notes` prop every render. */
+const EMPTY_NOTES: Note[] = []
 
 /**
  * Rubber-band selection dragged across empty timeline space. Coordinates
@@ -214,22 +216,38 @@ export function TimelineView(): React.JSX.Element {
   const openCommentAnchor = useCommentUi().anchor
 
   // Open (unresolved) thread counts per clip, for the clip chips.
-  const clipCommentCounts = new Map<string, number>()
-  for (const comment of Object.values(state.comments)) {
-    if (comment.parentId === null && !comment.resolved && comment.anchor.kind === 'clip') {
-      clipCommentCounts.set(comment.anchor.id, (clipCommentCounts.get(comment.anchor.id) ?? 0) + 1)
+  // Memoized on the comments record: rebuilt only when a comment op lands.
+  const clipCommentCounts = useMemo(() => {
+    const counts = new Map<string, number>()
+    for (const comment of Object.values(state.comments)) {
+      if (comment.parentId === null && !comment.resolved && comment.anchor.kind === 'clip') {
+        counts.set(comment.anchor.id, (counts.get(comment.anchor.id) ?? 0) + 1)
+      }
     }
-  }
+    return counts
+  }, [state.comments])
 
-  // Notes grouped by clip, for MIDI clip previews.
-  const notesByClip = new Map<string, typeof state.notes[string][]>()
-  for (const note of Object.values(state.notes)) {
-    const list = notesByClip.get(note.clipId)
-    if (list) list.push(note)
-    else notesByClip.set(note.clipId, [note])
-  }
+  // Notes grouped by clip, for MIDI clip previews. Note arrays keep their
+  // identity across unrelated ops so memoized ClipViews stay quiet.
+  const notesByClip = useMemo(() => {
+    const map = new Map<string, Note[]>()
+    for (const note of Object.values(state.notes)) {
+      const list = map.get(note.clipId)
+      if (list) list.push(note)
+      else map.set(note.clipId, [note])
+    }
+    return map
+  }, [state.notes])
   const [pxPerBeat, setPxPerBeat] = useState(32)
-  const [drag, setDrag] = useState<DragState | null>(null)
+  // Authoritative copy in a ref (same reason as reorder/marquee below):
+  // pointermove work is coalesced to animation frames, and pointerup must
+  // read the truly-latest values, not the last committed render's.
+  const [drag, setDragState] = useState<DragState | null>(null)
+  const dragRef = useRef<DragState | null>(null)
+  const setDrag = (value: DragState | null): void => {
+    dragRef.current = value
+    setDragState(value)
+  }
   /** Peak-snap candidates for the current move drag (built once per drag). */
   const peakSnapRef = useRef<{ clipId: ClipId; targets: PeakSnapTargets } | null>(null)
   const [reorder, setReorderState] = useState<ReorderState | null>(null)
@@ -260,9 +278,12 @@ export function TimelineView(): React.JSX.Element {
     loopDragRef.current = value
     setLoopDragState(value)
   }
-  // Redraw when the transport's loop region changes (it is not React state).
+  // Redraw when transport STATE changes: loop region, marker, play/stop.
+  // Deliberately subscribeUi, never the frame feed — a frame subscription
+  // here would re-render the entire timeline at 60 fps for the whole of
+  // playback. The moving playhead is drawn by leaf components instead.
   const [, forceTransport] = useReducer((c: number) => c + 1, 0)
-  useEffect(() => transport.subscribe(forceTransport), [])
+  useEffect(() => transport.subscribeUi(forceTransport), [])
   const markerTicks = transport.markerTicks
   const scrollRef = useRef<HTMLDivElement>(null)
   const gridRef = useRef<HTMLDivElement>(null)
@@ -286,10 +307,13 @@ export function TimelineView(): React.JSX.Element {
   // Visible rows derive from the folder tree: roots in trackOrder order,
   // each folder followed by its children (collapsed folders hide theirs).
   // Sibling order is trackOrder-relative, so any interleaving a concurrent
-  // edit produces still renders sanely.
-  const tracks: Track[] = []
-  const depthOf: number[] = []
-  {
+  // edit produces still renders sanely. Memoized on the slices it actually
+  // reads, so clip/note/plugin ops never rebuild the row layout.
+  const foldVersion = folderUi.getVersion()
+  const autoVersion = automationUi.getVersion()
+  const { tracks, depthOf } = useMemo(() => {
+    const tracks: Track[] = []
+    const depthOf: number[] = []
     const visit = (parentId: string | null, depth: number): void => {
       for (const child of childTracksOf(state, parentId)) {
         tracks.push(child)
@@ -298,16 +322,22 @@ export function TimelineView(): React.JSX.Element {
       }
     }
     visit(null, 0)
-  }
-  const rowIndexOfTrack = new Map(tracks.map((t, i) => [t.id, i]))
+    return { tracks, depthOf }
+    // childTracksOf reads only tracks + trackOrder off the state.
+  }, [state.tracks, state.trackOrder, foldVersion])
+  const rowIndexOfTrack = useMemo(
+    () => new Map(tracks.map((t, i) => [t.id, i])),
+    [tracks]
+  )
+  const trackIdList = useMemo(() => tracks.map((t) => t.id), [tracks])
   const trackCount = tracks.length
 
   // Row layout: each track lane, optionally followed by its automation lane.
   // All overlay layers position by trackTops (content px below the ruler).
-  const rowMeta = tracks.map((track) => ({ track, auto: autoUi.isOpen(track.id) }))
-  const trackTops: number[] = []
-  const gridRowOfTrack: number[] = []
-  {
+  const { rowMeta, trackTops, gridRowOfTrack, lastGridRow } = useMemo(() => {
+    const rowMeta = tracks.map((track) => ({ track, auto: autoUi.isOpen(track.id) }))
+    const trackTops: number[] = []
+    const gridRowOfTrack: number[] = []
     let top = 0
     let row = 2
     for (const meta of rowMeta) {
@@ -320,9 +350,9 @@ export function TimelineView(): React.JSX.Element {
         row += 1
       }
     }
-  }
-  const lastGridRow =
-    2 + rowMeta.reduce((n, m) => n + (m.auto ? 2 : 1), 0)
+    const lastGridRow = 2 + rowMeta.reduce((n, m) => n + (m.auto ? 2 : 1), 0)
+    return { rowMeta, trackTops, gridRowOfTrack, lastGridRow }
+  }, [tracks, autoVersion, laneH])
   // A trailing drop bar always closes the list: it is where files land to
   // become new tracks, and it doubles as the empty-project call to action.
   const rowTemplate =
@@ -342,12 +372,53 @@ export function TimelineView(): React.JSX.Element {
   }
 
   // Content extends past the last clip so there is always room to work.
-  const lastClipEnd = Object.values(state.clips).reduce(
-    (max, c) => Math.max(max, c.start + c.duration),
-    0
+  const lastClipEnd = useMemo(
+    () =>
+      Object.values(state.clips).reduce((max, c) => Math.max(max, c.start + c.duration), 0),
+    [state.clips]
   )
   const contentTicks = Math.max(lastClipEnd + barsToTicks(16, sig), barsToTicks(64, sig))
   const contentW = Math.ceil(contentTicks * pxPerTick)
+
+  // Viewport window for culling: only clips near the visible rectangle are
+  // mounted. Updated at most once per frame from scroll/resize — the state
+  // change re-renders the (memoized) timeline cheaply and swaps which
+  // ClipViews exist. Overscan keeps fast scrolls from showing blanks.
+  const [view, setView] = useState({ left: 0, top: 0, w: 1200, h: 800 })
+  useEffect(() => {
+    const el = scrollRef.current
+    if (!el) return
+    let raf = 0
+    const update = (): void => {
+      raf = 0
+      setView((prev) => {
+        const next = {
+          left: el.scrollLeft,
+          top: el.scrollTop,
+          w: el.clientWidth,
+          h: el.clientHeight
+        }
+        return prev.left === next.left &&
+          prev.top === next.top &&
+          prev.w === next.w &&
+          prev.h === next.h
+          ? prev
+          : next
+      })
+    }
+    const schedule = (): void => {
+      if (!raf) raf = requestAnimationFrame(update)
+    }
+    update()
+    el.addEventListener('scroll', schedule, { passive: true })
+    const ro = new ResizeObserver(schedule)
+    ro.observe(el)
+    return () => {
+      el.removeEventListener('scroll', schedule)
+      ro.disconnect()
+      if (raf) cancelAnimationFrame(raf)
+    }
+  }, [])
 
   // Ctrl+wheel zoom, anchored at the cursor. Native listener because React's
   // wheel events are passive and can't preventDefault the browser page zoom.
@@ -624,21 +695,143 @@ export function TimelineView(): React.JSX.Element {
     []
   )
 
-  const onPointerMove = (e: React.PointerEvent): void => {
-    shareCursor(e)
+  /**
+   * Marquee, loop-region and clip drags are coalesced to one update per
+   * animation frame: a 120+ Hz mouse otherwise forces double-rate renders
+   * and layout reads. The latest pointer is stashed here and processed in
+   * rAF; pointerup flushes it so nothing is lost. Reordering stays
+   * synchronous because it must call capturePointer with the live event.
+   */
+  const movePointRef = useRef<{ clientX: number; clientY: number; shiftKey: boolean } | null>(
+    null
+  )
+  const moveRafRef = useRef(0)
+  useEffect(
+    () => () => {
+      if (moveRafRef.current) cancelAnimationFrame(moveRafRef.current)
+    },
+    []
+  )
+
+  const processGestureMove = (): void => {
+    moveRafRef.current = 0
+    const point = movePointRef.current
+    if (!point) return
     if (marqueeRef.current) {
-      const { x, y } = contentPoint(e)
+      const { x, y } = contentPoint(point)
       const box = { ...marqueeRef.current, x, y }
       setMarquee(box)
       // Selection follows the box live, so the result is visible before
-      // release. Ephemeral state only — no ops, nothing to undo.
-      selection.selectClips([...box.base, ...clipsInMarquee(box)])
+      // release. Ephemeral state only — no ops, nothing to undo. Only a
+      // real membership change touches the selection store: every bump
+      // re-renders all track headers, so a no-change move must stay free.
+      const hits = new Set([...box.base, ...clipsInMarquee(box)])
+      const current = selection.selectedClipIds
+      let changed = hits.size !== current.size
+      if (!changed) {
+        for (const id of hits) {
+          if (!current.has(id)) {
+            changed = true
+            break
+          }
+        }
+      }
+      if (changed) selection.selectClips(hits)
       return
     }
     if (loopDragRef.current) {
-      onLoopDragMove(e)
+      onLoopDragMove(point)
       return
     }
+    const prev = dragRef.current
+    if (!prev) return
+    const dxTicks = (point.clientX - prev.originX) / pxPerTick
+    // Holding Shift bypasses grid snapping for the duration of the drag
+    // (grid 1 = free movement at tick resolution).
+    const snapGrid = point.shiftKey ? 1 : gridTicks
+    let { start, duration, offset, loopLength, stretch, trackIndex } = prev
+    let snapGuide: number | null = null
+    if (prev.mode === 'loop-r') {
+      // The loop handle: dragging out repeats the clip's material. The
+      // period is the clip's length when the drag began (or its existing
+      // period); pulling back to one repeat or less turns looping off.
+      const base = prev.origLoop > 0 ? prev.origLoop : prev.origDuration
+      duration = Math.max(gridTicks, snapTicks(prev.origDuration + dxTicks, snapGrid))
+      loopLength = duration > base ? base : 0
+    } else if (prev.mode === 'stretch-r') {
+      // The stretch handle: the same material fills the new length, so
+      // longer = slower and lower, shorter = faster and higher (tape).
+      // Duration re-derives from the clamped factor so the visual edge
+      // never overshoots what playback will actually do.
+      const wanted = Math.max(gridTicks, snapTicks(prev.origDuration + dxTicks, snapGrid))
+      const factor = (prev.origStretch * wanted) / prev.origDuration
+      stretch = Math.min(MAX_STRETCH, Math.max(MIN_STRETCH, factor))
+      duration = Math.max(1, Math.round((prev.origDuration * stretch) / prev.origStretch))
+      // A looped clip's repeats stretch with the material, so the repeat
+      // count is preserved rather than retiled.
+      loopLength =
+        prev.origLoop > 0 ? Math.round((prev.origLoop * stretch) / prev.origStretch) : 0
+    } else if (prev.mode === 'move') {
+      const raw = Math.max(0, prev.origStart + dxTicks)
+      start = Math.max(0, snapTicks(prev.origStart + dxTicks, snapGrid))
+      // Peak snap: if one of the dragged clip's transients lands near a
+      // transient of another clip, that alignment beats the grid when it
+      // is the closer of the two. Shift (free move) bypasses both.
+      snapGuide = null
+      const peakTargets =
+        !point.shiftKey && peakSnapRef.current?.clipId === prev.clipId
+          ? peakSnapRef.current.targets
+          : null
+      if (peakTargets) {
+        const peak = peakSnapStart(peakTargets, raw, PEAK_SNAP_PX / pxPerTick)
+        if (peak && Math.abs(peak.start - raw) <= Math.abs(start - raw)) {
+          start = peak.start
+          snapGuide = peak.alignedTicks
+        }
+      }
+      const yCenter =
+        trackTops[prev.origTrackIndex] + laneH / 2 + (point.clientY - prev.originY)
+      trackIndex = trackIndexAtY(yCenter)
+    } else if (prev.mode === 'resize-l') {
+      const maxStart = prev.origStart + prev.origDuration - gridTicks
+      // Audio clips can't extend left past the start of their source material.
+      const minStart = prev.hasAsset ? prev.origStart - prev.origOffset : 0
+      start = Math.min(
+        maxStart,
+        Math.max(minStart, Math.max(0, snapTicks(prev.origStart + dxTicks, snapGrid)))
+      )
+      duration = prev.origStart + prev.origDuration - start
+      offset = prev.hasAsset ? prev.origOffset + (start - prev.origStart) : prev.origOffset
+    } else {
+      duration = Math.max(gridTicks, snapTicks(prev.origDuration + dxTicks, snapGrid))
+    }
+    const moved =
+      start !== prev.origStart ||
+      duration !== prev.origDuration ||
+      loopLength !== prev.origLoop ||
+      stretch !== prev.origStretch ||
+      trackIndex !== prev.origTrackIndex
+    // The rest of the selection follows by the SAME deltas the grabbed
+    // clip resolved to (it did the snapping), so relative spacing holds.
+    const others = prev.others.map((m) =>
+      followDrag(m, prev, { start, duration, offset, loopLength, stretch, trackIndex }, gridTicks)
+    )
+    setDrag({
+      ...prev,
+      start,
+      duration,
+      offset,
+      loopLength,
+      stretch,
+      trackIndex,
+      others,
+      moved,
+      snapGuide
+    })
+  }
+
+  const onPointerMove = (e: React.PointerEvent): void => {
+    shareCursor(e)
     const activeReorder = reorderRef.current
     if (activeReorder) {
       const rect = gridRef.current?.getBoundingClientRect()
@@ -676,97 +869,18 @@ export function TimelineView(): React.JSX.Element {
       setReorder({ ...activeReorder, active, slot, intoFolderId })
       return
     }
-    if (!drag) return
-    const dxTicks = (e.clientX - drag.originX) / pxPerTick
-    // Holding Shift bypasses grid snapping for the duration of the drag
-    // (grid 1 = free movement at tick resolution).
-    const snapGrid = e.shiftKey ? 1 : gridTicks
-    setDrag((prev) => {
-      if (!prev) return prev
-      let { start, duration, offset, loopLength, stretch, trackIndex } = prev
-      let snapGuide: number | null = null
-      if (prev.mode === 'loop-r') {
-        // The loop handle: dragging out repeats the clip's material. The
-        // period is the clip's length when the drag began (or its existing
-        // period); pulling back to one repeat or less turns looping off.
-        const base = prev.origLoop > 0 ? prev.origLoop : prev.origDuration
-        duration = Math.max(gridTicks, snapTicks(prev.origDuration + dxTicks, snapGrid))
-        loopLength = duration > base ? base : 0
-      } else if (prev.mode === 'stretch-r') {
-        // The stretch handle: the same material fills the new length, so
-        // longer = slower and lower, shorter = faster and higher (tape).
-        // Duration re-derives from the clamped factor so the visual edge
-        // never overshoots what playback will actually do.
-        const wanted = Math.max(gridTicks, snapTicks(prev.origDuration + dxTicks, snapGrid))
-        const factor = (prev.origStretch * wanted) / prev.origDuration
-        stretch = Math.min(MAX_STRETCH, Math.max(MIN_STRETCH, factor))
-        duration = Math.max(1, Math.round((prev.origDuration * stretch) / prev.origStretch))
-        // A looped clip's repeats stretch with the material, so the repeat
-        // count is preserved rather than retiled.
-        loopLength =
-          prev.origLoop > 0 ? Math.round((prev.origLoop * stretch) / prev.origStretch) : 0
-      } else if (prev.mode === 'move') {
-        const raw = Math.max(0, prev.origStart + dxTicks)
-        start = Math.max(0, snapTicks(prev.origStart + dxTicks, snapGrid))
-        // Peak snap: if one of the dragged clip's transients lands near a
-        // transient of another clip, that alignment beats the grid when it
-        // is the closer of the two. Shift (free move) bypasses both.
-        snapGuide = null
-        const peakTargets =
-          !e.shiftKey && peakSnapRef.current?.clipId === prev.clipId
-            ? peakSnapRef.current.targets
-            : null
-        if (peakTargets) {
-          const peak = peakSnapStart(peakTargets, raw, PEAK_SNAP_PX / pxPerTick)
-          if (peak && Math.abs(peak.start - raw) <= Math.abs(start - raw)) {
-            start = peak.start
-            snapGuide = peak.alignedTicks
-          }
-        }
-        const yCenter =
-          trackTops[prev.origTrackIndex] + laneH / 2 + (e.clientY - prev.originY)
-        trackIndex = trackIndexAtY(yCenter)
-      } else if (prev.mode === 'resize-l') {
-        const maxStart = prev.origStart + prev.origDuration - gridTicks
-        // Audio clips can't extend left past the start of their source material.
-        const minStart = prev.hasAsset ? prev.origStart - prev.origOffset : 0
-        start = Math.min(
-          maxStart,
-          Math.max(minStart, Math.max(0, snapTicks(prev.origStart + dxTicks, snapGrid)))
-        )
-        duration = prev.origStart + prev.origDuration - start
-        offset =
-          prev.hasAsset ? prev.origOffset + (start - prev.origStart) : prev.origOffset
-      } else {
-        duration = Math.max(gridTicks, snapTicks(prev.origDuration + dxTicks, snapGrid))
-      }
-      const moved =
-        start !== prev.origStart ||
-        duration !== prev.origDuration ||
-        loopLength !== prev.origLoop ||
-        stretch !== prev.origStretch ||
-        trackIndex !== prev.origTrackIndex
-      // The rest of the selection follows by the SAME deltas the grabbed
-      // clip resolved to (it did the snapping), so relative spacing holds.
-      const others = prev.others.map((m) =>
-        followDrag(m, prev, { start, duration, offset, loopLength, stretch, trackIndex }, gridTicks)
-      )
-      return {
-        ...prev,
-        start,
-        duration,
-        offset,
-        loopLength,
-        stretch,
-        trackIndex,
-        others,
-        moved,
-        snapGuide
-      }
-    })
+    if (!marqueeRef.current && !loopDragRef.current && !dragRef.current) return
+    movePointRef.current = { clientX: e.clientX, clientY: e.clientY, shiftKey: e.shiftKey }
+    if (!moveRafRef.current) moveRafRef.current = requestAnimationFrame(processGestureMove)
   }
 
   const onPointerUp = (): void => {
+    // Flush a pending coalesced move so release lands on the final pointer
+    // position, not the last painted frame's.
+    if (moveRafRef.current) {
+      cancelAnimationFrame(moveRafRef.current)
+      processGestureMove()
+    }
     if (marqueeRef.current) {
       // The selection was already applied as the box moved.
       setMarquee(null)
@@ -851,13 +965,14 @@ export function TimelineView(): React.JSX.Element {
       setReorder(null)
       return
     }
-    if (!drag) return
+    const ended = dragRef.current
+    if (!ended) return
     // A drag is many ephemeral previews but exactly ONE operation, dispatched
-    // on release. Keeps undo atomic and (later) the network op stream lean â€”
+    // on release. Keeps undo atomic and (later) the network op stream lean —
     // intermediate motion becomes presence data, not document ops.
-    if (drag.moved) {
-      const members: DragMember[] = [drag, ...drag.others]
-      if (drag.mode === 'move') {
+    if (ended.moved) {
+      const members: DragMember[] = [ended, ...ended.others]
+      if (ended.mode === 'move') {
         // Folder and frozen lanes never accept clips (the reducer would
         // reject the folder case anyway; skip the no-op dispatch).
         const moves = members.flatMap((m) => {
@@ -884,8 +999,8 @@ export function TimelineView(): React.JSX.Element {
           start: m.start,
           duration: m.duration,
           offset: m.offset,
-          ...(drag.mode === 'loop-r' ? { loopLength: m.loopLength } : {}),
-          ...(drag.mode === 'stretch-r'
+          ...(ended.mode === 'loop-r' ? { loopLength: m.loopLength } : {}),
+          ...(ended.mode === 'stretch-r'
             ? { stretch: m.stretch, ...(m.origLoop > 0 ? { loopLength: m.loopLength } : {}) }
             : {})
         }))
@@ -997,7 +1112,7 @@ export function TimelineView(): React.JSX.Element {
     })
   }
 
-  const onLoopDragMove = (e: React.PointerEvent): void => {
+  const onLoopDragMove = (e: { clientX: number }): void => {
     const drag = loopDragRef.current
     if (!drag) return
     const rect = gridRef.current?.getBoundingClientRect()
@@ -1047,61 +1162,131 @@ export function TimelineView(): React.JSX.Element {
   }
 
   // Ruler labels for the active mode, thinned to stay legible.
-  const rulerLabels: Array<{ x: number; text: string }> = []
-  if (rulerMode === 'bars') {
-    const step = Math.max(1, Math.pow(2, Math.ceil(Math.log2(64 / Math.max(1, pxPerBar)))))
-    for (let bar = 0; bar * barTicks < contentTicks; bar += step) {
-      rulerLabels.push({ x: bar * pxPerBar, text: String(bar + 1) })
+  const rulerLabels = useMemo(() => {
+    const labels: Array<{ x: number; text: string }> = []
+    if (rulerMode === 'bars') {
+      const step = Math.max(1, Math.pow(2, Math.ceil(Math.log2(64 / Math.max(1, pxPerBar)))))
+      for (let bar = 0; bar * barTicks < contentTicks; bar += step) {
+        labels.push({ x: bar * pxPerBar, text: String(bar + 1) })
+      }
+    } else {
+      const tps = ticksPerSecond(state.tempo)
+      const pxPerSec = tps * pxPerTick
+      const minPx = rulerMode === 'samples' ? 110 : 64
+      const steps = [0.1, 0.25, 0.5, 1, 2, 5, 10, 15, 30, 60, 120, 300, 600]
+      const secStep = steps.find((s) => s * pxPerSec >= minPx) ?? 1200
+      const totalSec = contentTicks / tps
+      const sampleRate = audioEngine.contextInfo()?.sampleRate ?? 48000
+      for (let sec = 0; sec <= totalSec; sec += secStep) {
+        const text =
+          rulerMode === 'time'
+            ? `${Math.floor(sec / 60)}:${(sec % 60).toFixed(secStep < 1 ? 1 : 0).padStart(secStep < 1 ? 4 : 2, '0')}`
+            : Math.round(sec * sampleRate).toLocaleString()
+        labels.push({ x: sec * pxPerSec, text })
+      }
     }
-  } else {
-    const tps = ticksPerSecond(state.tempo)
-    const pxPerSec = tps * pxPerTick
-    const minPx = rulerMode === 'samples' ? 110 : 64
-    const steps = [0.1, 0.25, 0.5, 1, 2, 5, 10, 15, 30, 60, 120, 300, 600]
-    const secStep = steps.find((s) => s * pxPerSec >= minPx) ?? 1200
-    const totalSec = contentTicks / tps
-    const sampleRate = audioEngine.contextInfo()?.sampleRate ?? 48000
-    for (let sec = 0; sec <= totalSec; sec += secStep) {
-      const text =
-        rulerMode === 'time'
-          ? `${Math.floor(sec / 60)}:${(sec % 60).toFixed(secStep < 1 ? 1 : 0).padStart(secStep < 1 ? 4 : 2, '0')}`
-          : Math.round(sec * sampleRate).toLocaleString()
-      rulerLabels.push({ x: sec * pxPerSec, text })
-    }
-  }
+    return labels
+  }, [rulerMode, pxPerBar, barTicks, contentTicks, state.tempo, pxPerTick])
 
   // The region being dragged wins over the committed one, so the drag reads live.
   const shownLoop = loopDrag ?? transport.loopRegion
 
-  const laneBackground = {
-    backgroundImage:
-      pxPerBeat >= 10
-        ? `repeating-linear-gradient(to right, var(--grid-bar) 0 1px, transparent 1px ${pxPerBar}px),` +
-          `repeating-linear-gradient(to right, var(--grid-beat) 0 1px, transparent 1px ${pxPerBeat}px)`
-        : `repeating-linear-gradient(to right, var(--grid-bar) 0 1px, transparent 1px ${pxPerBar}px)`
-  }
-
-  // Silent = own mute/solo state OR any ancestor folder-bus closed.
-  const isSilent = (trackId: string): boolean => !isTrackEffectivelyAudible(state, trackId)
-
   // Live drag previews by clip id — the grabbed clip and everything else
   // in a multi-clip selection all move at once.
-  const dragPreviews = new Map<
-    ClipId,
-    Pick<DragMember, 'start' | 'duration' | 'offset' | 'loopLength' | 'stretch' | 'trackIndex'>
-  >()
-  if (drag) {
-    for (const m of [drag, ...drag.others]) {
-      dragPreviews.set(m.clipId, {
-        start: m.start,
-        duration: m.duration,
-        offset: m.offset,
-        loopLength: m.loopLength,
-        stretch: m.stretch,
-        trackIndex: m.trackIndex
-      })
+  const dragPreviews = useMemo(() => {
+    const map = new Map<
+      ClipId,
+      Pick<DragMember, 'start' | 'duration' | 'offset' | 'loopLength' | 'stretch' | 'trackIndex'>
+    >()
+    if (drag) {
+      for (const m of [drag, ...drag.others]) {
+        map.set(m.clipId, {
+          start: m.start,
+          duration: m.duration,
+          offset: m.offset,
+          loopLength: m.loopLength,
+          stretch: m.stretch,
+          trackIndex: m.trackIndex
+        })
+      }
     }
-  }
+    return map
+  }, [drag])
+
+  // Stable per-clip callbacks (same ref-indirection pattern as gridPing):
+  // ClipView is memoized, and a fresh lambda per clip per render would
+  // defeat that for every clip in the project.
+  const beginDragRef = useRef(beginDrag)
+  beginDragRef.current = beginDrag
+  const onClipPointerDown = useCallback(
+    (e: React.PointerEvent, clipId: ClipId, mode: DragState['mode']): void =>
+      beginDragRef.current(e, clipId, mode),
+    []
+  )
+  const onClipOpenComments = useCallback(
+    (clipId: ClipId): void => commentUi.open({ kind: 'clip', id: clipId }),
+    []
+  )
+  const onClipContextMenu = useCallback(
+    (e: React.MouseEvent, clipId: ClipId, trackId: string): void => {
+      e.preventDefault()
+      e.stopPropagation()
+      // Right-clicking inside a multi-selection keeps it, so the menu can
+      // act on the whole set.
+      if (!selection.isClipSelected(clipId)) selection.select(clipId, trackId)
+      setColorMenu({ clipId, x: e.clientX, y: e.clientY })
+    },
+    []
+  )
+  const onClipOpenEditor = useCallback((clipId: ClipId): void => pianoRollUi.open(clipId), [])
+
+  // Cull to the viewport: only clips near the visible rectangle mount.
+  // Clips taking part in a drag always stay mounted so a fast drag out of
+  // view never unmounts the gesture's target mid-pointer-capture.
+  const visibleClips = useMemo(() => {
+    const OVERSCAN_X = 600
+    const OVERSCAN_Y = 300
+    const leftPx = view.left - OVERSCAN_X
+    const rightPx = view.left + view.w + OVERSCAN_X
+    const topPx = view.top - RULER_H - OVERSCAN_Y
+    const bottomPx = view.top - RULER_H + view.h + OVERSCAN_Y
+    const result: Array<(typeof state.clips)[string]> = []
+    for (const clip of Object.values(state.clips)) {
+      // Hidden (collapsed-folder) tracks render no clips.
+      const trackIndex = rowIndexOfTrack.get(clip.trackId)
+      if (trackIndex === undefined) continue
+      if (!dragPreviews.has(clip.id)) {
+        const laneTop = trackTops[trackIndex]
+        if (laneTop + laneH < topPx || laneTop > bottomPx) continue
+        const clipLeft = clip.start * pxPerTick
+        const clipRight = (clip.start + clip.duration) * pxPerTick
+        if (clipRight < leftPx || clipLeft > rightPx) continue
+      }
+      result.push(clip)
+    }
+    return result
+  }, [state.clips, rowIndexOfTrack, trackTops, laneH, pxPerTick, view, dragPreviews])
+
+  // Grid lines are drawn by a stylesheet rule off these two custom
+  // properties — ONE style write on the grid element instead of a fresh
+  // gradient object per lane per render (which forced the browser to
+  // re-rasterize an up-to-50k-px-wide layer on every lane every render).
+  const gridVars = {
+    '--bar-px': `${pxPerBar}px`,
+    '--beat-px': `${pxPerBeat}px`
+  } as React.CSSProperties
+
+  // Silent = own mute/solo state OR any ancestor folder-bus closed.
+  // One pass over the visible tracks, not one subtree walk per lane.
+  const silentTracks = useMemo(() => {
+    const silent = new Set<string>()
+    for (const track of tracks) {
+      if (!isTrackEffectivelyAudible(state, track.id)) silent.add(track.id)
+    }
+    return silent
+    // isTrackEffectivelyAudible reads only the tracks record.
+  }, [state.tracks, tracks])
+  const isSilent = (trackId: string): boolean => silentTracks.has(trackId)
 
   return (
     <div
@@ -1112,11 +1297,12 @@ export function TimelineView(): React.JSX.Element {
       onContextMenu={onEmptyContextMenu}
     >
       <div
-        className="timeline-grid"
+        className={`timeline-grid ${pxPerBeat < 10 ? 'timeline-grid-no-beats' : ''}`}
         ref={gridRef}
         style={{
           gridTemplateColumns: `${HEADER_W}px ${contentW}px`,
-          gridTemplateRows: rowTemplate
+          gridTemplateRows: rowTemplate,
+          ...gridVars
         }}
         onPointerMove={onPointerMove}
         onPointerUp={onPointerUp}
@@ -1201,7 +1387,7 @@ export function TimelineView(): React.JSX.Element {
             className={`lane ${isSilent(track.id) ? 'lane-muted' : ''} ${
               track.kind === 'folder' ? 'lane-folder' : ''
             }`}
-            style={{ gridRow: gridRowOfTrack[i], gridColumn: 2, ...laneBackground }}
+            style={{ gridRow: gridRowOfTrack[i], gridColumn: 2 }}
             onPointerDown={(e) => {
               // Shift anywhere on the timeline pins the edit marker, so you
               // don't have to reach for the ruler mid-take.
@@ -1250,7 +1436,7 @@ export function TimelineView(): React.JSX.Element {
               <div
                 key={`auto-${track.id}`}
                 className="auto-row"
-                style={{ gridRow: gridRowOfTrack[i] + 1, gridColumn: 2, ...laneBackground }}
+                style={{ gridRow: gridRowOfTrack[i] + 1, gridColumn: 2 }}
               >
                 <AutomationLane track={track} pxPerTick={pxPerTick} contentW={contentW} />
               </div>
@@ -1262,8 +1448,7 @@ export function TimelineView(): React.JSX.Element {
             className="clip-layer"
             style={{ gridRow: `2 / ${lastGridRow}`, gridColumn: 2 }}
           >
-            {Object.values(state.clips).map((clip) => {
-              // Hidden (collapsed-folder) tracks render no clips.
+            {visibleClips.map((clip) => {
               const trackIndex = rowIndexOfTrack.get(clip.trackId) ?? -1
               const track = state.tracks[clip.trackId]
               if (trackIndex === -1 || !track) return null
@@ -1281,23 +1466,12 @@ export function TimelineView(): React.JSX.Element {
                   laneTops={trackTops}
                   laneHeight={laneH}
                   commentCount={clipCommentCounts.get(clip.id) ?? 0}
-                  notes={notesByClip.get(clip.id) ?? []}
+                  notes={notesByClip.get(clip.id) ?? EMPTY_NOTES}
                   fadesEditable={track.kind !== 'folder' && track.frozenAssetId === null}
-                  onPointerDown={(e, mode) => beginDrag(e, clip.id, mode)}
-                  onOpenComments={() => commentUi.open({ kind: 'clip', id: clip.id })}
-                  onContextMenu={(e) => {
-                    e.preventDefault()
-                    e.stopPropagation()
-                    // Right-clicking inside a multi-selection keeps it, so
-                    // the menu can act on the whole set.
-                    if (!selection.isClipSelected(clip.id)) {
-                      selection.select(clip.id, clip.trackId)
-                    }
-                    setColorMenu({ clipId: clip.id, x: e.clientX, y: e.clientY })
-                  }}
-                  onOpenEditor={
-                    track.kind === 'midi' ? () => pianoRollUi.open(clip.id) : undefined
-                  }
+                  onPointerDown={onClipPointerDown}
+                  onOpenComments={onClipOpenComments}
+                  onContextMenu={onClipContextMenu}
+                  onOpenEditor={track.kind === 'midi' ? onClipOpenEditor : undefined}
                 />
               )
             })}
@@ -1407,7 +1581,7 @@ export function TimelineView(): React.JSX.Element {
             <RecordingRegions
               pxPerTick={pxPerTick}
               trackTops={trackTops}
-              trackIds={tracks.map((t) => t.id)}
+              trackIds={trackIdList}
               laneHeight={laneH}
             />
           </div>

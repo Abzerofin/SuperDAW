@@ -1,4 +1,4 @@
-import { strFromU8, strToU8, unzipSync, zipSync } from 'fflate'
+import { strFromU8, strToU8, unzip, zip } from 'fflate'
 import {
   assetPathInArchive,
   parseProjectJson,
@@ -28,7 +28,7 @@ import { collab } from '@/state/collab'
  * to a download link (save) and a file picker (open).
  */
 
-export function packProject(): Uint8Array {
+export async function packProject(): Promise<Uint8Array> {
   const state = projectStore.state
   const referenced = referencedAssetIds(state)
   const manifest: AssetManifestEntry[] = []
@@ -48,15 +48,28 @@ export function packProject(): Uint8Array {
   archive['project.json'] = strToU8(
     serializeProjectJson(state, manifest, projectStore.lineage, projectStore.opLog)
   )
-  // Audio payloads are already compressed formats; level 0 keeps saves fast.
-  return zipSync(archive, { level: 0 })
+  // Audio payloads are already compressed formats; level 0 keeps saves
+  // fast. The async zip runs in fflate's worker, so the per-entry CRC32
+  // pass over hundreds of MB of assets no longer freezes the UI on Ctrl+S.
+  return new Promise((resolve, reject) => {
+    zip(archive, { level: 0 }, (error, data) => {
+      if (error) reject(error)
+      else resolve(data)
+    })
+  })
 }
 
-function parseArchive(data: Uint8Array): {
+async function parseArchive(data: Uint8Array): Promise<{
   archive: Record<string, Uint8Array>
   parsed: ReturnType<typeof parseProjectJson>
-} {
-  const archive = unzipSync(data)
+}> {
+  // Worker-backed unzip for the same reason packProject uses zip().
+  const archive = await new Promise<Record<string, Uint8Array>>((resolve, reject) => {
+    unzip(data, (error, files) => {
+      if (error) reject(error)
+      else resolve(files)
+    })
+  })
   const projectJson = archive['project.json']
   if (!projectJson) throw new Error('Not a SuperDAW project file (missing project.json)')
   return { archive, parsed: parseProjectJson(strFromU8(projectJson)) }
@@ -83,27 +96,39 @@ async function decodeArchiveAssets(
   assets: AssetManifestEntry[],
   { skipExisting }: { skipExisting: boolean }
 ): Promise<DecodedAsset[]> {
-  const decoded: DecodedAsset[] = []
-  for (const entry of assets) {
-    if (skipExisting && assetStore.get(entry.id)) continue
-    const bytes = archive[assetPathInArchive(entry)]
-    if (!bytes) {
-      console.warn(`Project file is missing asset "${entry.name}" (${entry.id})`)
-      continue
-    }
-    let buffer: AudioBuffer | null = null
-    let failed = false
-    if (entry.kind === 'audio') {
-      try {
-        buffer = await audioEngine.decode(bytes.slice().buffer)
-      } catch (error) {
-        console.error(`Could not decode asset "${entry.name}"`, error)
-        failed = true
+  // decodeAudioData does its work off-thread, so decoding a few assets
+  // concurrently is nearly free wall-clock savings; the pool bound keeps
+  // peak memory in check for very large projects.
+  const CONCURRENCY = 4
+  const pending = assets.filter((entry) => !(skipExisting && assetStore.get(entry.id)))
+  const decoded: Array<DecodedAsset | null> = new Array(pending.length).fill(null)
+  let next = 0
+  const worker = async (): Promise<void> => {
+    while (next < pending.length) {
+      const index = next++
+      const entry = pending[index]
+      const bytes = archive[assetPathInArchive(entry)]
+      if (!bytes) {
+        console.warn(`Project file is missing asset "${entry.name}" (${entry.id})`)
+        continue
       }
+      let buffer: AudioBuffer | null = null
+      let failed = false
+      if (entry.kind === 'audio') {
+        try {
+          buffer = await audioEngine.decode(bytes.slice().buffer)
+        } catch (error) {
+          console.error(`Could not decode asset "${entry.name}"`, error)
+          failed = true
+        }
+      }
+      decoded[index] = { entry, bytes, buffer, failed }
     }
-    decoded.push({ entry, bytes, buffer, failed })
   }
-  return decoded
+  await Promise.all(
+    Array.from({ length: Math.min(CONCURRENCY, pending.length) }, () => worker())
+  )
+  return decoded.filter((d): d is DecodedAsset => d !== null)
 }
 
 function registerDecodedAssets(decoded: DecodedAsset[]): void {
@@ -113,7 +138,7 @@ function registerDecodedAssets(decoded: DecodedAsset[]): void {
 }
 
 export async function loadProjectBytes(data: Uint8Array, path: string | null): Promise<void> {
-  const { archive, parsed } = parseArchive(data)
+  const { archive, parsed } = await parseArchive(data)
   const { state, assets, lineage, opLog } = parsed
 
   // Decode first, swap second: until this resolves the current project is
@@ -155,7 +180,7 @@ function defaultFileName(): string {
  */
 export async function saveProject(forceDialog = false): Promise<void> {
   try {
-    const data = packProject()
+    const data = await packProject()
     const bridge = window.superdaw
     if (bridge) {
       const path = await bridge.saveProjectFile({
@@ -334,7 +359,7 @@ export async function openRecentProject(entry: RecentProject): Promise<void> {
  * is unsaved; Save writes the merged project with its merged history.
  */
 export async function mergeProjectBytes(data: Uint8Array): Promise<void> {
-  const { archive, parsed } = parseArchive(data)
+  const { archive, parsed } = await parseArchive(data)
   if (!parsed.lineage) {
     throw new Error('That file has no edit history to merge (saved before merge support).')
   }

@@ -34,6 +34,15 @@ export function applyClipFades(
     if (ramp.endSec <= anchorSec) continue
     const start = Math.max(ramp.startSec, anchorSec)
     const phase0 = (start - ramp.startSec) / (ramp.endSec - ramp.startSec)
-    gain.setValueCurveAtTime(fadeCurve(ramp.from, ramp.to, phase0), start, ramp.endSec - start)
+    try {
+      gain.setValueCurveAtTime(fadeCurve(ramp.from, ramp.to, phase0), start, ramp.endSec - start)
+    } catch {
+      // Some engines reject a curve that abuts other events (the spec
+      // allows an event exactly AT the curve start, but implementations
+      // have differed). A linear ramp is an acceptable stand-in — and
+      // infinitely better than letting the exception abort the whole
+      // scheduling pass and silence the rest of the song.
+      gain.linearRampToValueAtTime(ramp.to, ramp.endSec)
+    }
   }
 }

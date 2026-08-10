@@ -84,7 +84,11 @@ export class ClientSession implements SequencerLink {
   handleDisconnect(): void {
     this.sink = null
     for (const transfer of this.incoming.values()) {
-      if (transfer.haveBytes > 0) this.partials.set(transfer.meta.assetId, transfer.partialBytes)
+      // slice(), not the subarray view: the view would pin the ENTIRE
+      // full-size receive buffer in memory just to keep a small prefix —
+      // dropping early in a many-asset download retained the whole
+      // project's payload until reconnect.
+      if (transfer.haveBytes > 0) this.partials.set(transfer.meta.assetId, transfer.partialBytes.slice())
       transfer.abort()
     }
     this.incoming.clear()
@@ -223,7 +227,8 @@ export class ClientSession implements SequencerLink {
               this.events.onAssetComplete?.(message.meta, bytes)
             },
             onError: () => this.incoming.delete(message.transferId)
-          }
+          },
+          message.chunkBytes
         )
         this.incoming.set(message.transferId, transfer)
         return

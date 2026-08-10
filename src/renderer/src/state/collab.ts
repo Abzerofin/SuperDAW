@@ -127,6 +127,15 @@ class CollabStore {
   readonly assetProgress = new Map<string, { received: number; total: number }>()
   /** Files waiting on the user (Settings ▸ Collaboration, auto-download off). */
   readonly pendingDownloads = new Map<string, PendingDownload>()
+  /**
+   * Download scheduler: a join used to request EVERY missing asset at
+   * once, which shoved the whole project into the socket ahead of op
+   * traffic. At most a few run concurrently; the rest wait here.
+   */
+  private downloadQueue: string[] = []
+  private activeDownloads = new Set<string>()
+  private lastProgressAt = new Map<string, number>()
+  private downloadWatchdog: ReturnType<typeof setInterval> | null = null
 
   private active: CollabNetworking | null = null
   private relayNet: RelayNetworking | null = null
@@ -147,6 +156,15 @@ class CollabStore {
   private emit(): void {
     this.version++
     for (const listener of this.listeners) listener()
+  }
+
+  private progressEmitTimer: ReturnType<typeof setTimeout> | null = null
+  private scheduleProgressEmit(): void {
+    if (this.progressEmitTimer !== null) return
+    this.progressEmitTimer = setTimeout(() => {
+      this.progressEmitTimer = null
+      this.emit()
+    }, 100)
   }
 
   // ---------- identity helpers ----------
@@ -267,10 +285,16 @@ class CollabStore {
         },
         onAssetProgress: (assetId, received, total) => {
           this.assetProgress.set(assetId, { received, total })
-          this.emit()
+          this.lastProgressAt.set(assetId, Date.now())
+          // Chunks arrive at up to hundreds per second; re-rendering every
+          // collab subscriber per chunk would swamp the UI thread exactly
+          // while the user is trying to edit. One emit per ~100 ms reads
+          // identically on a progress bar.
+          this.scheduleProgressEmit()
         },
         onAssetComplete: (meta, bytes) => {
           this.assetProgress.delete(meta.assetId)
+          this.downloadSettled(meta.assetId)
           void this.receiveAsset(meta, bytes)
         },
         onSessionEnded: (reason) => {
@@ -360,6 +384,7 @@ class CollabStore {
     this.cursors.clear()
     this.assetProgress.clear()
     this.pendingDownloads.clear()
+    this.clearDownloadState()
     this.reconnecting = false
     this.hostAway = false
   }
@@ -422,12 +447,76 @@ class CollabStore {
 
   // ---------- assets ----------
 
+  /** How many downloads run at once; the rest queue in arrival order. */
+  private static readonly MAX_CONCURRENT_DOWNLOADS = 3
+  /** No progress for this long = assume the transfer died; free its slot. */
+  private static readonly DOWNLOAD_STALL_MS = 20_000
+
+  private scheduleDownload(assetId: string): void {
+    if (assetStore.get(assetId)) return
+    if (this.activeDownloads.has(assetId) || this.downloadQueue.includes(assetId)) return
+    if (this.activeDownloads.size < CollabStore.MAX_CONCURRENT_DOWNLOADS) {
+      this.activeDownloads.add(assetId)
+      this.lastProgressAt.set(assetId, Date.now())
+      this.active?.requestAsset(assetId)
+      this.ensureDownloadWatchdog()
+    } else {
+      this.downloadQueue.push(assetId)
+    }
+  }
+
+  private downloadSettled(assetId: string): void {
+    this.activeDownloads.delete(assetId)
+    this.lastProgressAt.delete(assetId)
+    while (
+      this.activeDownloads.size < CollabStore.MAX_CONCURRENT_DOWNLOADS &&
+      this.downloadQueue.length > 0
+    ) {
+      const next = this.downloadQueue.shift()!
+      if (assetStore.get(next)) continue
+      this.activeDownloads.add(next)
+      this.lastProgressAt.set(next, Date.now())
+      this.active?.requestAsset(next)
+    }
+    if (this.activeDownloads.size > 0) this.ensureDownloadWatchdog()
+  }
+
+  /**
+   * A transfer that stops making progress must not pin its slot forever
+   * (that would silently stall the whole queue). Freeing the slot is safe:
+   * if the stalled transfer later revives, receiveAsset dedupes.
+   */
+  private ensureDownloadWatchdog(): void {
+    if (this.downloadWatchdog !== null) return
+    this.downloadWatchdog = setInterval(() => {
+      const now = Date.now()
+      for (const assetId of [...this.activeDownloads]) {
+        const last = this.lastProgressAt.get(assetId) ?? 0
+        if (now - last > CollabStore.DOWNLOAD_STALL_MS) this.downloadSettled(assetId)
+      }
+      if (this.activeDownloads.size === 0 && this.downloadWatchdog !== null) {
+        clearInterval(this.downloadWatchdog)
+        this.downloadWatchdog = null
+      }
+    }, 5000)
+  }
+
+  private clearDownloadState(): void {
+    this.downloadQueue.length = 0
+    this.activeDownloads.clear()
+    this.lastProgressAt.clear()
+    if (this.downloadWatchdog !== null) {
+      clearInterval(this.downloadWatchdog)
+      this.downloadWatchdog = null
+    }
+  }
+
   private requestMissingAssets(state: ProjectState): void {
     let queued = false
     for (const assetId of referencedAssetIds(state)) {
       if (assetStore.get(assetId)) continue
       if (preferences.autoDownloadAssets) {
-        this.active?.requestAsset(assetId)
+        this.scheduleDownload(assetId)
         continue
       }
       this.pendingDownloads.set(assetId, {
@@ -443,7 +532,7 @@ class CollabStore {
   /** User said go for one queued file. */
   downloadPending(assetId: string): void {
     if (!this.pendingDownloads.delete(assetId)) return
-    this.active?.requestAsset(assetId)
+    this.scheduleDownload(assetId)
     this.emit()
   }
 
@@ -456,14 +545,14 @@ class CollabStore {
     if (assetStore.get(assetId)) return
     if (this.assetProgress.has(assetId)) return // already on its way
     this.pendingDownloads.delete(assetId)
-    this.active?.requestAsset(assetId)
+    this.scheduleDownload(assetId)
     this.emit()
   }
 
   downloadAllPending(): void {
     for (const assetId of [...this.pendingDownloads.keys()]) {
       this.pendingDownloads.delete(assetId)
-      this.active?.requestAsset(assetId)
+      this.scheduleDownload(assetId)
     }
     this.emit()
   }

@@ -1,16 +1,19 @@
-import { useState } from 'react'
+import { memo, useState, useSyncExternalStore } from 'react'
 import type { AutomationPoint, Track } from '@core/model/types'
 import { automationOf, pluginsOfTrack } from '@core/model/types'
 import { denormalizeParam, normalizeParam, type ParamDef } from '@core/model/effects'
 import { paramDefsOf } from '@core/plugins/builtin'
 import { newId } from '@core/model/ids'
 import { projectStore } from '@/state/projectStore'
-import { useProjectState } from '@/state/hooks'
-import { automationUi, useAutomationUi, type AutomationTarget } from '@/state/automationUi'
+import { arrayShallowEqual, useProjectSelector } from '@/state/hooks'
+import { automationUi, type AutomationTarget } from '@/state/automationUi'
 import { capturePointer } from '@/lib/pointer'
 import { AUTO_H } from './geometry'
 
 const PAD = 5 // px inset so points at value 0/1 stay grabbable
+
+/** Stable fallback target when a lane's chosen insert has been removed. */
+const DEAD_TARGET: AutomationTarget = { param: 'volume' }
 
 interface Props {
   track: Track
@@ -25,19 +28,24 @@ interface Props {
  * a point, drag moves it (one op on release), double-click a point
  * deletes it.
  */
-export function AutomationLane({ track, pxPerTick, contentW }: Props): React.JSX.Element {
-  const state = useProjectState()
-  const stored = useAutomationUi().targetOf(track.id)
+export const AutomationLane = memo(function AutomationLane({
+  track,
+  pxPerTick,
+  contentW
+}: Props): React.JSX.Element {
+  const stored = useSyncExternalStore(automationUi.subscribe, () =>
+    automationUi.targetOf(track.id)
+  )
+  const storedInstance = useProjectSelector((s) =>
+    stored.instanceId !== undefined ? s.plugins[stored.instanceId] : undefined
+  )
   // The chosen insert may have been removed (its points cascade away with
   // it) — fall back to the track's own volume rather than a dead lane.
   const target: AutomationTarget =
-    stored.instanceId !== undefined && !state.plugins[stored.instanceId]
-      ? { param: 'volume' }
-      : stored
+    stored.instanceId !== undefined && !storedInstance ? DEAD_TARGET : stored
+  const targetInstance = target.instanceId !== undefined ? storedInstance : undefined
   const targetDef: ParamDef | undefined =
-    target.instanceId !== undefined
-      ? paramDefsOf(state.plugins[target.instanceId].descriptor)?.[target.param]
-      : undefined
+    targetInstance !== undefined ? paramDefsOf(targetInstance.descriptor)?.[target.param] : undefined
   const [drag, setDrag] = useState<{
     pointId: string
     originX: number
@@ -48,7 +56,9 @@ export function AutomationLane({ track, pxPerTick, contentW }: Props): React.JSX
     value: number
   } | null>(null)
 
-  const inserts = pluginsOfTrack(state, track.id)
+  // Recomputed only when a plugin op lands; identity held via shallow
+  // equality so unrelated ops leave this lane's render untouched.
+  const inserts = useProjectSelector((s) => pluginsOfTrack(s, track.id), arrayShallowEqual)
 
   /** Neutral value when a curve has no points. */
   const restingValue = (): number => {
@@ -64,7 +74,11 @@ export function AutomationLane({ track, pxPerTick, contentW }: Props): React.JSX
     return `${Math.round(Math.abs(pan) * 100)}${pan < 0 ? 'L' : 'R'}`
   }
 
-  const points = automationOf(state, track.id, target.param, target.instanceId).map((p) =>
+  const storedPoints = useProjectSelector(
+    (s) => automationOf(s, track.id, target.param, target.instanceId),
+    arrayShallowEqual
+  )
+  const points = storedPoints.map((p) =>
     drag && p.id === drag.pointId ? { ...p, ticks: drag.ticks, value: drag.value } : p
   )
   points.sort((a, b) => a.ticks - b.ticks)
@@ -181,8 +195,8 @@ export function AutomationLane({ track, pxPerTick, contentW }: Props): React.JSX
             }}
           >
             <option value="">
-              {target.instanceId !== undefined && targetDef
-                ? `${state.plugins[target.instanceId].descriptor.name} · ${targetDef.label}`
+              {targetInstance !== undefined && targetDef
+                ? `${targetInstance.descriptor.name} · ${targetDef.label}`
                 : 'FX param…'}
             </option>
             {inserts.map((instance) => {
@@ -222,4 +236,4 @@ export function AutomationLane({ track, pxPerTick, contentW }: Props): React.JSX
       ))}
     </div>
   )
-}
+})

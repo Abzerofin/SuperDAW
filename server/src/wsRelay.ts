@@ -11,7 +11,15 @@ import type { Conn } from '../../src/core/relay/sessionRegistry.ts'
 
 const SWEEP_INTERVAL_MS = 5_000
 const SOCKET_SILENCE_LIMIT_MS = 60_000
-const MAX_FRAME_BYTES = 512 * 1024 // one asset chunk (base64) + headroom
+/**
+ * Big enough for the largest legitimate frame: the host's `welcome`
+ * carries the whole project JSON (automation, notes, chat, plugin state
+ * blobs), which on a real project easily passes the old 512 KiB cap. A
+ * too-small cap here was catastrophic, not graceful: ws kills the HOST's
+ * socket with 1009, the host auto-reconnects, re-sends the same welcome,
+ * and the session dies in an invisible reconnect loop.
+ */
+const MAX_FRAME_BYTES = 16 * 1024 * 1024
 
 export interface WsRelayHandle {
   readonly core: RelayCore
@@ -20,9 +28,20 @@ export interface WsRelayHandle {
 
 export function startWsRelay(core: RelayCore, port: number): Promise<WsRelayHandle> {
   return new Promise((resolve, reject) => {
-    const wss = new WebSocketServer({ port, maxPayload: MAX_FRAME_BYTES }, () => {
-      resolve({ core, close })
-    })
+    const wss = new WebSocketServer(
+      {
+        port,
+        maxPayload: MAX_FRAME_BYTES,
+        // Ops, presence, chat and the welcome snapshot are highly
+        // repetitive JSON — deflate cuts them severalfold. Asset chunks
+        // are base64 of already-compressed audio; they gain little but
+        // cost little, and per-message opt-out isn't available here.
+        perMessageDeflate: { threshold: 1024 }
+      },
+      () => {
+        resolve({ core, close })
+      }
+    )
     wss.on('error', reject)
 
     const conns = new Map<WebSocket, Conn>()

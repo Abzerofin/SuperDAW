@@ -4,6 +4,7 @@ import { MAX_GAIN } from '@core/model/types'
 import { projectStore } from '@/state/projectStore'
 import { audioEngine } from '@/state/audioInstance'
 import { capturePointer } from '@/lib/pointer'
+import { meterBus } from '@/lib/meterBus'
 import { parseDb, parsePan } from '@/lib/valueParse'
 import { EditableValue } from '../controls/EditableValue'
 import { Knob } from '../mixer/Knob'
@@ -53,16 +54,18 @@ function VolumeSlider({ track }: { track: Track }): React.JSX.Element {
   const peakRef = useRef<HTMLDivElement>(null)
   const shown = dragGain ?? track.volume
 
-  // Live level, painted straight onto the DOM from a rAF loop so metering
-  // never re-renders React (one repaint per frame, whatever the track count).
+  // Live level, painted straight onto the DOM so metering never re-renders
+  // React. Registered with the shared meter bus: ONE rAF loop drives every
+  // meter in the app, and it sleeps entirely while nothing is audible.
   useEffect(() => {
-    let raf = 0
     let level = 0
     let flashUntil = 0
     let peak = 0
     let peakUntil = 0
-    const draw = (): void => {
-      const now = performance.now()
+    // The header element never changes for the life of this row — resolve
+    // it once instead of an ancestor walk per animation frame.
+    const header = meterRef.current?.closest('.track-header') ?? null
+    const draw = (now: number): boolean => {
       const raw = audioEngine.trackLevel(track.id)
       // Decay toward zero, but snap to it: an asymptote would otherwise keep
       // writing denormal widths into the DOM forever on a silent track.
@@ -86,14 +89,13 @@ function VolumeSlider({ track }: { track: Track }): React.JSX.Element {
       // Peaking (the analyser clamps at 1.0): flash the whole header red,
       // held briefly so a single-sample spike is still visible.
       if (raw >= 0.999) flashUntil = now + 350
-      const header = meterRef.current?.closest('.track-header')
       header?.classList.toggle('track-peak-flash', now < flashUntil)
-      raf = requestAnimationFrame(draw)
+      return level > 0 || peak > 0 || now < flashUntil
     }
-    draw()
+    const unregister = meterBus.register(draw)
     return () => {
-      cancelAnimationFrame(raf)
-      meterRef.current?.closest('.track-header')?.classList.remove('track-peak-flash')
+      unregister()
+      header?.classList.remove('track-peak-flash')
     }
   }, [track.id])
 

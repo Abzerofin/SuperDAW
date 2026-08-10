@@ -74,6 +74,11 @@ class TrackInputStore {
     return this.configOf(trackId).monitor
   }
 
+  /** Any live input tap at all — drives meter liveness while stopped. */
+  get anyMonitoring(): boolean {
+    return this.taps.size > 0
+  }
+
   private async load(): Promise<void> {
     const stored = await appStorageGet<Record<string, TrackInputConfig>>(STORAGE_KEY)
     if (stored) {

@@ -1,6 +1,6 @@
 import { Mp3Encoder } from '@breezystack/lamejs'
 import type { TrackId } from '@core/model/types'
-import { encodeWavPcm16 } from '@audio/wav'
+import { encodeWavPcm16Async } from '@audio/wav'
 import { renderTrackChannels } from '@audio/render'
 import { projectStore } from '@/state/projectStore'
 import { assetStore } from '@/state/audioInstance'
@@ -83,7 +83,7 @@ export async function exportTrackAudio(trackId: TrackId, format: ExportFormat): 
   if (!mixed) return false
   const data =
     format === 'wav'
-      ? encodeWavPcm16(mixed.channels, mixed.sampleRate)
+      ? await encodeWavPcm16Async(mixed.channels, mixed.sampleRate)
       : encodeMp3(mixed.channels, mixed.sampleRate)
   const base = track.name.trim() || 'Track'
   await saveBytes(data, `${base}.${format}`, format)

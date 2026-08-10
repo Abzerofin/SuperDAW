@@ -168,7 +168,9 @@ suite('chunked asset download (host → guest)', () => {
 
   test('sender never puts more than the window in flight before credits', () => {
     const net = new TransferNet()
-    const data = bytesOf(ASSET_CHUNK_BYTES * 10)
+    // Sized relative to the window so the asset always exceeds it — the
+    // assertion below is about flow control, not about the window's value.
+    const data = bytesOf(ASSET_CHUNK_BYTES * (TRANSFER_WINDOW_CHUNKS + 6))
     net.hostAssets.add(meta('a1', data.length), data)
 
     const g = net.addGuest('alice')
