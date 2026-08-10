@@ -7,6 +7,8 @@ import { audioEngine } from '@/state/audioInstance'
 import { panels } from '@/state/panels'
 import { selection } from '@/state/selection'
 import { capturePointer } from '@/lib/pointer'
+import { parseDb, parsePan } from '@/lib/valueParse'
+import { EditableValue } from '../controls/EditableValue'
 import { Knob } from './Knob'
 
 function panLabel(pan: number): string {
@@ -62,7 +64,8 @@ function TrackStrip({ track }: { track: Track }): React.JSX.Element {
         max={1}
         defaultValue={0}
         format={panLabel}
-        title="Pan · drag vertically (Shift = fine) · double-click for center"
+        parse={parsePan}
+        title="Pan · drag vertically (Shift = fine) · double-click for center · click the value to type it"
         onPreview={(pan) => audioEngine.previewTrackPan(track.id, pan)}
         onCommit={(pan) => projectStore.dispatch({ type: 'track/setPan', trackId: track.id, pan })}
       />
@@ -122,18 +125,22 @@ function Fader({
   onCommit: (gain: number) => void
 }): React.JSX.Element {
   const [dragGain, setDragGain] = useState<number | null>(null)
-  const origin = useRef({ y: 0, gain: 0 })
+  const lastY = useRef(0)
   const shown = dragGain ?? gain
 
   const begin = (e: React.PointerEvent): void => {
     if (e.button !== 0) return
     capturePointer(e)
-    origin.current = { y: e.clientY, gain }
+    lastY.current = e.clientY
     setDragGain(gain)
   }
   const move = (e: React.PointerEvent): void => {
     if (dragGain === null) return
-    const next = clamp(origin.current.gain + ((origin.current.y - e.clientY) / FADER_H) * MAX_GAIN)
+    // Incremental so Shift-fine can engage/release mid-drag.
+    const dy = lastY.current - e.clientY
+    lastY.current = e.clientY
+    const scale = e.shiftKey ? 0.15 : 1
+    const next = clamp(dragGain + (dy / FADER_H) * MAX_GAIN * scale)
     setDragGain(next)
     onPreview(next)
   }
@@ -151,12 +158,18 @@ function Fader({
         onPointerMove={move}
         onPointerUp={end}
         onDoubleClick={() => onCommit(1)}
-        title="Drag to set volume · double-click for 0 dB"
+        title="Drag to set volume (Shift = fine) · double-click for 0 dB"
       >
         <div className="fader-fill" style={{ height: `${(shown / MAX_GAIN) * 100}%` }} />
         <div className="fader-thumb" style={{ bottom: `${(shown / MAX_GAIN) * 100}%` }} />
       </div>
-      <div className="fader-db mono">{gainToDb(shown)}</div>
+      <EditableValue
+        className="fader-db"
+        text={gainToDb(shown)}
+        title="Volume in dB — click to type it"
+        parse={parseDb}
+        onCommit={onCommit}
+      />
     </div>
   )
 }

@@ -1,13 +1,19 @@
-import { useState } from 'react'
+import { useRef, useState } from 'react'
 import type { ParamDef } from '@core/model/effects'
 import { capturePointer } from '@/lib/pointer'
+import { parseNumberIn } from '@/lib/valueParse'
+import { EditableValue } from '../controls/EditableValue'
 
 const SLIDER_W = 116
+/** Shift slows the drag to this fraction — fine adjustment. */
+const FINE = 0.15
 
 /**
  * The generic plugin parameter control: a horizontal drag bar. Previews
  * per pointermove (through the engine, no ops) and commits ONE op on
- * release via onCommit. Double-click resets to the param's default.
+ * release via onCommit. Double-click resets to the param's default;
+ * Shift while dragging is fine adjustment; clicking the readout types an
+ * exact value.
  */
 export function ParamSlider({
   def,
@@ -21,8 +27,11 @@ export function ParamSlider({
   onCommit: (value: number) => void
 }): React.JSX.Element {
   const [dragValue, setDragValue] = useState<number | null>(null)
+  const lastX = useRef(0)
   const shown = dragValue ?? value
   const fraction = (shown - def.min) / (def.max - def.min)
+
+  const clamp = (v: number): number => Math.min(def.max, Math.max(def.min, v))
 
   const valueAt = (e: React.PointerEvent): number => {
     const rect = (e.currentTarget as HTMLElement).getBoundingClientRect()
@@ -39,13 +48,20 @@ export function ParamSlider({
         onPointerDown={(e) => {
           if (e.button !== 0) return
           capturePointer(e)
-          const v = valueAt(e)
+          lastX.current = e.clientX
+          // Shift means "adjust from where it is", so the grab must not jump.
+          const v = e.shiftKey ? value : valueAt(e)
           setDragValue(v)
           onPreview?.(v)
         }}
         onPointerMove={(e) => {
           if (dragValue === null) return
-          const v = valueAt(e)
+          // Incremental, so Shift can engage/release mid-drag: each step
+          // integrates the pointer delta at the current fineness.
+          const dx = e.clientX - lastX.current
+          lastX.current = e.clientX
+          const scale = e.shiftKey ? FINE : 1
+          const v = clamp(dragValue + (dx / SLIDER_W) * (def.max - def.min) * scale)
           setDragValue(v)
           onPreview?.(v)
         }}
@@ -55,14 +71,16 @@ export function ParamSlider({
           setDragValue(null)
         }}
         onDoubleClick={() => onCommit(def.default)}
-        title="Drag to adjust · double-click to reset"
+        title="Drag to adjust (Shift = fine) · double-click to reset"
       >
         <div className="fx-slider-fill" style={{ width: `${fraction * 100}%` }} />
       </div>
-      <span className="fx-param-value mono">
-        {shown.toFixed(def.digits)}
-        {def.unit}
-      </span>
+      <EditableValue
+        className="fx-param-value"
+        text={`${shown.toFixed(def.digits)}${def.unit}`}
+        parse={parseNumberIn(def.min, def.max)}
+        onCommit={onCommit}
+      />
     </div>
   )
 }

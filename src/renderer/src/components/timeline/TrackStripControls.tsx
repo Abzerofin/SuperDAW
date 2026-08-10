@@ -4,6 +4,8 @@ import { MAX_GAIN } from '@core/model/types'
 import { projectStore } from '@/state/projectStore'
 import { audioEngine } from '@/state/audioInstance'
 import { capturePointer } from '@/lib/pointer'
+import { parseDb, parsePan } from '@/lib/valueParse'
+import { EditableValue } from '../controls/EditableValue'
 import { Knob } from '../mixer/Knob'
 
 /**
@@ -34,7 +36,8 @@ export function TrackStripControls({ track }: { track: Track }): React.JSX.Eleme
         defaultValue={0}
         size={26}
         format={panLabel}
-        title="Pan · drag vertically (Shift = fine) · double-click for centre"
+        parse={parsePan}
+        title="Pan · drag vertically (Shift = fine) · double-click for centre · click the value to type it"
         onPreview={(pan) => audioEngine.previewTrackPan(track.id, pan)}
         onCommit={(pan) => projectStore.dispatch({ type: 'track/setPan', trackId: track.id, pan })}
       />
@@ -94,6 +97,8 @@ function VolumeSlider({ track }: { track: Track }): React.JSX.Element {
     }
   }, [track.id])
 
+  const lastX = useRef(0)
+
   const gainAt = (clientX: number): number => {
     const rect = barRef.current?.getBoundingClientRect()
     if (!rect) return track.volume
@@ -105,13 +110,23 @@ function VolumeSlider({ track }: { track: Track }): React.JSX.Element {
     if (e.button !== 0) return
     e.stopPropagation() // don't start a track-reorder drag
     capturePointer(e)
-    const next = gainAt(e.clientX)
+    lastX.current = e.clientX
+    // Shift means "adjust from where it is": no jump to the click point.
+    const next = e.shiftKey ? track.volume : gainAt(e.clientX)
     setDragGain(next)
     audioEngine.previewTrackVolume(track.id, next)
   }
   const move = (e: React.PointerEvent): void => {
     if (dragGain === null) return
-    const next = gainAt(e.clientX)
+    // Incremental so Shift-fine can engage/release mid-drag.
+    const dx = e.clientX - lastX.current
+    lastX.current = e.clientX
+    const width = barRef.current?.getBoundingClientRect().width ?? 1
+    const scale = e.shiftKey ? 0.15 : 1
+    const next = Math.min(
+      MAX_GAIN,
+      Math.max(0, dragGain + (dx / width) * MAX_GAIN * scale)
+    )
     setDragGain(next)
     audioEngine.previewTrackVolume(track.id, next)
   }
@@ -128,7 +143,7 @@ function VolumeSlider({ track }: { track: Track }): React.JSX.Element {
       <div
         className="track-vol-bar"
         ref={barRef}
-        title="Volume · drag · double-click for 0 dB"
+        title="Volume · drag (Shift = fine) · double-click for 0 dB"
         onPointerDown={begin}
         onPointerMove={move}
         onPointerUp={end}
@@ -142,7 +157,15 @@ function VolumeSlider({ track }: { track: Track }): React.JSX.Element {
         <div className="track-vol-fill" style={{ width: `${(shown / MAX_GAIN) * 100}%` }} />
         <div className="track-vol-thumb" style={{ left: `${(shown / MAX_GAIN) * 100}%` }} />
       </div>
-      <span className="track-vol-db mono">{gainToDb(shown)}</span>
+      <EditableValue
+        className="track-vol-db"
+        text={gainToDb(shown)}
+        title="Volume in dB — click to type it"
+        parse={parseDb}
+        onCommit={(volume) =>
+          projectStore.dispatch({ type: 'track/setVolume', trackId: track.id, volume })
+        }
+      />
     </div>
   )
 }

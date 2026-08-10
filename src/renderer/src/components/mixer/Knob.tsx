@@ -1,5 +1,7 @@
 import { useRef, useState } from 'react'
 import { capturePointer } from '@/lib/pointer'
+import { parseNumberIn } from '@/lib/valueParse'
+import { EditableValue } from '../controls/EditableValue'
 
 /**
  * A standard continuous rotary knob: 270° sweep, vertical drag (hold Shift
@@ -20,6 +22,8 @@ interface Props {
   defaultValue: number
   /** Short readout under the knob, e.g. "35L" or "C". */
   format: (value: number) => string
+  /** Typed-entry parser for the readout; defaults to a plain number. */
+  parse?: (raw: string) => number | null
   title: string
   /** Rendered width/height in px (default 36). The dial scales with it. */
   size?: number
@@ -47,6 +51,7 @@ export function Knob({
   max,
   defaultValue,
   format,
+  parse,
   title,
   size = 36,
   onPreview,
@@ -103,7 +108,12 @@ export function Knob({
         <circle className="knob-body" cx={18} cy={18} r={9.5} />
         <line className="knob-pointer" x1={18} y1={18} x2={tip.x} y2={tip.y} />
       </svg>
-      <div className="knob-value mono">{format(shown)}</div>
+      <EditableValue
+        className="knob-value"
+        text={format(shown)}
+        parse={parse ?? parseNumberIn(min, max)}
+        onCommit={onCommit}
+      />
     </div>
   )
 }

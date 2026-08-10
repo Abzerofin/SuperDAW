@@ -9,6 +9,8 @@ import { transport } from '@/state/transport'
 import { pianoRollUi } from '@/state/pianoRollUi'
 import { capturePointer } from '@/lib/pointer'
 import { humanizeNotes, quantizeNotes } from '@/lib/noteActions'
+import { parseNumberIn } from '@/lib/valueParse'
+import { EditableValue } from '../controls/EditableValue'
 
 const ROW_H = 12
 const KEYS_W = 56
@@ -758,7 +760,18 @@ function VelocityControl({ note }: { note: Note }): React.JSX.Element {
         onKeyUp={commit}
         onBlur={commit}
       />
-      <span className="mono proll-vel-value">{preview ?? note.velocity}</span>
+      <EditableValue
+        className="proll-vel-value"
+        text={String(preview ?? note.velocity)}
+        parse={parseNumberIn(1, 127)}
+        onCommit={(velocity) =>
+          projectStore.dispatch({
+            type: 'note/setVelocity',
+            noteId: note.id,
+            velocity: Math.round(velocity)
+          })
+        }
+      />
     </span>
   )
 }

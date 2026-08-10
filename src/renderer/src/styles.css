@@ -410,6 +410,27 @@ body.middle-panning * {
   pointer-events: none;
 }
 
+/* Click-to-type numeric readouts (knobs, sliders, faders, velocity). */
+.value-editable {
+  cursor: text;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+}
+
+.value-editable:hover {
+  color: var(--text);
+  text-decoration: underline dotted;
+}
+
+.value-input {
+  width: 44px;
+  padding: 0 2px;
+  font-size: 10px;
+  background: var(--bg-0);
+  border: 1px solid var(--accent);
+  border-radius: 2px;
+  color: var(--text);
+}
+
 /* Floating per-item history panel (opened from menus and FX cards). */
 .history-popover {
   position: fixed;
