@@ -1,4 +1,4 @@
-SuperDAW 2.0.0 — the workflow release. Everything below rides the same op pipeline as always: undoable, synced to collaborators, saved in your `.sdaw` files.
+SuperDAW 0.2.0 — the workflow release. Everything below rides the same op pipeline as always: undoable, synced to collaborators, saved in your `.sdaw` files.
 
 ## Editing & timeline
 
