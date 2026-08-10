@@ -277,21 +277,32 @@ export async function importFilesAsNewTracks(files: readonly File[]): Promise<vo
   reportFailedImports(failed)
 }
 
-/**
- * Open the OS file picker for audio/MIDI and import the choice as new
- * tracks. Uses the Electron bridge when present so the dialog is native;
- * falls back to a hidden <input> in the browser build.
- */
-export async function browseForMediaFiles(): Promise<void> {
+const MEDIA_PICKER_ACCEPT = 'audio/*,.wav,.mp3,.flac,.ogg,.m4a,.aac,.aif,.aiff,.mid,.midi'
+
+/** Hidden-input OS file picker (works identically in Electron and browser). */
+function pickMediaFiles(onPicked: (files: File[]) => void): void {
   const input = document.createElement('input')
   input.type = 'file'
   input.multiple = true
-  input.accept = 'audio/*,.wav,.mp3,.flac,.ogg,.m4a,.aac,.aif,.aiff,.mid,.midi'
+  input.accept = MEDIA_PICKER_ACCEPT
   input.onchange = () => {
     const files = input.files
-    if (files && files.length > 0) void importFilesAsNewTracks(Array.from(files))
+    if (files && files.length > 0) onPicked(Array.from(files))
   }
   input.click()
+}
+
+/** Open the OS file picker and import the choice as new tracks. */
+export async function browseForMediaFiles(): Promise<void> {
+  pickMediaFiles((files) => void importFilesAsNewTracks(files))
+}
+
+/**
+ * Open the OS file picker and import the choice into a File Bay folder —
+ * the click path to exactly what dropping files on the bay does.
+ */
+export function browseForBayFiles(folderId: FileNodeId | null): void {
+  pickMediaFiles((files) => void importFilesToBay(files, folderId))
 }
 
 /** Payload for dragging an asset out of the File Bay (onto a track). */

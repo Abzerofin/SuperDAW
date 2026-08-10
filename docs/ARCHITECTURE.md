@@ -221,7 +221,12 @@ The bay's folder/asset structure lives IN the project document
 edit like any other, driven by `file/*` ops (subtree deletes restore in
 one undo; cycle-creating moves are rejected in the reducer). Bay entries
 reference assets by id; deleting an entry never touches clips or asset
-data. Which folder a user is browsing is ephemeral UI state.
+data. Which folder a user is browsing is ephemeral UI state. Import is
+drag-drop OR the OS picker: an Import… toolbar button, a clickable empty
+state, right-click menus on tiles/empty space, and a context menu on the
+Files dock tab itself — the tab menu drives the bay's own actions through
+a one-shot intent channel (`state/bayUi.ts`), so both entry points run
+one definition.
 
 Projects save as a single `.sdaw` file: a ZIP of `project.json` (document
 + asset manifest, `src/core/persistence/format.ts` — pure, validated,

@@ -1,11 +1,19 @@
 import { useEffect, useRef, useState } from 'react'
+import { createPortal } from 'react-dom'
 import type { FileNode, FileNodeId } from '@core/model/types'
 import { childrenOf } from '@core/model/types'
 import { newId } from '@core/model/ids'
 import { projectStore } from '@/state/projectStore'
 import { useProjectState } from '@/state/hooks'
 import { assetStore } from '@/state/audioInstance'
-import { BAY_DRAG_MIME, importFilesToBay, type BayDragPayload } from '@/lib/importAudio'
+import { bayUi } from '@/state/bayUi'
+import {
+  BAY_DRAG_MIME,
+  browseForBayFiles,
+  importFilesToBay,
+  type BayDragPayload
+} from '@/lib/importAudio'
+import { contextMenuStyle } from '@/lib/contextMenu'
 import { useTheme } from '@/state/theme'
 
 /** Internal drag type for reorganizing nodes inside the bay. */
@@ -21,6 +29,10 @@ export function FileBay(): React.JSX.Element {
   const [folderId, setFolderId] = useState<FileNodeId | null>(null)
   const [selectedId, setSelectedId] = useState<FileNodeId | null>(null)
   const [renamingId, setRenamingId] = useState<FileNodeId | null>(null)
+  /** Right-click menu: over a node, or over empty space (nodeId null). */
+  const [ctxMenu, setCtxMenu] = useState<{ x: number; y: number; nodeId: FileNodeId | null } | null>(
+    null
+  )
 
   // If the folder being viewed disappears (deleted, undone), fall back to root.
   useEffect(() => {
@@ -29,6 +41,13 @@ export function FileBay(): React.JSX.Element {
   useEffect(() => {
     if (selectedId !== null && !state.files[selectedId]) setSelectedId(null)
   }, [state.files, selectedId])
+
+  useEffect(() => {
+    if (!ctxMenu) return
+    const close = (): void => setCtxMenu(null)
+    window.addEventListener('pointerdown', close)
+    return () => window.removeEventListener('pointerdown', close)
+  }, [ctxMenu])
 
   const items = childrenOf(state, folderId).sort((a, b) => {
     if ((a.kind === 'folder') !== (b.kind === 'folder')) return a.kind === 'folder' ? -1 : 1
@@ -78,11 +97,45 @@ export function FileBay(): React.JSX.Element {
     setRenamingId(id)
   }
 
-  const deleteSelected = (): void => {
-    if (!selectedId) return
-    projectStore.dispatch({ type: 'file/delete', nodeIds: [selectedId] })
-    setSelectedId(null)
+  const deleteNode = (nodeId: FileNodeId): void => {
+    projectStore.dispatch({ type: 'file/delete', nodeIds: [nodeId] })
+    if (selectedId === nodeId) setSelectedId(null)
   }
+
+  const deleteSelected = (): void => {
+    if (selectedId) deleteNode(selectedId)
+  }
+
+  const importHere = (): void => browseForBayFiles(folderId)
+
+  // The dock tab's context menu sends the same actions from outside the
+  // bay (one definition, two entry points). Refs so the one subscription
+  // always sees the current folder.
+  const importRef = useRef(importHere)
+  importRef.current = importHere
+  const createFolderRef = useRef(createFolder)
+  createFolderRef.current = createFolder
+  useEffect(
+    () =>
+      bayUi.subscribe((intent) => {
+        if (intent === 'import') importRef.current()
+        else createFolderRef.current()
+      }),
+    []
+  )
+
+  const menuItem = (label: string, action: () => void): React.JSX.Element => (
+    <button
+      key={label}
+      className="menu-item"
+      onClick={() => {
+        setCtxMenu(null)
+        action()
+      }}
+    >
+      <span>{label}</span>
+    </button>
+  )
 
   return (
     <div
@@ -96,6 +149,14 @@ export function FileBay(): React.JSX.Element {
           deleteSelected()
         }
         if (e.key === 'F2' && selectedId) setRenamingId(selectedId)
+      }}
+      // On the ROOT, not the grid: every part of the panel — toolbar gaps
+      // included — answers a right-click. Tiles stop propagation and open
+      // their own menu; text inputs keep the native menu (paste).
+      onContextMenu={(e) => {
+        if ((e.target as HTMLElement).closest('input')) return
+        e.preventDefault()
+        setCtxMenu({ x: e.clientX, y: e.clientY, nodeId: null })
       }}
     >
       <div className="bay-toolbar">
@@ -123,6 +184,13 @@ export function FileBay(): React.JSX.Element {
           ))}
         </div>
         <div className="bay-actions">
+          <button
+            className="bay-btn"
+            title="Browse for audio or MIDI files to import here"
+            onClick={importHere}
+          >
+            Import…
+          </button>
           <button className="bay-btn" onClick={createFolder}>
             + Folder
           </button>
@@ -141,7 +209,13 @@ export function FileBay(): React.JSX.Element {
 
       <div className="bay-grid" onPointerDown={() => setSelectedId(null)}>
         {items.length === 0 && (
-          <div className="bay-empty">Drop audio or MIDI files here to import them</div>
+          <div
+            className="bay-empty"
+            title="Browse for audio or MIDI files to import"
+            onClick={importHere}
+          >
+            Drop audio or MIDI files here — or click to browse
+          </div>
         )}
         {items.map((node) => (
           <BayTile
@@ -151,6 +225,14 @@ export function FileBay(): React.JSX.Element {
             renaming={node.id === renamingId}
             onSelect={() => setSelectedId(node.id)}
             onOpen={() => node.kind === 'folder' && setFolderId(node.id)}
+            onContextMenu={(e) => {
+              // Mid-rename, the input keeps the browser's own menu (paste).
+              if ((e.target as HTMLElement).closest('input')) return
+              e.preventDefault()
+              e.stopPropagation()
+              setSelectedId(node.id)
+              setCtxMenu({ x: e.clientX, y: e.clientY, nodeId: node.id })
+            }}
             onRenamed={(name) => {
               setRenamingId(null)
               if (name !== null && name.trim() && name !== node.name) {
@@ -162,6 +244,40 @@ export function FileBay(): React.JSX.Element {
           />
         ))}
       </div>
+
+      {/* Portaled: the dock body clips and scrolls; a fixed-position menu
+          rendered in place would be cut off at the panel edge. */}
+      {ctxMenu &&
+        createPortal(
+          <div
+            className="menu-panel ctx-menu"
+            style={contextMenuStyle(ctxMenu.x, ctxMenu.y)}
+            onPointerDown={(e) => e.stopPropagation()}
+            onContextMenu={(e) => e.preventDefault()}
+          >
+            {(() => {
+              const node = ctxMenu.nodeId !== null ? state.files[ctxMenu.nodeId] : undefined
+              if (!node) {
+                return (
+                  <>
+                    {menuItem('Import files…', importHere)}
+                    {menuItem('New folder', createFolder)}
+                  </>
+                )
+              }
+              return (
+                <>
+                  {node.kind === 'folder' && menuItem('Open', () => setFolderId(node.id))}
+                  {node.kind === 'folder' &&
+                    menuItem('Import into this folder…', () => browseForBayFiles(node.id))}
+                  {menuItem('Rename', () => setRenamingId(node.id))}
+                  {menuItem('Delete', () => deleteNode(node.id))}
+                </>
+              )
+            })()}
+          </div>,
+          document.body
+        )}
     </div>
   )
 }
@@ -172,6 +288,7 @@ interface TileProps {
   renaming: boolean
   onSelect: () => void
   onOpen: () => void
+  onContextMenu: (e: React.MouseEvent) => void
   onRenamed: (name: string | null) => void
   onDropInto?: (e: React.DragEvent) => void
   acceptDrop: (e: React.DragEvent) => void
@@ -183,6 +300,7 @@ function BayTile({
   renaming,
   onSelect,
   onOpen,
+  onContextMenu,
   onRenamed,
   onDropInto,
   acceptDrop
@@ -217,9 +335,10 @@ function BayTile({
         onSelect()
       }}
       onDoubleClick={onOpen}
+      onContextMenu={onContextMenu}
       onDragOver={onDropInto ? acceptDrop : undefined}
       onDrop={onDropInto}
-      title={node.name}
+      title={`${node.name} — right-click for options`}
     >
       <div className="bay-tile-icon">
         {node.kind === 'folder' ? (

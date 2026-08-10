@@ -3663,6 +3663,16 @@ body.middle-panning * {
   z-index: 60;
 }
 
+/* Any body-portaled right-click menu (File Bay, dock tabs). */
+.ctx-menu {
+  position: fixed;
+  z-index: 60;
+}
+
+.bay-empty {
+  cursor: pointer;
+}
+
 /* ---------- Clip fades ---------- */
 .clip-fades {
   position: absolute;

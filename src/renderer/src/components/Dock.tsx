@@ -1,9 +1,12 @@
-import { useRef, useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
+import { createPortal } from 'react-dom'
 import { useProjectState } from '@/state/hooks'
 import { useSelectedClipId, useSelectedTrackId } from '@/state/selection'
 import { panels, usePanels, PANEL_LABELS, type DockSide, type PanelId } from '@/state/panels'
 import { pianoRollUi, usePianoRollUi } from '@/state/pianoRollUi'
+import { bayUi, type BayIntent } from '@/state/bayUi'
 import { capturePointer } from '@/lib/pointer'
+import { contextMenuStyle } from '@/lib/contextMenu'
 import { FileBay } from './bay/FileBay'
 import { EffectsDock } from './fx/EffectsDock'
 import { MixerPanel } from './mixer/MixerPanel'
@@ -128,9 +131,25 @@ function DockTab({ id, vertical = false }: { id: PanelId; vertical?: boolean }):
   const selectedClipId = useSelectedClipId()
   const [drag, setDragState] = useState<TabDrag | null>(null)
   const dragRef = useRef<TabDrag | null>(null)
+  /** Right-click menu on the Files tab: bay actions without opening it first. */
+  const [filesMenu, setFilesMenu] = useState<{ x: number; y: number } | null>(null)
   const setDrag = (value: TabDrag | null): void => {
     dragRef.current = value
     setDragState(value)
+  }
+
+  useEffect(() => {
+    if (!filesMenu) return
+    const close = (): void => setFilesMenu(null)
+    window.addEventListener('pointerdown', close)
+    return () => window.removeEventListener('pointerdown', close)
+  }, [filesMenu])
+
+  /** Open the bay and hand it the action — same code the bay's own UI runs. */
+  const sendBayAction = (intent: BayIntent): void => {
+    setFilesMenu(null)
+    panels.openPanel('files')
+    bayUi.send(intent)
   }
 
   // A MIDI clip is "editable" when it's already open in the roll, or the
@@ -153,7 +172,7 @@ function DockTab({ id, vertical = false }: { id: PanelId; vertical?: boolean }):
           ? `Effects — ${effectsTrack.name}'s insert chain`
           : 'Effects — select a track to edit its insert chain'
         : {
-            files: 'File Bay — imported audio and MIDI',
+            files: 'File Bay — imported audio and MIDI · right-click to import',
             mixer: 'Mixer — faders, pans and inserts for every track',
             activity: 'Activity — who changed what, when',
             chat: 'Chat — saved with the project',
@@ -201,6 +220,12 @@ function DockTab({ id, vertical = false }: { id: PanelId; vertical?: boolean }):
         disabled={disabled}
         title={title}
         onClick={onClick}
+        onContextMenu={(e) => {
+          if (id !== 'files') return
+          e.preventDefault()
+          e.stopPropagation()
+          setFilesMenu({ x: e.clientX, y: e.clientY })
+        }}
         onPointerDown={(e) => {
           if (e.button !== 0 || disabled) return
           capturePointer(e)
@@ -234,6 +259,23 @@ function DockTab({ id, vertical = false }: { id: PanelId; vertical?: boolean }):
           {PANEL_LABELS[id]}
         </div>
       )}
+      {filesMenu &&
+        createPortal(
+          <div
+            className="menu-panel ctx-menu"
+            style={contextMenuStyle(filesMenu.x, filesMenu.y)}
+            onPointerDown={(e) => e.stopPropagation()}
+            onContextMenu={(e) => e.preventDefault()}
+          >
+            <button className="menu-item" onClick={() => sendBayAction('import')}>
+              <span>Import files…</span>
+            </button>
+            <button className="menu-item" onClick={() => sendBayAction('new-folder')}>
+              <span>New folder</span>
+            </button>
+          </div>,
+          document.body
+        )}
     </>
   )
 }
