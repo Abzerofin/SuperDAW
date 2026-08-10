@@ -12,7 +12,7 @@ import { projectStore } from './projectStore'
  * the chat panel is hidden accumulate; opening it clears them.
  */
 
-export type PanelId = 'files' | 'mixer' | 'effects' | 'pianoroll' | 'activity' | 'chat'
+export type PanelId = 'files' | 'mixer' | 'effects' | 'pianoroll' | 'activity' | 'chat' | 'lyrics'
 export type DockSide = 'bottom' | 'right'
 
 export const PANEL_LABELS: Record<PanelId, string> = {
@@ -21,10 +21,11 @@ export const PANEL_LABELS: Record<PanelId, string> = {
   effects: 'Effects',
   pianoroll: 'Piano',
   activity: 'Activity',
-  chat: 'Chat'
+  chat: 'Chat',
+  lyrics: 'Lyrics'
 }
 
-const ALL_PANELS: readonly PanelId[] = ['files', 'mixer', 'effects', 'pianoroll', 'activity', 'chat']
+const ALL_PANELS: readonly PanelId[] = ['files', 'mixer', 'effects', 'pianoroll', 'activity', 'chat', 'lyrics']
 
 interface DockLayout {
   docks: Record<DockSide, PanelId[]>
@@ -36,7 +37,7 @@ interface DockLayout {
 const DEFAULT_LAYOUT: DockLayout = {
   docks: {
     bottom: ['files', 'mixer', 'effects', 'pianoroll'],
-    right: ['activity', 'chat']
+    right: ['activity', 'chat', 'lyrics']
   },
   active: { bottom: 'files', right: 'activity' },
   bottomHeight: 240,

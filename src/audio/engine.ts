@@ -7,6 +7,7 @@ import {
   routesOfTrack
 } from '@core/model/types'
 import type { AutomationPoint } from '@core/model/types'
+import { ticksPerBeat } from '@core/model/timebase'
 import { denormalizeParam } from '@core/model/effects'
 import { paramDefsOf } from '@core/plugins/builtin'
 import type { AssetStore } from './assets'
@@ -14,6 +15,7 @@ import { applyClipFades } from './fades'
 import { LivePreview } from './livePreview'
 import { pluginRegistry, type PluginAnalysis, type PluginNodes } from './pluginRegistry'
 import type { ExternalPluginHost } from './render'
+import { RENDER_SAMPLE_RATE } from './render'
 import { buildSynthVoice } from './synth'
 import {
   beatIndexAt,
@@ -497,7 +499,11 @@ export class AudioEngine {
       fromTicks + Math.ceil(PREVIEW_WINDOW_SEC * ticksPerSecond(this.store.state.tempo))
 
     for (const trackId of tracks) {
-      if (!(await this.preview.open(trackId, ctx.sampleRate))) continue
+      // Windows are produced at the offline render rate; opening the plugin
+      // at the device rate would feed e.g. a 48 kHz-configured plugin
+      // 44.1 kHz material — audibly wrong for anything pitch- or
+      // time-aware. The engine resamples the returned buffer on playback.
+      if (!(await this.preview.open(trackId, RENDER_SAMPLE_RATE))) continue
       const buffer = await this.preview.renderWindow(trackId, fromTicks, untilTicks)
       if (generation !== this.previewGeneration) return new Map()
       if (!buffer) continue
@@ -1376,6 +1382,25 @@ export class AudioEngine {
         chain.parentId = parentId
       }
     }
+  }
+
+  /**
+   * Click a recording count-in of `bars` whole bars starting now, while
+   * the transport is still stopped. Returns the count-in's length in
+   * seconds — the moment the roll (and capture) should begin.
+   */
+  countInClicks(bars: number): number {
+    const ctx = this.ensureContext()
+    const state = this.store.state
+    const beatsPerBar = state.timeSignature[0]
+    const secPerBeat = ticksPerBeat(state.timeSignature) / ticksPerSecond(state.tempo)
+    // Small offset so the first click isn't clipped by scheduling latency.
+    const start = ctx.currentTime + 0.06
+    const total = bars * beatsPerBar
+    for (let i = 0; i < total; i++) {
+      this.scheduleClick(start + i * secPerBeat, i % beatsPerBar === 0)
+    }
+    return start + total * secPerBeat - ctx.currentTime
   }
 
   private startMetronome(): void {

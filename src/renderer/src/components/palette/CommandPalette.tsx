@@ -89,6 +89,7 @@ export function CommandPalette(): React.JSX.Element | null {
     cmd('Toggle mixer', () => panels.togglePanel('mixer'))
     cmd('Toggle File Bay', () => panels.togglePanel('files'))
     cmd('Toggle chat', () => panels.togglePanel('chat'))
+    cmd('Toggle lyrics', () => panels.togglePanel('lyrics'))
     cmd('Toggle activity feed', () => panels.togglePanel('activity'))
 
     out.push({

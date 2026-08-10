@@ -74,6 +74,7 @@ export function createDemoProject(): ProjectState {
     clips: Object.fromEntries(clips.map((c) => [c.id, c])),
     files: {},
     chat: [],
+    lyrics: '',
     comments: {},
     masterVolume: 1,
     automation: {},

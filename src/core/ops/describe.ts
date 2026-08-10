@@ -13,6 +13,8 @@ export function describe(state: ProjectState, op: Operation): string | null {
   switch (op.type) {
     case 'project/rename':
       return `Renamed project to "${op.name}"`
+    case 'project/setLyrics':
+      return 'Edited lyrics'
     case 'project/setTempo':
       return op.conform && op.conform.length > 0
         ? `Set tempo to ${op.tempo} BPM, stretching audio to follow`

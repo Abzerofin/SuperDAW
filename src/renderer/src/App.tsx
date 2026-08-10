@@ -9,6 +9,7 @@ import { CommandPalette } from './components/palette/CommandPalette'
 import { RoutingPanel } from './components/routing/RoutingPanel'
 import { AssetDownloadPrompt } from './components/collab/AssetDownloadPrompt'
 import { HistoryPopover } from './components/history/HistoryPopover'
+import { FloatingEffects } from './components/fx/FloatingEffects'
 import { useEffect } from 'react'
 import { useAppShell } from './state/appShell'
 import { useGlobalShortcuts } from './lib/shortcuts'
@@ -53,6 +54,7 @@ export default function App(): React.JSX.Element {
       <CommandPalette />
       <RoutingPanel />
       <AssetDownloadPrompt />
+      <FloatingEffects />
       <HistoryPopover />
       <UiPings />
     </div>

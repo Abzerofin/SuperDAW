@@ -79,7 +79,10 @@ export interface ExternalInstance {
 
 /** Seconds of reverb/delay tail appended after the last clip ends. */
 const TAIL_SEC = 3
-const SAMPLE_RATE = 44100
+/** Offline render rate — also what live-preview windows are produced at,
+ *  so held plugins must be opened at THIS rate, not the device's. */
+export const RENDER_SAMPLE_RATE = 44100
+const SAMPLE_RATE = RENDER_SAMPLE_RATE
 
 /** Timeline end in ticks (0 for an empty project). */
 export function projectEndTicks(state: ProjectState): number {

@@ -17,12 +17,15 @@ interface Preferences {
   autoDownloadAssets: boolean
   /** Stretch audio clips to follow BPM changes: ask / always / never. */
   tempoConform: TempoConformChoice
+  /** Metronome bars clicked before recording starts rolling (0 = off). */
+  countInBars: 0 | 1 | 2
 }
 
 const DEFAULTS: Preferences = {
   middleClickPing: true,
   autoDownloadAssets: false,
-  tempoConform: 'ask'
+  tempoConform: 'ask',
+  countInBars: 1
 }
 
 const STORAGE_KEY = 'preferences'
@@ -50,7 +53,10 @@ class PreferencesStore {
           : DEFAULTS.autoDownloadAssets,
       tempoConform: ['ask', 'always', 'never'].includes(stored.tempoConform as string)
         ? (stored.tempoConform as TempoConformChoice)
-        : DEFAULTS.tempoConform
+        : DEFAULTS.tempoConform,
+      countInBars: [0, 1, 2].includes(stored.countInBars as number)
+        ? (stored.countInBars as 0 | 1 | 2)
+        : DEFAULTS.countInBars
     }
     this.emit()
   }
@@ -65,6 +71,10 @@ class PreferencesStore {
 
   get tempoConform(): TempoConformChoice {
     return this.prefs.tempoConform
+  }
+
+  get countInBars(): 0 | 1 | 2 {
+    return this.prefs.countInBars
   }
 
   set<K extends keyof Preferences>(key: K, value: Preferences[K]): void {

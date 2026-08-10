@@ -1,10 +1,12 @@
 import { useEffect, useRef, useState } from 'react'
 import { createPortal } from 'react-dom'
-import type { PluginInstance, Track } from '@core/model/types'
+import type { PluginInstance, Route, Track } from '@core/model/types'
+import { routesOfTrack } from '@core/model/types'
 import type { PluginDescriptor } from '@core/plugins/descriptor'
 import { BUILTIN_EFFECT_DESCRIPTORS, pluginDefaults } from '@core/plugins/builtin'
 import { newId } from '@core/model/ids'
 import { projectStore } from '@/state/projectStore'
+import { fxUi } from '@/state/fxUi'
 import {
   externalHostAvailable,
   externalParamDefs,
@@ -69,18 +71,44 @@ export function AddPluginCard({
 
   const addPlugin = (descriptor: PluginDescriptor): void => {
     const maxRank = inserts.reduce((max, p) => Math.max(max, p.rank), 0)
+    const instanceId = newId('plg')
+    // Graph routing live: a node wired to nothing plays nothing, so splice
+    // the new effect in series just before Mix Out — every edge into 'out'
+    // is redirected through it. Rack and graph adds behave identically.
+    const trackRoutes = routesOfTrack(projectStore.state, track.id)
+    let wiring: { routes?: Route[]; severedRoutes?: Route[] } = {}
+    if (trackRoutes.length > 0) {
+      const tails = trackRoutes.filter((r) => r.to === 'out')
+      const intoNew: Route[] =
+        tails.length > 0
+          ? tails.map((t) => ({ id: newId('rte'), trackId: track.id, from: t.from, to: instanceId }))
+          : [{ id: newId('rte'), trackId: track.id, from: 'in', to: instanceId }]
+      wiring = {
+        routes: [...intoNew, { id: newId('rte'), trackId: track.id, from: instanceId, to: 'out' }],
+        ...(tails.length > 0 ? { severedRoutes: tails } : {})
+      }
+    }
     projectStore.dispatch({
       type: 'plugin/add',
       instance: {
-        id: newId('plg'),
+        id: instanceId,
         trackId: track.id,
         descriptor,
         enabled: true,
         rank: maxRank + 1,
-        params: pluginDefaults(descriptor),
+        // VST3: start with NO stored params. Stored values are pushed to
+        // the plugin on every processing block, so baking in the defaults
+        // would permanently stomp preset/GUI state the plugin carries in
+        // its own stateBlob. Only params the user actually moves belong
+        // here. Builtins keep explicit defaults — their nodes read them.
+        params: descriptor.format === 'vst3' ? {} : pluginDefaults(descriptor),
         stateBlob: null
-      }
+      },
+      ...wiring
     })
+    // New inserts start collapsed: no visualization canvas (or native VST3
+    // editor) spins up until the user opens the card.
+    fxUi.collapse(instanceId)
     setAnchor(null)
     setQuery('')
   }

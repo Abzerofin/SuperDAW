@@ -170,6 +170,7 @@ suite('apply', () => {
 suite('invert', () => {
   const roundTrips: Operation[] = [
     { type: 'project/rename', name: 'Renamed' },
+    { type: 'project/setLyrics', lyrics: 'Verse 1\nla la la' },
     { type: 'project/setTempo', tempo: 140 },
     // Conforming variant: undo must restore the clip's previous stretch.
     { type: 'project/setTempo', tempo: 160, conform: [{ clipId: 'c1', stretch: 0.75 }] },
@@ -184,8 +185,25 @@ suite('invert', () => {
       plugins: [plugin('fx9', 't9', 'eq3', { low: 3, mid: 0, midFreq: 1000, high: -2 })]
     },
     { type: 'plugin/add', instance: plugin('fx1', 't1', 'compressor') },
+    // Splice into the live graph: fxA→out (rB) is severed and rerouted
+    // through the new node; undo must heal rB, not just drop the node.
+    {
+      type: 'plugin/add',
+      instance: plugin('fx2', 't1', 'delay', {}, 2),
+      routes: [
+        { id: 'rS1', trackId: 't1', from: 'fxA', to: 'fx2' },
+        { id: 'rS2', trackId: 't1', from: 'fx2', to: 'out' }
+      ],
+      severedRoutes: [{ id: 'rB', trackId: 't1', from: 'fxA', to: 'out' }]
+    },
     // Cascades away rA/rB; the inverse must restore node AND edges.
     { type: 'plugin/remove', instanceId: 'fxA' },
+    // Remove that heals previously severed edges: undo must sever again.
+    {
+      type: 'plugin/remove',
+      instanceId: 'fxA',
+      restoreRoutes: [{ id: 'rD', trackId: 't1', from: 'in', to: 'out' }]
+    },
     // A parallel dry path next to the existing in → fxA → out.
     { type: 'route/addMany', routes: [{ id: 'r9', trackId: 't1', from: 'in', to: 'out' }] },
     { type: 'route/deleteMany', routeIds: ['rA'] },

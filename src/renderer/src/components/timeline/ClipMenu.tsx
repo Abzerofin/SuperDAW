@@ -1,3 +1,4 @@
+import { useSyncExternalStore } from 'react'
 import type { Clip } from '@core/model/types'
 import { MAX_PITCH, MAX_STRETCH, MIN_PITCH, MIN_STRETCH, clipRate } from '@core/model/types'
 import { ticksPerSecond } from '@audio/scheduling'
@@ -13,6 +14,7 @@ import {
 } from '@/lib/clipActions'
 import { TRACK_COLORS } from '@/lib/colors'
 import { historyUi } from '@/state/historyUi'
+import { collab, useCollab } from '@/state/collab'
 
 /**
  * Per-clip editing: slice, reverse, transpose, time-scale and colour.
@@ -39,6 +41,13 @@ export function ClipMenu({
 }): React.JSX.Element {
   const isAudio = clip.assetId !== null
   const tempo = projectStore.state.tempo
+  const collabState = useCollab()
+  // The asset can land while the menu is open — the Download item reacts.
+  const asset = useSyncExternalStore(assetStore.subscribe, () =>
+    clip.assetId ? assetStore.get(clip.assetId) : undefined
+  )
+  const missingAsset = clip.assetId !== null && !asset
+  const progress = clip.assetId ? collabState.assetProgress.get(clip.assetId) : undefined
 
   const setPlayback = (patch: Partial<Pick<Clip, 'reverse' | 'pitch' | 'stretch'>>): void => {
     projectStore.dispatch({
@@ -79,6 +88,30 @@ export function ClipMenu({
   return (
     <div className="clipmenu" style={{ left: x, top: y }} onPointerDown={(e) => e.stopPropagation()}>
       <div className="clipmenu-title">{clip.name}</div>
+
+      {missingAsset && (
+        <>
+          <button
+            className="menu-item"
+            disabled={progress !== undefined || collabState.mode === 'off'}
+            title={
+              collabState.mode === 'off'
+                ? "This clip's audio isn't on this machine — join the session it came from to fetch it"
+                : "Fetch this clip's audio from the session"
+            }
+            onClick={() => {
+              if (clip.assetId) collab.requestAsset(clip.assetId)
+            }}
+          >
+            <span>
+              {progress
+                ? `Downloading… ${progress.total > 0 ? Math.round((progress.received / progress.total) * 100) : 0}%`
+                : 'Download audio'}
+            </span>
+          </button>
+          <div className="menu-sep" />
+        </>
+      )}
 
       <button
         className="menu-item"

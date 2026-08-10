@@ -2191,6 +2191,13 @@ body.middle-panning * {
   }
 }
 
+/* Count-in: armed and clicking, but not capturing yet — faster blink. */
+.tbtn-rec-countin {
+  color: var(--danger);
+  border-color: var(--danger);
+  animation: rec-pulse 0.4s ease-in-out infinite;
+}
+
 .track-toggle-armed {
   background: var(--danger);
   border-color: var(--danger);
@@ -2645,6 +2652,67 @@ body.middle-panning * {
   background: var(--accent);
   color: #fff;
   font-weight: 600;
+}
+
+/* ---------- Lyrics ---------- */
+.lyrics {
+  display: flex;
+  flex-direction: column;
+}
+
+.lyrics-text {
+  flex: 1;
+  min-height: 0;
+  padding: 8px 12px;
+  border: none;
+  outline: none;
+  resize: none;
+  background: transparent;
+  color: inherit;
+  font-family: inherit;
+  font-size: 12px;
+  line-height: 1.6;
+}
+
+.lyrics-text::placeholder {
+  color: var(--text-dim);
+}
+
+/* ---------- Floating effect windows ---------- */
+/* A device dragged off the Effects dock. Same PluginSection as the rack,
+   framed like a popover; z between the docks and the drag ghost (100). */
+.fx-float {
+  position: fixed;
+  z-index: 72;
+  width: 250px;
+  max-height: 80vh;
+  overflow-y: auto;
+  background: var(--bg-2);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  box-shadow: 0 6px 24px rgba(0, 0, 0, 0.45);
+  padding: 4px;
+}
+
+.fx-float .fx-section {
+  border: none;
+  background: none;
+  padding: 4px 6px;
+}
+
+.fx-float-wide {
+  width: 380px;
+}
+
+/* VST3 GUI windows size to the plugin's own editor. */
+.fx-float-expanded {
+  width: auto;
+  max-width: 90vw;
+}
+
+/* The undocked device's stand-in card in the rack. */
+.fx-float-placeholder {
+  opacity: 0.75;
 }
 
 .chat-send:disabled {

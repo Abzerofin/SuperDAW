@@ -447,6 +447,19 @@ class CollabStore {
     this.emit()
   }
 
+  /**
+   * Fetch one missing asset on demand (clip context menu), whether or not
+   * it still sits in the pending queue — a dismissed prompt must not make
+   * a clip permanently undownloadable.
+   */
+  requestAsset(assetId: string): void {
+    if (assetStore.get(assetId)) return
+    if (this.assetProgress.has(assetId)) return // already on its way
+    this.pendingDownloads.delete(assetId)
+    this.active?.requestAsset(assetId)
+    this.emit()
+  }
+
   downloadAllPending(): void {
     for (const assetId of [...this.pendingDownloads.keys()]) {
       this.pendingDownloads.delete(assetId)

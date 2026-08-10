@@ -20,6 +20,14 @@ class FxUiStore {
     for (const listener of this.listeners) listener()
   }
 
+  /** Start collapsed (new inserts): no visual or native GUI until opened. */
+  collapse(instanceId: PluginInstanceId): void {
+    if (this.collapsed.has(instanceId)) return
+    this.collapsed.add(instanceId)
+    this.version++
+    for (const listener of this.listeners) listener()
+  }
+
   getVersion = (): number => this.version
 
   subscribe = (listener: () => void): (() => void) => {

@@ -224,13 +224,15 @@ function RecordButton(): React.JSX.Element {
   const rec = useRecording()
   return (
     <button
-      className={`tbtn tbtn-rec ${rec.recording ? 'tbtn-rec-active' : ''}`}
+      className={`tbtn tbtn-rec ${rec.recording ? 'tbtn-rec-active' : ''} ${rec.countingIn ? 'tbtn-rec-countin' : ''}`}
       title={
         rec.armedCount === 0
           ? 'Record (arm a track first: ● on a track header)'
           : rec.recording
             ? 'Stop recording'
-            : 'Record'
+            : rec.countingIn
+              ? 'Counting in… click to cancel'
+              : 'Record'
       }
       onClick={() => void rec.toggle()}
     >
@@ -280,8 +282,38 @@ function FileMenu(): React.JSX.Element {
       </button>
       {open && (
         <div className="menu-panel">
-          {item('New project', 'Ctrl+Shift+N', () => newProject())}
-          {item('Open…', 'Ctrl+O', () => void openProject())}
+          <button
+            className="menu-item"
+            disabled={inSession}
+            title={
+              inSession
+                ? 'Leave the session first — a new project cannot replace the document a running session is syncing'
+                : undefined
+            }
+            onClick={() => {
+              setOpen(false)
+              newProject()
+            }}
+          >
+            <span>New project</span>
+            <span className="menu-shortcut mono">Ctrl+Shift+N</span>
+          </button>
+          <button
+            className="menu-item"
+            disabled={inSession}
+            title={
+              inSession
+                ? 'Leave the session first — a loaded project cannot replace the document a running session is syncing'
+                : undefined
+            }
+            onClick={() => {
+              setOpen(false)
+              void openProject()
+            }}
+          >
+            <span>Open…</span>
+            <span className="menu-shortcut mono">Ctrl+O</span>
+          </button>
           <button
             className="menu-item"
             disabled={recents.length === 0}

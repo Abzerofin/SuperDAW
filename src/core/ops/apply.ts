@@ -94,6 +94,10 @@ export function apply(state: ProjectState, op: Operation): ProjectState {
       if (state.name === op.name) return state
       return { ...state, name: op.name }
 
+    case 'project/setLyrics':
+      if (state.lyrics === op.lyrics) return state
+      return { ...state, lyrics: op.lyrics }
+
     case 'project/setTempo': {
       const tempo = clamp(op.tempo, 20, 400)
       let clips = state.clips
@@ -354,6 +358,14 @@ export function apply(state: ProjectState, op: Operation): ProjectState {
         ...state,
         plugins: { ...state.plugins, [op.instance.id]: { ...op.instance, params } }
       }
+      // Splicing into a live graph: the edges the node now sits on go
+      // first, so the replacement wiring below can't collide with them.
+      if (op.severedRoutes && op.severedRoutes.length > 0) {
+        next = apply(next, {
+          type: 'route/deleteMany',
+          routeIds: op.severedRoutes.map((r) => r.id)
+        })
+      }
       // Undoing a remove puts the node's graph connections back (each edge
       // re-validated — a concurrently deleted neighbor just drops its edge).
       if (op.routes && op.routes.length > 0) {
@@ -385,7 +397,13 @@ export function apply(state: ProjectState, op: Operation): ProjectState {
           }
         }
       }
-      return { ...state, plugins, routes, automation }
+      let next: ProjectState = { ...state, plugins, routes, automation }
+      // Undoing a spliced-in add: heal the edges that add severed (each
+      // re-validated against what actually remains).
+      if (op.restoreRoutes && op.restoreRoutes.length > 0) {
+        next = apply(next, { type: 'route/addMany', routes: op.restoreRoutes })
+      }
+      return next
     }
 
     case 'route/addMany': {

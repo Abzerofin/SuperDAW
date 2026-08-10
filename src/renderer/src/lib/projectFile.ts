@@ -19,6 +19,7 @@ import { pianoRollUi } from '@/state/pianoRollUi'
 import { recentProjects, type RecentProject } from '@/state/recentProjects'
 import { appShell } from '@/state/appShell'
 import { trackInputs } from '@/state/trackInputs'
+import { collab } from '@/state/collab'
 
 /**
  * Save/open orchestration. The .sdaw container is a ZIP of project.json
@@ -194,6 +195,15 @@ export async function saveProject(forceDialog = false): Promise<void> {
 
 /** Start an empty project. Asks before discarding unsaved changes. */
 export function newProject(): void {
+  // Wiping the document out from under a live session desyncs every peer
+  // (their ops still target the old project). Central guard: every entry
+  // point — menu, palette, shortcut — lands here.
+  if (collab.mode !== 'off') {
+    window.alert(
+      'Leave the collaboration session first — a new project cannot replace the document a running session is syncing.'
+    )
+    return
+  }
   if (
     sessionFile.dirty &&
     !window.confirm('Discard unsaved changes and start a new project?')
@@ -259,6 +269,13 @@ export async function exportWav(): Promise<void> {
 }
 
 export async function openProject(): Promise<void> {
+  // Same guard as newProject: replacing the synced document breaks peers.
+  if (collab.mode !== 'off') {
+    window.alert(
+      'Leave the collaboration session first — opening a project cannot replace the document a running session is syncing.'
+    )
+    return
+  }
   const bridge = window.superdaw
   if (bridge) {
     const result = await bridge.openProjectFile()
@@ -288,6 +305,12 @@ export async function openProject(): Promise<void> {
  * pruned from the index.
  */
 export async function openRecentProject(entry: RecentProject): Promise<void> {
+  if (collab.mode !== 'off') {
+    window.alert(
+      'Leave the collaboration session first — opening a project cannot replace the document a running session is syncing.'
+    )
+    return
+  }
   const bridge = window.superdaw
   if (!entry.path || !bridge) {
     await openProject()

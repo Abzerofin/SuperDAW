@@ -261,7 +261,12 @@ export function externalPluginHost(): ExternalPluginHost | null {
       })
       // Failure bypasses rather than aborting the freeze — same rule the
       // reducer follows for ops whose target is gone.
-      if (result.error || !result.channels) return null
+      if (result.error || !result.channels) {
+        console.warn(
+          `VST3 "${instance.descriptor.name}" offline process failed: ${result.error ?? 'no audio returned'}`
+        )
+        return null
+      }
       return result.channels
     },
 
@@ -275,7 +280,12 @@ export function externalPluginHost(): ExternalPluginHost | null {
         channels,
         stateBlob: instance.stateBlob
       })
-      if (opened.error || opened.handle === undefined) return null
+      if (opened.error || opened.handle === undefined) {
+        console.warn(
+          `VST3 "${instance.descriptor.name}" failed to open: ${opened.error ?? 'no handle returned'}`
+        )
+        return null
+      }
       const handle = opened.handle
       let closed = false
       return {
@@ -286,7 +296,12 @@ export function externalPluginHost(): ExternalPluginHost | null {
             channels: chunk,
             params: params as Record<string, number>
           })
-          if (result.error || !result.channels) return null
+          if (result.error || !result.channels) {
+            console.warn(
+              `VST3 "${instance.descriptor.name}" process failed: ${result.error ?? 'no audio returned'}`
+            )
+            return null
+          }
           return result.channels
         },
         close: () => {

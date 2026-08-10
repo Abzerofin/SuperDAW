@@ -18,6 +18,7 @@ import { capturePointer } from '@/lib/pointer'
 import { wireEditorEvents } from '@/state/vst3Editors'
 import { useVst3Dock, vst3Dock } from '@/state/vst3Dock'
 import { useFxUi } from '@/state/fxUi'
+import { fxFloatUi, useFxFloatUi } from '@/state/fxFloatUi'
 import { AddPluginCard } from './AddPluginCard'
 import { historyUi } from '@/state/historyUi'
 import { PluginPlaceholder } from './PluginPlaceholder'
@@ -54,6 +55,7 @@ function TrackEffects({ track }: { track: Track }): React.JSX.Element {
   const inserts = pluginsOfTrack(state, track.id)
   const dock = useVst3Dock()
   const fxCollapse = useFxUi()
+  const fxFloat = useFxFloatUi()
   // Rack = the classic ordered chain; Graph = node routing. Tracks that
   // already have routing edges open on their graph.
   const [view, setView] = useState<'rack' | 'graph'>(() =>
@@ -67,7 +69,7 @@ function TrackEffects({ track }: { track: Track }): React.JSX.Element {
   // Docked GUIs need more than the dock's 240px: grow to the tallest one
   // (capped so the timeline keeps meaningful height).
   const guiHeights = inserts
-    .map((i) => (isGuiInsert(i) ? (dock.dims(i.id)?.height ?? 0) : 0))
+    .map((i) => (isGuiInsert(i) && !fxFloat.isFloating(i.id) ? (dock.dims(i.id)?.height ?? 0) : 0))
     .filter((h) => h > 0)
   const dockHeight =
     guiHeights.length > 0
@@ -102,11 +104,25 @@ function TrackEffects({ track }: { track: Track }): React.JSX.Element {
     onPointerDown: (e) => startDrag(e, id),
     onPointerMove: moveDrag,
     onPointerUp: endDrag,
-    onPointerCancel: endDrag
+    // A cancelled pointer has no meaningful coords — never undock from it.
+    onPointerCancel: () => endDrag()
   })
+
+  /** Is the pointer outside the whole Effects dock (an undock gesture)? */
+  const outsideDock = (e: React.PointerEvent): boolean => {
+    const dockEl = chainRef.current?.closest('.fx-dock')
+    if (!dockEl) return false
+    const rect = dockEl.getBoundingClientRect()
+    return (
+      e.clientX < rect.left || e.clientX > rect.right || e.clientY < rect.top || e.clientY > rect.bottom
+    )
+  }
 
   const moveDrag = (e: React.PointerEvent): void => {
     if (!drag || !chainRef.current) return
+    // Off the dock the gesture is an undock, not a reorder — freeze the
+    // previewed order so cards stop shuffling under a departing pointer.
+    if (outsideDock(e)) return
     // Cards are rendered in the previewed order; crossing a card's
     // horizontal midpoint moves the dragged insert into that slot.
     const cards = Array.from(chainRef.current.querySelectorAll('.fx-insert'))
@@ -126,8 +142,14 @@ function TrackEffects({ track }: { track: Track }): React.JSX.Element {
     setDrag({ ...drag, order })
   }
 
-  const endDrag = (): void => {
+  const endDrag = (e?: React.PointerEvent): void => {
     if (!drag) return
+    // Dropped off the panel: undock into a floating window under the cursor.
+    if (e && outsideDock(e)) {
+      fxFloatUi.float(drag.id, e.clientX - 125, e.clientY - 14)
+      setDrag(null)
+      return
+    }
     const before = inserts.map((p) => p.id)
     if (drag.order.some((id, i) => id !== before[i])) {
       projectStore.dispatch({ type: 'plugin/reorder', trackId: track.id, order: drag.order })
@@ -145,6 +167,11 @@ function TrackEffects({ track }: { track: Track }): React.JSX.Element {
         </span>
         {track.frozenAssetId && (
           <span className="statusbar-dim">· frozen — inserts baked into the render</span>
+        )}
+        {view === 'rack' && routesOfTrack(state, track.id).length > 0 && (
+          <span className="statusbar-dim" title="With graph routing on, the audible order is the graph's wiring — the rack is just a linked list of this track's effects">
+            · graph routing on — signal order lives in the Graph
+          </span>
         )}
         <div className="fx-view-toggle">
           <button
@@ -174,7 +201,27 @@ function TrackEffects({ track }: { track: Track }): React.JSX.Element {
           ) : (
             <AddSynthCard track={track} />
           ))}
-        {shown.map((instance) => (
+        {shown.map((instance) =>
+          fxFloat.isFloating(instance.id) ? (
+            // Undocked: a slim stand-in keeps the device's place in the
+            // chain visible; the real UI is in its floating window.
+            <div key={instance.id} className="fx-card fx-insert fx-card-collapsed fx-float-placeholder">
+              <div className="fx-insert-body">
+                <div className="fx-section">
+                  <div className="fx-section-head">
+                    <span className="fx-section-title">{instance.descriptor.name}</span>
+                    <button
+                      className="fx-collapse"
+                      title="Bring the floating window back into the rack"
+                      onClick={() => fxFloatUi.dock(instance.id)}
+                    >
+                      ⇲
+                    </button>
+                  </div>
+                </div>
+              </div>
+            </div>
+          ) : (
           <div
             key={instance.id}
             className={`fx-card fx-insert ${drag?.id === instance.id ? 'fx-insert-dragging' : ''} ${
@@ -192,7 +239,8 @@ function TrackEffects({ track }: { track: Track }): React.JSX.Element {
               <PluginSection instance={instance} dragHandle={dragHandle(instance.id)} />
             </div>
           </div>
-        ))}
+          )
+        )}
         <AddPluginCard track={track} inserts={inserts} />
       </div>
       )}
@@ -271,13 +319,16 @@ function AddSynthCard({ track }: { track: Track }): React.JSX.Element {
   )
 }
 
-function PluginSection({
+export function PluginSection({
   instance,
-  dragHandle
+  dragHandle,
+  floating = false
 }: {
   instance: PluginInstance
-  /** Makes the card header a reorder handle (see TrackEffects). */
+  /** Makes the card header a drag handle: reorder in the rack, move when floating. */
   dragHandle?: React.HTMLAttributes<HTMLElement>
+  /** Rendered in an undocked window (see FloatingEffects) — header gains a re-dock button. */
+  floating?: boolean
 }): React.JSX.Element {
   usePluginRegistry() // re-render when a plugin gets installed mid-session
   const dock = useVst3Dock()
@@ -307,7 +358,7 @@ function PluginSection({
     <div className={`fx-section ${instance.enabled ? '' : 'fx-bypassed'}`}>
       <div
         className={`fx-section-head ${dragHandle ? 'fx-section-head-drag' : ''}`}
-        title={dragHandle ? 'Drag to reorder' : undefined}
+        title={dragHandle ? (floating ? 'Drag to move' : 'Drag to reorder · drop outside the dock to undock') : undefined}
         {...dragHandle}
       >
         <button
@@ -355,6 +406,15 @@ function PluginSection({
         >
           {collapsed ? '▸' : '▾'}
         </button>
+        {floating && (
+          <button
+            className="fx-collapse"
+            title="Return to the effects rack"
+            onClick={() => fxFloatUi.dock(instance.id)}
+          >
+            ⇱
+          </button>
+        )}
         <button
           className="fx-remove"
           title={`Remove ${instance.descriptor.name} from this track`}
@@ -432,7 +492,9 @@ function DockedEditor({ instance }: { instance: PluginInstance }): React.JSX.Ele
     const report = (): void => {
       raf = requestAnimationFrame(report)
       const holder = holderRef.current
-      const chain = holder?.closest('.fx-dock-chain')
+      // The clip viewport: the rack's scrolling chain, or the floating
+      // window's own frame when the device is undocked.
+      const chain = holder?.closest('.fx-dock-chain, .fx-float')
       if (!holder || !chain) return
       const r = holder.getBoundingClientRect()
       // The chain's CLIENT box: its border box includes padding and the

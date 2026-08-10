@@ -10,6 +10,7 @@ import { MixerPanel } from './mixer/MixerPanel'
 import { PianoRoll } from './pianoroll/PianoRoll'
 import { ActivityFeed } from './ActivityFeed'
 import { ChatPanel } from './ChatPanel'
+import { LyricsPanel } from './LyricsPanel'
 
 /**
  * One dock: a strip of draggable tabs plus the open panel. Every panel can
@@ -76,6 +77,8 @@ function PanelBody({ id, clipId }: { id: PanelId; clipId: string | null }): Reac
       return <ActivityFeed />
     case 'chat':
       return <ChatPanel />
+    case 'lyrics':
+      return <LyricsPanel />
   }
 }
 
@@ -153,7 +156,8 @@ function DockTab({ id, vertical = false }: { id: PanelId; vertical?: boolean }):
             files: 'File Bay — imported audio and MIDI',
             mixer: 'Mixer — faders, pans and inserts for every track',
             activity: 'Activity — who changed what, when',
-            chat: 'Chat — saved with the project'
+            chat: 'Chat — saved with the project',
+            lyrics: 'Lyrics — saved with the project'
           }[id as Exclude<PanelId, 'pianoroll' | 'effects'>]
 
   const onClick = (): void => {

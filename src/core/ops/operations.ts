@@ -27,6 +27,8 @@ import type {
  */
 export type Operation =
   | { type: 'project/rename'; name: string }
+  /** Replaces the whole lyrics text — one edit session, one op. */
+  | { type: 'project/setLyrics'; lyrics: string }
   /**
    * `conform` present = the gesture also stretched audio clips so their
    * material keeps filling the same bars at the new tempo (tape-style
@@ -93,9 +95,19 @@ export type Operation =
       routes?: Route[]
       /** Parameter automation of a removed insert, restored on undo. */
       automation?: AutomationPoint[]
+      /**
+       * Edges this add replaces — splicing the node into a live graph in
+       * series removes the edges it now sits on (e.g. every X→out becomes
+       * X→new, new→out). Full routes, not ids, so undo can restore them.
+       */
+      severedRoutes?: Route[]
     }
-  /** Also cascades away every route touching the instance (see invert). */
-  | { type: 'plugin/remove'; instanceId: PluginInstanceId }
+  /**
+   * Also cascades away every route touching the instance (see invert).
+   * `restoreRoutes` re-adds the edges a spliced-in add severed, so undoing
+   * that add heals the graph it rewired.
+   */
+  | { type: 'plugin/remove'; instanceId: PluginInstanceId; restoreRoutes?: Route[] }
   /**
    * Effect ROUTING GRAPH edges (see Route). Plural like note/delete: a
    * gesture that materializes a chain or clears a graph stays one op.

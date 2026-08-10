@@ -165,6 +165,22 @@ function GeneralPane(): React.JSX.Element {
         </p>
       </div>
       <div className="settings-field">
+        <label htmlFor="settings-count-in">Recording count-in</label>
+        <select
+          id="settings-count-in"
+          value={String(preferences.countInBars)}
+          onChange={(e) => preferences.set('countInBars', Number(e.target.value) as 0 | 1 | 2)}
+        >
+          <option value="0">Off — record immediately</option>
+          <option value="1">1 bar of clicks before recording</option>
+          <option value="2">2 bars of clicks before recording</option>
+        </select>
+        <p className="settings-dim">
+          The metronome counts you in from a standing start; punching in while the song is
+          already playing always records immediately.
+        </p>
+      </div>
+      <div className="settings-field">
         <label htmlFor="settings-middle-ping">Middle-click ping</label>
         <select
           id="settings-middle-ping"

@@ -30,6 +30,9 @@ export function invert(state: ProjectState, op: Operation): Operation | null {
     case 'project/rename':
       return { type: 'project/rename', name: state.name }
 
+    case 'project/setLyrics':
+      return { type: 'project/setLyrics', lyrics: state.lyrics }
+
     case 'project/setTempo': {
       // Undo restores the previous stretch of every clip the op conforms.
       const conform = (op.conform ?? [])
@@ -167,7 +170,13 @@ export function invert(state: ProjectState, op: Operation): Operation | null {
     }
 
     case 'plugin/add':
-      return { type: 'plugin/remove', instanceId: op.instance.id }
+      return {
+        type: 'plugin/remove',
+        instanceId: op.instance.id,
+        ...(op.severedRoutes && op.severedRoutes.length > 0
+          ? { restoreRoutes: op.severedRoutes }
+          : {})
+      }
 
     case 'plugin/remove': {
       const instance = state.plugins[op.instanceId]
@@ -184,7 +193,12 @@ export function invert(state: ProjectState, op: Operation): Operation | null {
         type: 'plugin/add',
         instance,
         ...(routes.length > 0 ? { routes } : {}),
-        ...(automation.length > 0 ? { automation } : {})
+        ...(automation.length > 0 ? { automation } : {}),
+        // A remove that heals severed edges inverts to the splice that cut
+        // them, so redo severs them again.
+        ...(op.restoreRoutes && op.restoreRoutes.length > 0
+          ? { severedRoutes: op.restoreRoutes }
+          : {})
       }
     }
 

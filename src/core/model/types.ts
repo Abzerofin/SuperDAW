@@ -276,6 +276,8 @@ export interface ProjectState {
   readonly clips: Readonly<Record<ClipId, Clip>>
   readonly files: Readonly<Record<FileNodeId, FileNode>>
   readonly chat: readonly ChatMessage[]
+  /** Song lyrics — one shared text, saved with the project. */
+  readonly lyrics: string
   readonly comments: Readonly<Record<CommentId, Comment>>
   readonly masterVolume: number
   readonly automation: Readonly<Record<AutomationPointId, AutomationPoint>>
@@ -295,6 +297,7 @@ export function createEmptyProject(name: string, createdAt = 0): ProjectState {
     clips: {},
     files: {},
     chat: [],
+    lyrics: '',
     comments: {},
     masterVolume: 1,
     automation: {},

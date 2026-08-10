@@ -9,6 +9,7 @@ import { projectStore } from './projectStore'
 import { transport } from './transport'
 import { audioEngine, assetStore } from './audioInstance'
 import { trackInputs } from './trackInputs'
+import { preferences } from './preferences'
 
 /**
  * Recording session state (all ephemeral, per-user): which tracks are
@@ -35,14 +36,35 @@ interface TrackCapture {
 class RecordingStore {
   private armedTracks = new Set<TrackId>()
   recording = false
+  /** The count-in is clicking; capture starts when it ends. */
+  countingIn = false
   recordStartTicks = 0
   lastError: string | null = null
 
   private captures: TrackCapture[] = []
   private takeCounter = 1
+  private countInTimer: number | null = null
 
   private version = 0
   private listeners = new Set<() => void>()
+
+  constructor() {
+    // Space (or any transport stop) ends the take like the record button
+    // does — capture must never keep running invisibly after the
+    // transport halts. A stop during the count-in cancels it.
+    transport.onEvent((event) => {
+      if (event === 'stop' && (this.recording || this.countingIn)) this.stop()
+      // Playback started mid-count-in: waiting out the clicks is pointless.
+      if (event === 'play' && this.countingIn) {
+        if (this.countInTimer !== null) {
+          clearTimeout(this.countInTimer)
+          this.countInTimer = null
+        }
+        this.countingIn = false
+        void this.beginRoll(audioEngine.ensureContext())
+      }
+    })
+  }
 
   isArmed(trackId: TrackId): boolean {
     return this.armedTracks.has(trackId)
@@ -63,7 +85,7 @@ class RecordingStore {
 
   /** Start capture. `streamOverride` lets tests inject a synthetic stream. */
   async start(streamOverride?: MediaStream): Promise<void> {
-    if (this.recording) return
+    if (this.recording || this.countingIn) return
     const armed = this.armedIds().filter(
       (id) => projectStore.state.tracks[id]?.kind === 'audio'
     )
@@ -75,6 +97,8 @@ class RecordingStore {
       const ctx = audioEngine.ensureContext()
       if (ctx.state === 'suspended') await ctx.resume()
 
+      // Acquire inputs up front (permission prompts happen here), but hold
+      // capture until the roll so a count-in never ends up in the take.
       for (const trackId of armed) {
         const config = trackInputs.configOf(trackId)
         let stream = streamOverride
@@ -85,11 +109,41 @@ class RecordingStore {
           deviceKey = acquired.key
         }
         const tap = buildInputTap(ctx, stream, config.channels)
-        const recorder = new Recorder()
-        await recorder.start(ctx, tap.output)
-        this.captures.push({ trackId, recorder, tap, deviceKey })
+        this.captures.push({ trackId, recorder: new Recorder(), tap, deviceKey })
       }
 
+      // Count in only from a standing start — punching in while the song
+      // already plays must stay immediate.
+      const bars = transport.isPlaying ? 0 : preferences.countInBars
+      if (bars > 0) {
+        this.countingIn = true
+        this.lastError = null
+        const seconds = audioEngine.countInClicks(bars)
+        this.countInTimer = window.setTimeout(() => {
+          this.countInTimer = null
+          this.countingIn = false
+          void this.beginRoll(ctx)
+        }, seconds * 1000)
+        this.emit()
+      } else {
+        await this.beginRoll(ctx)
+      }
+    } catch (error) {
+      this.teardownCaptures()
+      this.fail(
+        error instanceof DOMException && error.name === 'NotAllowedError'
+          ? 'Microphone access was denied'
+          : `Could not start recording: ${error instanceof Error ? error.message : String(error)}`
+      )
+    }
+  }
+
+  /** The count-in (if any) is over: capture and roll from here. */
+  private async beginRoll(ctx: AudioContext): Promise<void> {
+    try {
+      for (const capture of this.captures) {
+        await capture.recorder.start(ctx, capture.tap.output)
+      }
       this.recordStartTicks = transport.positionTicks()
       this.recording = true
       this.lastError = null
@@ -98,9 +152,7 @@ class RecordingStore {
     } catch (error) {
       this.teardownCaptures()
       this.fail(
-        error instanceof DOMException && error.name === 'NotAllowedError'
-          ? 'Microphone access was denied'
-          : `Could not start recording: ${error instanceof Error ? error.message : String(error)}`
+        `Could not start recording: ${error instanceof Error ? error.message : String(error)}`
       )
     }
   }
@@ -116,6 +168,17 @@ class RecordingStore {
 
   /** Stop capture; every track's take becomes its own asset + bay entry + clip. */
   stop(): void {
+    // During the count-in nothing is captured yet — just call it off.
+    if (this.countingIn) {
+      if (this.countInTimer !== null) {
+        clearTimeout(this.countInTimer)
+        this.countInTimer = null
+      }
+      this.countingIn = false
+      this.teardownCaptures()
+      this.emit()
+      return
+    }
     if (!this.recording) return
     this.recording = false
     const captures = this.captures
@@ -182,7 +245,7 @@ class RecordingStore {
   }
 
   async toggle(): Promise<void> {
-    if (this.recording) this.stop()
+    if (this.recording || this.countingIn) this.stop()
     else await this.start()
   }
 

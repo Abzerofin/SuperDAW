@@ -497,16 +497,52 @@ function Waveform({
     const periodTicks = loopTicks > 0 ? loopTicks : duration
     const regionStartSec = (offset / tps) * rate
     const regionLenSec = (periodTicks / tps) * rate
+    // Each pixel column covers a span of buffer time. Above the peak grid's
+    // resolution the exact samples are read instead, so zooming in reveals
+    // the true waveform rather than 120-per-second stair-steps; zoomed out,
+    // every bucket the pixel spans is merged so no transient is skipped.
+    const buffer = asset.buffer
+    const sampleRate = buffer?.sampleRate ?? 0
+    const channels: Float32Array[] = []
+    if (buffer) {
+      for (let c = 0; c < buffer.numberOfChannels; c++) channels.push(buffer.getChannelData(c))
+    }
+    const secPerPx = (duration / w / tps) * rate
+    const useSamples = channels.length > 0 && secPerPx < 1 / asset.peaksPerSecond
+
     for (let x = 0; x < w; x++) {
       const posTicks = ((x / w) * duration) % periodTicks
       const intoRegionSec = (posTicks / tps) * rate
-      const sec = reverse
-        ? regionStartSec + regionLenSec - intoRegionSec
+      const startSec = reverse
+        ? regionStartSec + regionLenSec - intoRegionSec - secPerPx
         : regionStartSec + intoRegionSec
-      const bucket = Math.floor(sec * asset.peaksPerSecond)
-      if (bucket < 0 || bucket * 2 + 1 >= peaks.length) continue // silence past source end
-      const min = peaks[bucket * 2]
-      const max = peaks[bucket * 2 + 1]
+      let min = 0
+      let max = 0
+      let found = false
+      if (useSamples) {
+        const length = channels[0].length
+        const from = Math.max(0, Math.floor(startSec * sampleRate))
+        const to = Math.min(length, Math.max(from + 1, Math.ceil((startSec + secPerPx) * sampleRate)))
+        if (from < length && to > from) {
+          found = true
+          for (const data of channels) {
+            for (let i = from; i < to; i++) {
+              const v = data[i]
+              if (v < min) min = v
+              if (v > max) max = v
+            }
+          }
+        }
+      } else {
+        const b0 = Math.max(0, Math.floor(startSec * asset.peaksPerSecond))
+        const b1 = Math.max(b0 + 1, Math.ceil((startSec + secPerPx) * asset.peaksPerSecond))
+        for (let b = b0; b < b1 && b * 2 + 1 < peaks.length; b++) {
+          found = true
+          if (peaks[b * 2] < min) min = peaks[b * 2]
+          if (peaks[b * 2 + 1] > max) max = peaks[b * 2 + 1]
+        }
+      }
+      if (!found) continue // silence past source end
       g.fillRect(x, mid - max * amp, 1, Math.max(1, (max - min) * amp))
     }
   }, [asset, width, height, offset, duration, tempo, rate, reverse, loopTicks, themeId])
