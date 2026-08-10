@@ -193,6 +193,13 @@ const api = {
   vst3CloseEditor: (instanceId: string): Promise<void> =>
     ipcRenderer.invoke('vst3:close-editor', instanceId),
 
+  /** Push a param value into an open editor (collaborator edits arriving). */
+  vst3SetEditorParam: (args: {
+    instanceId: string
+    paramId: number
+    value: number
+  }): Promise<{ error?: string }> => ipcRenderer.invoke('vst3:set-editor-param', args),
+
   /**
    * Dock a plugin's GUI over a reserved area of the app window (CSS
    * viewport coords). Call with rect: null to collapse — that captures

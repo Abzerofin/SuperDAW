@@ -14,7 +14,9 @@ export function describe(state: ProjectState, op: Operation): string | null {
     case 'project/rename':
       return `Renamed project to "${op.name}"`
     case 'project/setTempo':
-      return `Set tempo to ${op.tempo} BPM`
+      return op.conform && op.conform.length > 0
+        ? `Set tempo to ${op.tempo} BPM, stretching audio to follow`
+        : `Set tempo to ${op.tempo} BPM`
     case 'project/setTimeSignature':
       return `Set time signature to ${op.timeSignature[0]}/${op.timeSignature[1]}`
     case 'track/create':
@@ -151,7 +153,17 @@ export function describe(state: ProjectState, op: Operation): string | null {
     }
     // Node positions are pure layout — keep them out of the activity feed.
     case 'plugin/setGraphPos':
+    case 'track/setGraphTerminal':
       return null
+    case 'clip/restore':
+      return `Restored clip "${clipName(state, op.clipId)}" to an earlier state`
+    case 'track/restore':
+      return `Restored track "${trackName(state, op.trackId)}" to an earlier state`
+    case 'plugin/restore': {
+      const instance = state.plugins[op.instanceId]
+      if (!instance) return null
+      return `Restored ${instance.descriptor.name} on "${trackName(state, instance.trackId)}" to an earlier state`
+    }
     case 'track/setSynthParam': {
       const def = SYNTH_DEFS[op.param]
       const name = trackName(state, op.trackId)

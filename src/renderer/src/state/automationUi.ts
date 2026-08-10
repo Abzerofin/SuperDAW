@@ -1,13 +1,19 @@
 import { useSyncExternalStore } from 'react'
-import type { AutomationParam, TrackId } from '@core/model/types'
+import type { PluginInstanceId, TrackId } from '@core/model/types'
 
 /**
- * Which tracks show their automation lane, and which parameter each lane
- * is editing (ephemeral, per-user).
+ * Which tracks show their automation lane, and what each lane is editing
+ * (ephemeral, per-user). A target is the track's own volume/pan, or one
+ * parameter of one insert effect when `instanceId` is set.
  */
+export interface AutomationTarget {
+  readonly param: string
+  readonly instanceId?: PluginInstanceId
+}
+
 class AutomationUiStore {
   private open = new Set<TrackId>()
-  private params = new Map<TrackId, AutomationParam>()
+  private targets = new Map<TrackId, AutomationTarget>()
   private version = 0
   private listeners = new Set<() => void>()
 
@@ -15,12 +21,12 @@ class AutomationUiStore {
     return this.open.has(trackId)
   }
 
-  paramOf(trackId: TrackId): AutomationParam {
-    return this.params.get(trackId) ?? 'volume'
+  targetOf(trackId: TrackId): AutomationTarget {
+    return this.targets.get(trackId) ?? { param: 'volume' }
   }
 
-  setParam(trackId: TrackId, param: AutomationParam): void {
-    this.params.set(trackId, param)
+  setTarget(trackId: TrackId, target: AutomationTarget): void {
+    this.targets.set(trackId, target)
     this.version++
     for (const listener of this.listeners) listener()
   }

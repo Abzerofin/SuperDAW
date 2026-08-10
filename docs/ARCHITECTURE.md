@@ -502,6 +502,62 @@ default).
     (enabled keeps its period). Splitting a looped clip keeps the period;
     the right half re-anchors within the pattern.
 
+18. ✅ **Workflow batch III** — peak-hold meter remnants (track slider +
+    master meter, 1 s hold, painted in the existing rAF loops); per-track
+    loop audition (`AudioEngine.setTrackLoop`: ghost repeats of one
+    track's material via `trackLoopRepeatState` derived states through the
+    ordinary schedule math, topped up on a lookahead timer — ephemeral,
+    per-user, inactive while the cycle region runs); bare-letter shortcuts
+    (S slice · M mute · I monitor · L track loop · D/Shift+D duplicate
+    clip/track · Shift+A contextual select-all · Q quantize · H humanize —
+    quantize/humanize are one absolute `note/moveMany` per press, jitter
+    resolved before dispatch); tempo conform (`project/setTempo` grew an
+    optional `conform` stretch list — ask/always/never preference with a
+    don't-ask-again panel, plus per-track "Stretch audio to tempo");
+    double-click trim handles restore the trimmed material; middle-button
+    policy (hold-drag pans any `[data-pan]` panel, plain click pings,
+    toggleable in Settings); grouped asset-download prompt (auto-download
+    off by default, Settings ▸ Collaboration); collapsible FX cards
+    (ephemeral); basic filter effects (low/high/band-pass, notch) + LFO
+    tremolo as builtins; movable graph terminals
+    (`track/setGraphTerminal`, positions on the Track); insert-parameter
+    automation (`AutomationPoint.instanceId` — lanes pick any insert
+    param, curves own the knob during playback via a 50 ms sampling timer
+    live and sampled `apply` calls in offline renders, cascading with
+    `plugin/remove`); VST3 editors now RECEIVE remote param ops
+    (`vst3:set-editor-param` closes the peer-edit → stale-editor-state
+    clobber gap).
+
+19. ✅ **Workflow batch IV** — routing graph gained Ctrl+wheel zoom, a
+    middle-drag pan surface and an inline "+ Add effect" browser (the "+"
+    card extracted to `fx/AddPluginCard.tsx` with a compact toolbar mode);
+    track headers gained an automation-lane toggle; a Save & Exit button
+    sits left of File; the BPM field is draggable (preview locally, ONE op
+    through the same conform flow on release; click still types); the two
+    return-to-start buttons merged into one whose mode right-click
+    switches; chat + activity panels start hidden with corner bubbles on
+    their buttons (chat: dot, activity: count of ops since last viewed —
+    `panels.unreadActivity`); the piano roll gained a sticky clip-absolute
+    ruler with the arrangement ruler's gestures (scrub, Shift+click
+    marker, loop-region strip).
+
+20. ✅ **Workflow batch V** — per-ITEM history: `clip/restore` /
+    `track/restore` / `plugin/restore` ops (absolute field sets, invert =
+    current fields) fed by an ephemeral `state/itemHistory` store that
+    reference-diffs adjacent immutable states per op (snapshots are shared
+    references — no copying) and surfaces in the clip menu, track menu and
+    FX cards; waveform-peak snapping (transient onsets derived once per
+    asset from the existing peak envelopes; a clip drag snaps its
+    transients onto other clips' transients when closer than the grid,
+    with a guide line); live wire oscilloscopes on the routing graph (each
+    wire draws the audio leaving its source node — the effects' existing
+    analyser taps plus a lazy track-input tap); the piano roll became a
+    WHOLE-TRACK editor in absolute song time (every MIDI clip of the track
+    visible and editable side by side, per-clip end handles, dead regions
+    between clips, add-note targets the clip under the pointer, scrolls
+    freely across the song); the Exit button asks Save / Save As / Don't
+    Save / Cancel in-app.
+
 Roadmap beyond: VST3 hosting (native module; first consumer of the
 provider/`stateBlob` contracts), collaborator audio streaming + proxy
 renders for remote/missing plugins, autotune/pitch correction (dedicated AudioWorklet DSP

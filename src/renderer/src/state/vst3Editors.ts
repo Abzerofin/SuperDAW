@@ -28,6 +28,27 @@ export function wireEditorEvents(): void {
   if (!api?.onVst3EditorEvent) return
   wired = true
 
+  // The other direction: a COLLABORATOR's param edit must reach any editor
+  // we have open (and the hosted instance behind it) — otherwise the GUI
+  // shows stale values and closing it would capture pre-edit state over
+  // the peer's change. Main no-ops when no editor is open; non-numeric
+  // param keys (builtins) are skipped.
+  if (api.vst3SetEditorParam) {
+    const push = (instanceId: string, param: string, value: number): void => {
+      const paramId = Number(param)
+      if (!Number.isFinite(paramId)) return
+      void api.vst3SetEditorParam({ instanceId, paramId, value })
+    }
+    projectStore.onOperation((envelope, source) => {
+      if (source !== 'remote') return
+      const op = envelope.op
+      if (op.type === 'plugin/setParam') push(op.instanceId, op.param, op.value)
+      else if (op.type === 'plugin/setParams') {
+        for (const [param, value] of Object.entries(op.params)) push(op.instanceId, param, value)
+      }
+    })
+  }
+
   api.onVst3EditorEvent((event) => {
     if (event.kind === 'state') {
       if (typeof event.stateBlob === 'string') {

@@ -96,8 +96,20 @@ export function apply(state: ProjectState, op: Operation): ProjectState {
 
     case 'project/setTempo': {
       const tempo = clamp(op.tempo, 20, 400)
-      if (state.tempo === tempo) return state
-      return { ...state, tempo }
+      let clips = state.clips
+      let clipsChanged = false
+      for (const entry of op.conform ?? []) {
+        const clip = clips[entry.clipId]
+        if (!clip) continue
+        const stretch =
+          Math.round(clamp(entry.stretch, MIN_STRETCH, MAX_STRETCH) * 1000) / 1000
+        if (clip.stretch === stretch) continue
+        if (!clipsChanged) clips = { ...clips }
+        ;(clips as Record<ClipId, Clip>)[entry.clipId] = { ...clip, stretch }
+        clipsChanged = true
+      }
+      if (state.tempo === tempo && !clipsChanged) return state
+      return { ...state, tempo, clips }
     }
 
     case 'project/setTimeSignature': {
@@ -241,6 +253,16 @@ export function apply(state: ProjectState, op: Operation): ProjectState {
     case 'automation/add': {
       if (state.automation[op.point.id]) return state
       if (!state.tracks[op.point.trackId]) return state
+      // Plugin-param points must name a live insert on the same track (and
+      // one of its known params); track points are volume/pan only.
+      if (op.point.instanceId !== undefined) {
+        const instance = state.plugins[op.point.instanceId]
+        if (!instance || instance.trackId !== op.point.trackId) return state
+        const defs = paramDefsOf(instance.descriptor)
+        if (defs && !defs[op.point.param]) return state
+      } else if (op.point.param !== 'volume' && op.point.param !== 'pan') {
+        return state
+      }
       const point = {
         ...op.point,
         ticks: Math.max(0, op.point.ticks),
@@ -337,6 +359,10 @@ export function apply(state: ProjectState, op: Operation): ProjectState {
       if (op.routes && op.routes.length > 0) {
         next = apply(next, { type: 'route/addMany', routes: op.routes })
       }
+      // ...and its parameter automation (each point re-validated).
+      for (const point of op.automation ?? []) {
+        next = apply(next, { type: 'automation/add', point })
+      }
       return next
     }
 
@@ -344,12 +370,22 @@ export function apply(state: ProjectState, op: Operation): ProjectState {
       if (!state.plugins[op.instanceId]) return state
       const plugins = { ...state.plugins }
       delete plugins[op.instanceId]
-      // Cascade: a routing edge without both endpoints is meaningless.
+      // Cascade: a routing edge without both endpoints is meaningless, and
+      // so is automation of a parameter that no longer exists.
       const routes: Record<string, Route> = {}
       for (const route of Object.values(state.routes)) {
         if (route.from !== op.instanceId && route.to !== op.instanceId) routes[route.id] = route
       }
-      return { ...state, plugins, routes }
+      let automation = state.automation
+      if (Object.values(state.automation).some((p) => p.instanceId === op.instanceId)) {
+        automation = {}
+        for (const point of Object.values(state.automation)) {
+          if (point.instanceId !== op.instanceId) {
+            (automation as Record<string, AutomationPoint>)[point.id] = point
+          }
+        }
+      }
+      return { ...state, plugins, routes, automation }
     }
 
     case 'route/addMany': {
@@ -385,6 +421,24 @@ export function apply(state: ProjectState, op: Operation): ProjectState {
       return {
         ...state,
         plugins: { ...state.plugins, [op.instanceId]: { ...instance, graphX: x, graphY: y } }
+      }
+    }
+
+    case 'track/setGraphTerminal': {
+      const track = state.tracks[op.trackId]
+      if (!track || !Number.isFinite(op.x) || !Number.isFinite(op.y)) return state
+      const x = Math.round(clamp(op.x, 0, 8000))
+      const y = Math.round(clamp(op.y, 0, 8000))
+      const patch =
+        op.terminal === 'in' ? { graphInX: x, graphInY: y } : { graphOutX: x, graphOutY: y }
+      const same =
+        op.terminal === 'in'
+          ? track.graphInX === x && track.graphInY === y
+          : track.graphOutX === x && track.graphOutY === y
+      if (same) return state
+      return {
+        ...state,
+        tracks: { ...state.tracks, [op.trackId]: { ...track, ...patch } }
       }
     }
 
@@ -657,6 +711,92 @@ export function apply(state: ProjectState, op: Operation): ProjectState {
       let next = state
       for (const edit of op.edits) next = apply(next, { type: 'clip/resize', ...edit })
       return next
+    }
+
+    case 'clip/restore': {
+      const current = state.clips[op.clipId]
+      if (!current) return state
+      const src = op.clip
+      const duration = Math.max(1, Math.round(src.duration))
+      const fadeIn = Math.min(Math.max(0, Math.round(src.fadeIn)), duration)
+      const restored: Clip = {
+        ...current,
+        // The stored home track is honored only while it still exists.
+        trackId: state.tracks[src.trackId] ? src.trackId : current.trackId,
+        name: typeof src.name === 'string' && src.name !== '' ? src.name : current.name,
+        start: Math.max(0, Math.round(src.start)),
+        duration,
+        // The material itself is the clip's identity, not its history.
+        assetId: current.assetId,
+        offset: Math.max(0, Math.round(src.offset)),
+        color: typeof src.color === 'string' ? src.color : null,
+        fadeIn,
+        fadeOut: Math.min(Math.max(0, Math.round(src.fadeOut)), duration - fadeIn),
+        reverse: src.reverse === true,
+        pitch: clamp(src.pitch, MIN_PITCH, MAX_PITCH),
+        stretch: Math.round(clamp(src.stretch, MIN_STRETCH, MAX_STRETCH) * 1000) / 1000,
+        loopLength: normalizeLoop(src.loopLength)
+      }
+      const same = (Object.keys(restored) as Array<keyof Clip>).every(
+        (key) => restored[key] === current[key]
+      )
+      if (same) return state
+      return { ...state, clips: { ...state.clips, [op.clipId]: restored } }
+    }
+
+    case 'track/restore': {
+      const track = state.tracks[op.trackId]
+      if (!track) return state
+      const synth: Record<string, number> = {}
+      for (const [key, value] of Object.entries(op.track.synth ?? {})) {
+        if (!Number.isFinite(value)) continue
+        synth[key] = SYNTH_DEFS[key] ? clampParam(SYNTH_DEFS[key], value) : value
+      }
+      const restored: Track = {
+        ...track,
+        name: typeof op.track.name === 'string' && op.track.name !== '' ? op.track.name : track.name,
+        color: typeof op.track.color === 'string' ? op.track.color : track.color,
+        muted: op.track.muted === true,
+        soloed: op.track.soloed === true,
+        volume: clamp(op.track.volume, 0, MAX_GAIN),
+        pan: clamp(op.track.pan, -1, 1),
+        synth: track.kind === 'midi' ? synth : track.synth
+      }
+      const sameSynth =
+        Object.keys(restored.synth).length === Object.keys(track.synth).length &&
+        Object.entries(restored.synth).every(([k, v]) => track.synth[k] === v)
+      const same =
+        sameSynth &&
+        restored.name === track.name &&
+        restored.color === track.color &&
+        restored.muted === track.muted &&
+        restored.soloed === track.soloed &&
+        restored.volume === track.volume &&
+        restored.pan === track.pan
+      if (same) return state
+      return { ...state, tracks: { ...state.tracks, [op.trackId]: restored } }
+    }
+
+    case 'plugin/restore': {
+      const instance = state.plugins[op.instanceId]
+      if (!instance) return state
+      const defs = paramDefsOf(instance.descriptor)
+      const params = sanitizeParams(defs, op.params)
+      const enabled = op.enabled === true
+      const stateBlob = typeof op.stateBlob === 'string' ? op.stateBlob : null
+      const sameParams =
+        Object.keys(params).length === Object.keys(instance.params).length &&
+        Object.entries(params).every(([k, v]) => instance.params[k] === v)
+      if (sameParams && instance.enabled === enabled && instance.stateBlob === stateBlob) {
+        return state
+      }
+      return {
+        ...state,
+        plugins: {
+          ...state.plugins,
+          [op.instanceId]: { ...instance, params, enabled, stateBlob }
+        }
+      }
     }
 
     case 'clip/rename':

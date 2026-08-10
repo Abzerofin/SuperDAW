@@ -21,6 +21,10 @@ import {
 } from '@/lib/projectFile'
 import { appShell } from '@/state/appShell'
 import { settingsUi } from '@/state/settingsUi'
+import { preferences } from '@/state/preferences'
+import { sessionFile } from '@/state/sessionFile'
+import { capturePointer } from '@/lib/pointer'
+import { changeTempo, tempoConformEntries } from '@/lib/tempoActions'
 import { useRecentProjects } from '@/state/recentProjects'
 import { CollabPanel } from './CollabPanel'
 
@@ -33,26 +37,14 @@ export function TransportBar(): React.JSX.Element {
   return (
     <div className="transport">
       <div className="transport-brand">SuperDAW</div>
+      <ExitButton />
       <FileMenu />
+      <button className="tbtn" title="Settings" onClick={() => settingsUi.open()}>
+        Settings
+      </button>
 
       <div className="transport-center">
-        <button
-          className="tbtn"
-          title="Return to start"
-          onClick={() => transport.setPosition(0)}
-        >
-          ⏮
-        </button>
-        <button
-          className="tbtn"
-          title="Return to start and bring the view along"
-          onClick={() => {
-            transport.setPosition(0)
-            timelineViewport.scrollTo(0)
-          }}
-        >
-          ⇤
-        </button>
+        <ReturnButton />
         <PlayButton />
         <StopButton />
         <RecordButton />
@@ -81,9 +73,7 @@ export function TransportBar(): React.JSX.Element {
           onClick={() => panelState.togglePanel('chat')}
         >
           Chat
-          {panelState.unreadChat > 0 && (
-            <span className="chat-badge">{Math.min(panelState.unreadChat, 99)}</span>
-          )}
+          {panelState.unreadChat > 0 && <span className="chat-badge chat-badge-dot" />}
         </button>
         <button
           className={`tbtn ${panelState.isOpen('activity') ? 'tbtn-active' : ''}`}
@@ -91,12 +81,95 @@ export function TransportBar(): React.JSX.Element {
           onClick={() => panelState.togglePanel('activity')}
         >
           Activity
+          {panelState.unreadActivity > 0 && (
+            <span className="chat-badge">{Math.min(panelState.unreadActivity, 99)}</span>
+          )}
         </button>
         <button className="tbtn" title="Settings" onClick={() => settingsUi.open()}>
           ⚙
         </button>
       </div>
     </div>
+  )
+}
+
+/**
+ * Exit: back to Home. With unsaved changes it asks — Save / Save As /
+ * Don't Save / Cancel — in a small anchored panel (no OS dialog). A clean
+ * project just exits.
+ */
+function ExitButton(): React.JSX.Element {
+  const [asking, setAsking] = useState(false)
+
+  const exitAfter = async (save: 'save' | 'saveAs' | null): Promise<void> => {
+    setAsking(false)
+    if (save) await saveProject(save === 'saveAs')
+    // If a save dialog was cancelled the project is still dirty and the
+    // regular confirm safety net still applies; "Don't save" skips it —
+    // the user just answered that question here.
+    closeProject(save === null)
+  }
+
+  return (
+    <div className="collab-anchor">
+      <button
+        className="tbtn"
+        title="Close the project and return to Home"
+        onClick={() => {
+          if (sessionFile.dirty) setAsking((v) => !v)
+          else closeProject()
+        }}
+      >
+        Exit
+      </button>
+      {asking && (
+        <div className="menu-panel tempo-ask">
+          <div className="tempo-ask-title">Save changes before exiting?</div>
+          <div className="tempo-ask-actions">
+            <button className="corner-btn" onClick={() => void exitAfter('save')}>
+              Save
+            </button>
+            <button className="corner-btn" onClick={() => void exitAfter('saveAs')}>
+              Save As…
+            </button>
+            <button className="corner-btn" onClick={() => void exitAfter(null)}>
+              Don&apos;t save
+            </button>
+            <button className="corner-btn" onClick={() => setAsking(false)}>
+              Cancel
+            </button>
+          </div>
+        </div>
+      )}
+    </div>
+  )
+}
+
+/**
+ * Return-to-start. One button, two flavors: plain return, or return AND
+ * scroll the view back with it. Right-click switches which one this is.
+ */
+function ReturnButton(): React.JSX.Element {
+  const [followView, setFollowView] = useState(false)
+  return (
+    <button
+      className="tbtn"
+      title={
+        followView
+          ? 'Return to start and bring the view along · right-click for plain return'
+          : 'Return to start · right-click to also bring the view along'
+      }
+      onClick={() => {
+        transport.setPosition(0)
+        if (followView) timelineViewport.scrollTo(0)
+      }}
+      onContextMenu={(e) => {
+        e.preventDefault()
+        setFollowView((v) => !v)
+      }}
+    >
+      {followView ? '⇤' : '⏮'}
+    </button>
   )
 }
 
@@ -427,19 +500,34 @@ function Meter(): React.JSX.Element {
   useEffect(() => {
     let raf = 0
     let level = 0
+    let peak = 0
+    let peakUntil = 0
     const draw = (): void => {
       const canvas = canvasRef.current
       if (canvas) {
         const g = canvas.getContext('2d')
         if (g) {
           const { width, height } = canvas
-          level = Math.max(audioEngine.meterLevel(), level * 0.92)
+          const raw = audioEngine.meterLevel()
+          level = Math.max(raw, level * 0.92)
           g.clearRect(0, 0, width, height)
           g.fillStyle = 'rgba(255, 255, 255, 0.08)'
           g.fillRect(0, 0, width, height)
           const w = Math.round(Math.min(1, level) * width)
           g.fillStyle = level > 0.98 ? '#e06c75' : level > 0.7 ? '#e0b25b' : '#6fbf73'
           g.fillRect(0, 0, w, height)
+          // Peak-hold remnant: a marker holds the recent peak for a second.
+          const now = performance.now()
+          if (raw >= peak && raw > 0.001) {
+            peak = raw
+            peakUntil = now + 1000
+          } else if (now >= peakUntil) {
+            peak = 0
+          }
+          if (peak > 0) {
+            g.fillStyle = peak > 0.98 ? '#e06c75' : 'rgba(255, 255, 255, 0.75)'
+            g.fillRect(Math.min(width - 2, Math.round(peak * width)), 0, 2, height)
+          }
         }
       }
       raf = requestAnimationFrame(draw)
@@ -461,12 +549,80 @@ function PositionDisplay(): React.JSX.Element {
 function TempoField({ tempo }: { tempo: number }): React.JSX.Element {
   const [editing, setEditing] = useState(false)
   const [value, setValue] = useState('')
+  /** A tempo waiting on the stretch-audio question (preference = ask). */
+  const [pending, setPending] = useState<number | null>(null)
+  const [dontAsk, setDontAsk] = useState(false)
+  /** Live value while the field is being dragged (no op until release). */
+  const [dragValue, setDragValue] = useState<number | null>(null)
+  const dragRef = useRef<{
+    originX: number
+    originY: number
+    origTempo: number
+    value: number
+    moved: boolean
+  } | null>(null)
+
+  /** The single entry point for a tempo change — text edit or drag. */
+  const requestTempo = (next: number): void => {
+    if (next === tempo) return
+    const choice = preferences.tempoConform
+    const wouldConform = tempoConformEntries(projectStore.state, tempo, next).length > 0
+    if (choice === 'ask' && wouldConform) {
+      setPending(next)
+      setDontAsk(false)
+      return
+    }
+    changeTempo(next, choice === 'always')
+  }
 
   const commit = (): void => {
     setEditing(false)
     const parsed = Number(value)
-    if (Number.isFinite(parsed) && parsed !== tempo) {
-      projectStore.dispatch({ type: 'project/setTempo', tempo: Math.round(parsed) })
+    if (!Number.isFinite(parsed)) return
+    requestTempo(Math.round(parsed))
+  }
+
+  const resolve = (conform: boolean): void => {
+    if (pending === null) return
+    // "Don't ask again" locks this answer in until changed in Settings.
+    if (dontAsk) preferences.set('tempoConform', conform ? 'always' : 'never')
+    changeTempo(pending, conform)
+    setPending(null)
+  }
+
+  // Drag = coarse tempo control (right/up raises); a plain click still
+  // opens the text editor. ONE op on release, through the same conform flow.
+  const beginDrag = (e: React.PointerEvent): void => {
+    if (e.button !== 0) return
+    capturePointer(e)
+    dragRef.current = {
+      originX: e.clientX,
+      originY: e.clientY,
+      origTempo: tempo,
+      value: tempo,
+      moved: false
+    }
+  }
+  const moveDrag = (e: React.PointerEvent): void => {
+    const drag = dragRef.current
+    if (!drag) return
+    const dx = e.clientX - drag.originX
+    const dy = drag.originY - e.clientY
+    if (!drag.moved && Math.abs(dx) + Math.abs(dy) < 4) return
+    drag.moved = true
+    drag.value = Math.min(400, Math.max(20, drag.origTempo + Math.round((dx + dy) / 3)))
+    setDragValue(drag.value)
+  }
+  const endDrag = (): void => {
+    const drag = dragRef.current
+    dragRef.current = null
+    if (!drag) return
+    if (drag.moved) {
+      requestTempo(drag.value)
+      setDragValue(null)
+    } else {
+      setValue(String(tempo))
+      setEditing(true)
     }
   }
 
@@ -486,15 +642,50 @@ function TempoField({ tempo }: { tempo: number }): React.JSX.Element {
     )
   }
   return (
-    <button
-      className="transport-tempo mono"
-      title="Click to edit tempo"
-      onClick={() => {
-        setValue(String(tempo))
-        setEditing(true)
-      }}
-    >
-      {tempo} BPM
-    </button>
+    <div className="collab-anchor">
+      <button
+        className="transport-tempo mono"
+        title="Drag to change the tempo · click to type it"
+        onPointerDown={beginDrag}
+        onPointerMove={moveDrag}
+        onPointerUp={endDrag}
+        onPointerCancel={() => {
+          dragRef.current = null
+          setDragValue(null)
+        }}
+      >
+        {dragValue ?? tempo} BPM
+      </button>
+      {pending !== null && (
+        <div className="menu-panel tempo-ask">
+          <div className="tempo-ask-title">
+            {tempo} → {pending} BPM — stretch audio to match?
+          </div>
+          <p className="settings-dim">
+            Stretching keeps audio filling the same bars (tape-style, pitch shifts with speed).
+            Without it, audio keeps its speed and drifts off the grid.
+          </p>
+          <div className="tempo-ask-actions">
+            <button className="corner-btn" onClick={() => resolve(true)}>
+              Stretch audio
+            </button>
+            <button className="corner-btn" onClick={() => resolve(false)}>
+              Keep audio speed
+            </button>
+            <button className="corner-btn" onClick={() => setPending(null)}>
+              Cancel
+            </button>
+          </div>
+          <label className="tempo-ask-remember">
+            <input
+              type="checkbox"
+              checked={dontAsk}
+              onChange={(e) => setDontAsk(e.target.checked)}
+            />
+            Don&apos;t ask again (change any time in Settings ▸ General)
+          </label>
+        </div>
+      )}
+    </div>
   )
 }

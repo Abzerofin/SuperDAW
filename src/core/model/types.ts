@@ -125,6 +125,15 @@ export interface Track {
    * stays fully intact in the document — unfreezing just clears this.
    */
   readonly frozenAssetId: string | null
+  /**
+   * Graph-editor positions of the In / Mix Out terminal nodes (absent =
+   * automatic layout). Document data like PluginInstance.graphX, so a
+   * plugin tree keeps its arrangement for every collaborator.
+   */
+  readonly graphInX?: number
+  readonly graphInY?: number
+  readonly graphOutX?: number
+  readonly graphOutY?: number
 }
 
 export type PluginInstanceId = string
@@ -204,11 +213,19 @@ export type AutomationPointId = string
  * 0 = hard left, 0.5 = center, 1 = hard right — and while pan automation
  * points exist they OWN the panner (the knob is overridden).
  * Points between are linearly interpolated.
+ *
+ * With `instanceId` set the point automates an INSERT EFFECT's parameter
+ * instead: `param` names one of the plugin's params and `value` maps
+ * linearly onto that param's min..max range. While points exist for a
+ * param, they own it (the knob is overridden during playback).
  */
 export interface AutomationPoint {
   readonly id: AutomationPointId
   readonly trackId: TrackId
-  readonly param: AutomationParam
+  /** 'volume' | 'pan' for the track; a plugin param name when instanceId is set. */
+  readonly param: string
+  /** The insert this point automates; absent = track volume/pan. */
+  readonly instanceId?: PluginInstanceId
   readonly ticks: number
   readonly value: number
 }
@@ -336,14 +353,19 @@ export function notesOfClip(state: ProjectState, clipId: ClipId): Note[] {
     .sort((a, b) => a.start - b.start || a.pitch - b.pitch)
 }
 
-/** A track's points for one parameter, in timeline order. */
+/**
+ * A track's points for one parameter, in timeline order. `instanceId`
+ * selects an insert's param curve; absent = the track's own volume/pan
+ * (plugin points never leak into track lanes and vice versa).
+ */
 export function automationOf(
   state: ProjectState,
   trackId: TrackId,
-  param: AutomationParam
+  param: string,
+  instanceId?: PluginInstanceId
 ): AutomationPoint[] {
   return Object.values(state.automation)
-    .filter((p) => p.trackId === trackId && p.param === param)
+    .filter((p) => p.trackId === trackId && p.param === param && p.instanceId === instanceId)
     .sort((a, b) => a.ticks - b.ticks)
 }
 

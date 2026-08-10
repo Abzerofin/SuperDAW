@@ -1,6 +1,5 @@
 import type { ProjectState, Track, TrackId } from '../model/types'
 import {
-  automationOf,
   clipsOfTrack,
   notesOfClip,
   pluginsOfTrack,
@@ -37,7 +36,7 @@ export function buildDuplicateTrackOp(state: ProjectState, trackId: TrackId): Op
 
   const clips: ReturnType<typeof clipsOfTrack> = []
   const notes: ReturnType<typeof notesOfClip> = []
-  const automation: ReturnType<typeof automationOf> = []
+  const automation: import('../model/types').AutomationPoint[] = []
   const plugins: ReturnType<typeof pluginsOfTrack> = []
   const routes: ReturnType<typeof routesOfTrack> = []
   const pluginIdMap = new Map<string, string>()
@@ -50,13 +49,23 @@ export function buildDuplicateTrackOp(state: ProjectState, trackId: TrackId): Op
         notes.push({ ...note, id: newId('nte'), clipId: newClipId })
       }
     }
-    for (const point of [...automationOf(state, t.id, 'volume'), ...automationOf(state, t.id, 'pan')]) {
-      automation.push({ ...point, id: newId('aut'), trackId: newTrackId })
-    }
     for (const instance of pluginsOfTrack(state, t.id)) {
       const newInstanceId = newId('plg')
       pluginIdMap.set(instance.id, newInstanceId)
       plugins.push({ ...instance, id: newInstanceId, trackId: newTrackId })
+    }
+    // ALL of the track's points — volume/pan plus every insert's parameter
+    // curves, the latter remapped onto the duplicated instances.
+    for (const point of Object.values(state.automation)) {
+      if (point.trackId !== t.id) continue
+      automation.push({
+        ...point,
+        id: newId('aut'),
+        trackId: newTrackId,
+        ...(point.instanceId !== undefined
+          ? { instanceId: pluginIdMap.get(point.instanceId) ?? point.instanceId }
+          : {})
+      })
     }
     // Routing edges follow their plugins ('in'/'out' terminals stay as-is).
     for (const route of routesOfTrack(state, t.id)) {

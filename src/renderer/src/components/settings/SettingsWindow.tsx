@@ -8,6 +8,7 @@ import {
   useSettingsUi,
   type SettingsSection
 } from '@/state/settingsUi'
+import { preferences, usePreferences, type TempoConformChoice } from '@/state/preferences'
 import { PluginsPane } from './PluginsPane'
 import { ThemesPane } from './ThemesPane'
 
@@ -81,12 +82,29 @@ export function SettingsWindow(): React.JSX.Element | null {
 
 function CollaborationPane(): React.JSX.Element {
   const collabState = useCollab()
+  usePreferences()
   const [url, setUrl] = useState(collab.relayUrl)
   const inSession = collabState.mode !== 'off'
 
   return (
     <div className="settings-pane">
       <h2>Collaboration</h2>
+      <div className="settings-field">
+        <label htmlFor="settings-auto-download">File downloads</label>
+        <select
+          id="settings-auto-download"
+          value={preferences.autoDownloadAssets ? 'auto' : 'ask'}
+          onChange={(e) => preferences.set('autoDownloadAssets', e.target.value === 'auto')}
+        >
+          <option value="ask">Ask before downloading collaborators&apos; files</option>
+          <option value="auto">Download automatically</option>
+        </select>
+        <p className="settings-dim">
+          When collaborators share audio, their files must transfer to your machine before those
+          clips make sound. Until a file arrives its clips play silently, so waiting is always
+          safe.
+        </p>
+      </div>
       <div className="settings-field">
         <label htmlFor="settings-relay-url">Relay server</label>
         <input
@@ -123,11 +141,43 @@ function CollaborationPane(): React.JSX.Element {
 
 function GeneralPane(): React.JSX.Element {
   useCollab()
+  usePreferences()
   const [name, setName] = useState(collab.displayName)
 
   return (
     <div className="settings-pane">
       <h2>General</h2>
+      <div className="settings-field">
+        <label htmlFor="settings-tempo-conform">Tempo changes</label>
+        <select
+          id="settings-tempo-conform"
+          value={preferences.tempoConform}
+          onChange={(e) => preferences.set('tempoConform', e.target.value as TempoConformChoice)}
+        >
+          <option value="ask">Ask what to do with audio</option>
+          <option value="always">Always stretch audio to the new tempo</option>
+          <option value="never">Never stretch audio</option>
+        </select>
+        <p className="settings-dim">
+          What changing the project BPM does to existing audio clips. Stretching is tape-style
+          (speed and pitch change together). Individual tracks can be conformed any time from the
+          track&apos;s ⋯ menu.
+        </p>
+      </div>
+      <div className="settings-field">
+        <label htmlFor="settings-middle-ping">Middle-click ping</label>
+        <select
+          id="settings-middle-ping"
+          value={preferences.middleClickPing ? 'on' : 'off'}
+          onChange={(e) => preferences.set('middleClickPing', e.target.value === 'on')}
+        >
+          <option value="on">On — a middle click pings collaborators</option>
+          <option value="off">Off</option>
+        </select>
+        <p className="settings-dim">
+          Holding the middle button and dragging always pans, whatever this is set to.
+        </p>
+      </div>
       <div className="settings-field">
         <label htmlFor="settings-display-name">Display name</label>
         <input

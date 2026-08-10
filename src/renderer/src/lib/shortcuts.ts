@@ -6,6 +6,9 @@ import { selection } from '@/state/selection'
 import { commentUi } from '@/state/commentUi'
 import { appShell } from '@/state/appShell'
 import { paletteUi } from '@/state/paletteUi'
+import { gridTicksFor, gridUi } from '@/state/gridUi'
+import { trackInputs } from '@/state/trackInputs'
+import { audioEngine } from '@/state/audioInstance'
 import { newProject, openProject, saveProject } from './projectFile'
 import {
   copySelectedClip,
@@ -15,6 +18,23 @@ import {
   sliceSelectionIntoEqualParts,
   splitSelectedClipAtEditPoint
 } from './clipActions'
+import { DEFAULT_QUANTIZE_TICKS, humanizeNotes, quantizeNotes } from './noteActions'
+
+/** Notes living on the selected clips (for timeline-level quantize/humanize). */
+function selectedClipNoteIds(): string[] {
+  const ids: string[] = []
+  for (const note of Object.values(projectStore.state.notes)) {
+    if (selection.selectedClipIds.has(note.clipId)) ids.push(note.id)
+  }
+  return ids
+}
+
+/** The snap grid as a quantize resolution; auto/off fall back to a 16th. */
+function quantizeGridTicks(): number {
+  const choice = gridUi.choice
+  if (choice === 'auto' || choice === 'off') return DEFAULT_QUANTIZE_TICKS
+  return gridTicksFor(choice, projectStore.state.timeSignature, 48)
+}
 
 /** App-wide keyboard shortcuts. Inactive while a text field has focus. */
 export function useGlobalShortcuts(): void {
@@ -112,6 +132,77 @@ export function useGlobalShortcuts(): void {
         e.preventDefault()
         splitSelectedClipAtEditPoint()
         return
+      }
+
+      // Bare-letter workflow keys. The piano roll handles Q/H/Shift+A for
+      // notes itself and stops propagation, so these act on the timeline.
+      if (!mod && !e.altKey) {
+        const key = e.key.toLowerCase()
+        // Shift+A widens a clip selection to every clip; with nothing
+        // selected it deliberately selects nothing.
+        if (key === 'a' && e.shiftKey) {
+          if (selection.selectedClipIds.size > 0) {
+            e.preventDefault()
+            selection.selectClips(
+              Object.keys(projectStore.state.clips),
+              selection.selectedClipId ?? undefined
+            )
+          }
+          return
+        }
+        if (key === 's' && !e.shiftKey) {
+          splitSelectedClipAtEditPoint()
+          return
+        }
+        if (key === 'm' && !e.shiftKey) {
+          const trackId = selection.selectedTrackId
+          const track = trackId ? projectStore.state.tracks[trackId] : undefined
+          if (track) {
+            projectStore.dispatch({
+              type: 'track/setMute',
+              trackId: track.id,
+              muted: !track.muted
+            })
+          }
+          return
+        }
+        if (key === 'i' && !e.shiftKey) {
+          const trackId = selection.selectedTrackId
+          if (trackId && projectStore.state.tracks[trackId]?.kind === 'audio') {
+            void trackInputs.toggleMonitor(trackId)
+          }
+          return
+        }
+        if (key === 'l' && !e.shiftKey) {
+          const trackId = selection.selectedTrackId
+          if (trackId) audioEngine.setTrackLoop(trackId, !audioEngine.isTrackLooping(trackId))
+          return
+        }
+        if (key === 'd') {
+          if (e.shiftKey) {
+            // Shift+D duplicates the selected track (or the selected clip's).
+            const trackId =
+              selection.selectedTrackId ??
+              (selection.selectedClipId
+                ? projectStore.state.clips[selection.selectedClipId]?.trackId
+                : undefined)
+            if (trackId) {
+              const op = buildDuplicateTrackOp(projectStore.state, trackId)
+              if (op) projectStore.dispatch(op)
+            }
+          } else {
+            duplicateSelectedClip()
+          }
+          return
+        }
+        if (key === 'q' && !e.shiftKey) {
+          quantizeNotes(selectedClipNoteIds(), quantizeGridTicks())
+          return
+        }
+        if (key === 'h' && !e.shiftKey) {
+          humanizeNotes(selectedClipNoteIds())
+          return
+        }
       }
 
       // 2..9 slice the selected clips into that many equal pieces. Bare

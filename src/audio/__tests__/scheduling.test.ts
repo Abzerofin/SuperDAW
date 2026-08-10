@@ -3,7 +3,7 @@ import type { Clip, ProjectState, Track } from '@core/model/types'
 import { createEmptyProject } from '@core/model/types'
 import { PPQ } from '@core/model/timebase'
 import { apply } from '@core/ops/apply'
-import { beatIndexAt, clipFadeRamps, clipSegments, effectiveFades, fadeCurve, metronomeClicks, scheduleClips, scheduleNotes, ticksPerSecond } from '../scheduling'
+import { beatIndexAt, clipFadeRamps, clipSegments, effectiveFades, fadeCurve, metronomeClicks, scheduleClips, scheduleNotes, ticksPerSecond, trackLoopRepeatState, trackLoopSpan } from '../scheduling'
 import { computePeaks, type AudioBufferLike } from '../assets'
 
 // 120 BPM => 2 beats/sec => 1920 ticks/sec; 1 beat = 960 ticks = 0.5 s
@@ -491,6 +491,41 @@ suite('metronomeClicks', () => {
     expect(beatIndexAt(s, 0)).toBe(0)
     expect(beatIndexAt(s, 1)).toBe(1)
     expect(beatIndexAt(s, 960)).toBe(1)
+  })
+})
+
+suite('track loops', () => {
+  test('span covers the extent of the track clips', () => {
+    const s = stateWith([
+      { start: 960, duration: 960 },
+      { start: 3840, duration: PPQ * 2 }
+    ])
+    expect(trackLoopSpan(s, 't1')).toEqual({ start: 960, end: 3840 + PPQ * 2 })
+    expect(trackLoopSpan(s, 'missing')).toBeNull()
+  })
+
+  test('repeat state shifts only the looped track and drops automation', () => {
+    let s = stateWith([{ start: 960, duration: 960 }])
+    s = apply(s, {
+      type: 'automation/add',
+      point: { id: 'p1', trackId: 't1', param: 'volume', ticks: 0, value: 0.5 }
+    })
+    const shifted = trackLoopRepeatState(s, 't1', 1000)
+    expect(shifted.clips['c0'].start).toBe(1960)
+    expect(Object.keys(shifted.tracks)).toEqual(['t1'])
+    expect(Object.keys(shifted.automation)).toHaveLength(0)
+    // The original state is untouched (pure derivation).
+    expect(s.clips['c0'].start).toBe(960)
+  })
+
+  test('a ghost repeat schedules the same material one period later', () => {
+    const s = stateWith([{ start: 0, duration: PPQ * 4, offset: 960 }])
+    const period = PPQ * 4
+    const [base] = scheduleClips(s, tenSecondAsset, 0, 100)
+    const [ghost] = scheduleClips(trackLoopRepeatState(s, 't1', period), tenSecondAsset, 0, 100)
+    expect(ghost.when).toBeCloseTo(base.when + period / TPS)
+    expect(ghost.offsetSec).toBeCloseTo(base.offsetSec)
+    expect(ghost.durationSec).toBeCloseTo(base.durationSec)
   })
 })
 

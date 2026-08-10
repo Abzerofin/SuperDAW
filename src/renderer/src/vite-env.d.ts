@@ -93,6 +93,11 @@ interface Window {
       title?: string
     }): Promise<{ opened?: boolean; error?: string }>
     vst3CloseEditor(instanceId: string): Promise<void>
+    vst3SetEditorParam(args: {
+      instanceId: string
+      paramId: number
+      value: number
+    }): Promise<{ error?: string }>
     vst3DockEditor(args: {
       instanceId: string
       uid: string

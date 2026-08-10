@@ -1,28 +1,16 @@
 import { useState } from 'react'
-import type { AutomationParam, AutomationPoint, Track } from '@core/model/types'
-import { automationOf } from '@core/model/types'
+import type { AutomationPoint, Track } from '@core/model/types'
+import { automationOf, pluginsOfTrack } from '@core/model/types'
+import { denormalizeParam, normalizeParam, type ParamDef } from '@core/model/effects'
+import { paramDefsOf } from '@core/plugins/builtin'
 import { newId } from '@core/model/ids'
 import { projectStore } from '@/state/projectStore'
 import { useProjectState } from '@/state/hooks'
-import { automationUi, useAutomationUi } from '@/state/automationUi'
+import { automationUi, useAutomationUi, type AutomationTarget } from '@/state/automationUi'
 import { capturePointer } from '@/lib/pointer'
 import { AUTO_H } from './geometry'
 
 const PAD = 5 // px inset so points at value 0/1 stay grabbable
-
-const PARAMS: AutomationParam[] = ['volume', 'pan']
-
-/** Neutral value when a curve has no points: unity gain / centered pan. */
-function restingValue(param: AutomationParam): number {
-  return param === 'volume' ? 1 : 0.5
-}
-
-function pointLabel(param: AutomationParam, value: number): string {
-  if (param === 'volume') return `${Math.round(value * 100)}%`
-  const pan = value * 2 - 1
-  if (Math.abs(pan) < 0.01) return 'C'
-  return `${Math.round(Math.abs(pan) * 100)}${pan < 0 ? 'L' : 'R'}`
-}
 
 interface Props {
   track: Track
@@ -31,14 +19,25 @@ interface Props {
 }
 
 /**
- * An automation lane under a track, editing one parameter at a time
- * (volume multiplies the fader; pan drives the stereo panner). Double-click
- * adds a point, drag moves it (one op on release), double-click a point
+ * An automation lane under a track, editing one parameter at a time —
+ * volume (multiplies the fader), pan (drives the panner), or any insert
+ * effect's parameter (owns that knob during playback). Double-click adds
+ * a point, drag moves it (one op on release), double-click a point
  * deletes it.
  */
 export function AutomationLane({ track, pxPerTick, contentW }: Props): React.JSX.Element {
   const state = useProjectState()
-  const param = useAutomationUi().paramOf(track.id)
+  const stored = useAutomationUi().targetOf(track.id)
+  // The chosen insert may have been removed (its points cascade away with
+  // it) — fall back to the track's own volume rather than a dead lane.
+  const target: AutomationTarget =
+    stored.instanceId !== undefined && !state.plugins[stored.instanceId]
+      ? { param: 'volume' }
+      : stored
+  const targetDef: ParamDef | undefined =
+    target.instanceId !== undefined
+      ? paramDefsOf(state.plugins[target.instanceId].descriptor)?.[target.param]
+      : undefined
   const [drag, setDrag] = useState<{
     pointId: string
     originX: number
@@ -49,7 +48,23 @@ export function AutomationLane({ track, pxPerTick, contentW }: Props): React.JSX
     value: number
   } | null>(null)
 
-  const points = automationOf(state, track.id, param).map((p) =>
+  const inserts = pluginsOfTrack(state, track.id)
+
+  /** Neutral value when a curve has no points. */
+  const restingValue = (): number => {
+    if (targetDef) return normalizeParam(targetDef, targetDef.default)
+    return target.param === 'volume' ? 1 : 0.5
+  }
+
+  const pointLabel = (value: number): string => {
+    if (targetDef) return `${denormalizeParam(targetDef, value).toFixed(targetDef.digits)}${targetDef.unit}`
+    if (target.param === 'volume') return `${Math.round(value * 100)}%`
+    const pan = value * 2 - 1
+    if (Math.abs(pan) < 0.01) return 'C'
+    return `${Math.round(Math.abs(pan) * 100)}${pan < 0 ? 'L' : 'R'}`
+  }
+
+  const points = automationOf(state, track.id, target.param, target.instanceId).map((p) =>
     drag && p.id === drag.pointId ? { ...p, ticks: drag.ticks, value: drag.value } : p
   )
   points.sort((a, b) => a.ticks - b.ticks)
@@ -63,7 +78,8 @@ export function AutomationLane({ track, pxPerTick, contentW }: Props): React.JSX
     const point: AutomationPoint = {
       id: newId('aut'),
       trackId: track.id,
-      param,
+      param: target.param,
+      ...(target.instanceId !== undefined ? { instanceId: target.instanceId } : {}),
       ticks: Math.max(0, (e.clientX - rect.left) / pxPerTick),
       value: yToValue(e.clientY - rect.top)
     }
@@ -114,12 +130,14 @@ export function AutomationLane({ track, pxPerTick, contentW }: Props): React.JSX
   // values outside points.
   const path =
     points.length === 0
-      ? `0,${valueToY(restingValue(param))} ${contentW},${valueToY(restingValue(param))}`
+      ? `0,${valueToY(restingValue())} ${contentW},${valueToY(restingValue())}`
       : [
           `0,${valueToY(points[0].value)}`,
           ...points.map((p) => `${p.ticks * pxPerTick},${valueToY(p.value)}`),
           `${contentW},${valueToY(points[points.length - 1].value)}`
         ].join(' ')
+
+  const stop = (e: React.SyntheticEvent): void => e.stopPropagation()
 
   return (
     <div
@@ -130,20 +148,61 @@ export function AutomationLane({ track, pxPerTick, contentW }: Props): React.JSX
       onPointerUp={endDrag}
     >
       <span className="auto-lane-label">
-        {PARAMS.map((p) => (
+        {(['volume', 'pan'] as const).map((p) => (
           <button
             key={p}
-            className={`auto-param ${p === param ? 'auto-param-active' : ''}`}
-            onDoubleClick={(e) => e.stopPropagation()}
-            onPointerDown={(e) => e.stopPropagation()}
-            onClick={() => automationUi.setParam(track.id, p)}
+            className={`auto-param ${
+              target.instanceId === undefined && p === target.param ? 'auto-param-active' : ''
+            }`}
+            onDoubleClick={stop}
+            onPointerDown={stop}
+            onClick={() => automationUi.setTarget(track.id, { param: p })}
           >
             {p}
           </button>
         ))}
+        {inserts.length > 0 && (
+          <select
+            className={`auto-param auto-param-select ${
+              target.instanceId !== undefined ? 'auto-param-active' : ''
+            }`}
+            title="Automate an effect parameter"
+            value={target.instanceId !== undefined ? `${target.instanceId}:${target.param}` : ''}
+            onDoubleClick={stop}
+            onPointerDown={stop}
+            onChange={(e) => {
+              const v = e.target.value
+              if (!v) return
+              const split = v.indexOf(':')
+              automationUi.setTarget(track.id, {
+                instanceId: v.slice(0, split),
+                param: v.slice(split + 1)
+              })
+            }}
+          >
+            <option value="">
+              {target.instanceId !== undefined && targetDef
+                ? `${state.plugins[target.instanceId].descriptor.name} · ${targetDef.label}`
+                : 'FX param…'}
+            </option>
+            {inserts.map((instance) => {
+              const defs = paramDefsOf(instance.descriptor)
+              if (!defs) return null
+              return (
+                <optgroup key={instance.id} label={instance.descriptor.name}>
+                  {Object.entries(defs).map(([key, def]) => (
+                    <option key={key} value={`${instance.id}:${key}`}>
+                      {def.label}
+                    </option>
+                  ))}
+                </optgroup>
+              )
+            })}
+          </select>
+        )}
       </span>
       <svg className="auto-svg" width={contentW} height={AUTO_H}>
-        {param === 'pan' && (
+        {target.instanceId === undefined && target.param === 'pan' && (
           <line x1={0} y1={valueToY(0.5)} x2={contentW} y2={valueToY(0.5)} className="auto-center" />
         )}
         <polyline points={path} className="auto-curve" />
@@ -153,7 +212,7 @@ export function AutomationLane({ track, pxPerTick, contentW }: Props): React.JSX
           key={point.id}
           className="auto-point"
           style={{ left: point.ticks * pxPerTick - 5, top: valueToY(point.value) - 5 }}
-          title={`${pointLabel(param, point.value)} — double-click to delete`}
+          title={`${pointLabel(point.value)} — double-click to delete`}
           onPointerDown={(e) => beginDrag(e, point)}
           onDoubleClick={(e) => {
             e.stopPropagation()

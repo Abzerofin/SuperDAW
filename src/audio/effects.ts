@@ -1,5 +1,5 @@
 import type { EffectType } from '@core/model/effects'
-import { EFFECT_TYPES, PARAEQ_BANDS, PARAEQ_FILTER_TYPES } from '@core/model/effects'
+import { EFFECT_TYPES, LFO_WAVE_TYPES, PARAEQ_BANDS, PARAEQ_FILTER_TYPES } from '@core/model/effects'
 import { builtinEffectDescriptor } from '@core/plugins/builtin'
 import type { PluginNodes, PluginProvider } from './pluginRegistry'
 
@@ -32,6 +32,36 @@ function tap(
   from.connect(out)
   from.connect(analyser)
   return { out, analyser }
+}
+
+/**
+ * One biquad as a standalone insert — the basic filter family. Shares the
+ * paraeq Q convention: the param is linear RBJ Q, converted to dB where
+ * Web Audio expects it (lowpass/highpass).
+ */
+function basicFilter(type: BiquadFilterType, defaultCutoff: number) {
+  return (ctx: BaseAudioContext): PluginNodes => {
+    const filter = ctx.createBiquadFilter()
+    filter.type = type
+    filter.frequency.value = defaultCutoff
+    const { out, analyser } = tap(ctx, filter)
+    return {
+      input: filter,
+      output: out,
+      analysis: { spectrum: analyser },
+      apply(p, when) {
+        filter.frequency.setTargetAtTime(p.cutoff ?? defaultCutoff, when, SMOOTH)
+        const q = p.resonance ?? 0.71
+        const nodeQ = type === 'lowpass' || type === 'highpass' ? 20 * Math.log10(q) : q
+        filter.Q.setTargetAtTime(nodeQ, when, SMOOTH)
+      },
+      dispose() {
+        filter.disconnect()
+        out.disconnect()
+        analyser.disconnect()
+      }
+    }
+  }
 }
 
 const BUILDERS: Record<EffectType, (ctx: BaseAudioContext) => PluginNodes> = {
@@ -237,6 +267,49 @@ const BUILDERS: Record<EffectType, (ctx: BaseAudioContext) => PluginNodes> = {
       },
       dispose() {
         for (const node of [input, mixed, out, analyser, dry, wet, convolver]) node.disconnect()
+      }
+    }
+  },
+
+  lowpass: basicFilter('lowpass', 2000),
+  highpass: basicFilter('highpass', 200),
+  bandpass: basicFilter('bandpass', 1000),
+  notch: basicFilter('notch', 1000),
+
+  lfo(ctx) {
+    // Amplitude LFO (tremolo): an oscillator drives the carrier gain's
+    // AudioParam. Base gain sits at 1 - depth/2 and the oscillator swings
+    // ±depth/2 around it, so the level sweeps [1-depth, 1] and never goes
+    // negative (a phase flip would sound like ring modulation).
+    const carrier = ctx.createGain()
+    const depthGain = ctx.createGain()
+    depthGain.gain.value = 0
+    const osc = ctx.createOscillator()
+    osc.type = 'sine'
+    osc.frequency.value = 4
+    osc.connect(depthGain)
+    depthGain.connect(carrier.gain)
+    osc.start()
+    const { out, analyser } = tap(ctx, carrier)
+    return {
+      input: carrier,
+      output: out,
+      analysis: { spectrum: analyser },
+      apply(p, when) {
+        osc.frequency.setTargetAtTime(p.rate ?? 4, when, SMOOTH)
+        const waveIndex = Math.max(
+          0,
+          Math.min(LFO_WAVE_TYPES.length - 1, Math.round(p.wave ?? 0))
+        )
+        const wave = LFO_WAVE_TYPES[waveIndex]
+        if (osc.type !== wave) osc.type = wave // not an AudioParam; instant
+        const depth = Math.max(0, Math.min(1, p.depth ?? 0.5))
+        carrier.gain.setTargetAtTime(1 - depth / 2, when, SMOOTH)
+        depthGain.gain.setTargetAtTime(depth / 2, when, SMOOTH)
+      },
+      dispose() {
+        osc.stop()
+        for (const node of [osc, depthGain, carrier, out, analyser]) node.disconnect()
       }
     }
   }

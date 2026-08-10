@@ -173,6 +173,7 @@
     .tbtn-rec-active,
     .track-toggle-mute,
     .track-toggle-solo,
+    .track-toggle-loop,
     .track-toggle-monitor,
     .track-toggle-armed,
     .track-toggle-auto,
@@ -199,6 +200,12 @@
   background-color: var(--solo);
   border-color: color-mix(in srgb, var(--solo) 55%, #000);
   color: #17200f;
+}
+
+:root[data-shell='analog'] .track-toggle-loop {
+  background-color: var(--accent);
+  border-color: color-mix(in srgb, var(--accent) 55%, #000);
+  color: #101418;
 }
 
 :root[data-shell='analog']

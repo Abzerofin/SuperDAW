@@ -12,6 +12,7 @@ import {
   sliceSelectionIntoEqualParts
 } from '@/lib/clipActions'
 import { TRACK_COLORS } from '@/lib/colors'
+import { historyUi } from '@/state/historyUi'
 
 /**
  * Per-clip editing: slice, reverse, transpose, time-scale and colour.
@@ -241,6 +242,18 @@ export function ClipMenu({
       >
         <span>Delete</span>
         <span className="menu-shortcut mono">Del</span>
+      </button>
+
+      <div className="menu-sep" />
+      <button
+        className="menu-item"
+        title="This clip's changes this session — wind it back without touching anything else"
+        onClick={(e) => {
+          historyUi.open({ kind: 'clip', id: clip.id, title: clip.name, x: e.clientX, y: e.clientY })
+          onClose()
+        }}
+      >
+        <span>History…</span>
       </button>
     </div>
   )

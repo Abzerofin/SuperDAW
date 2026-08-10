@@ -103,6 +103,21 @@ export function notch(f0: number, q: number): Biquad {
   }
 }
 
+/** RBJ band-pass (constant 0 dB peak gain), matching Web Audio 'bandpass'. */
+export function bandpass(f0: number, q: number): Biquad {
+  const w0 = (2 * Math.PI * f0) / SR
+  const cos = Math.cos(w0)
+  const alpha = Math.sin(w0) / (2 * q)
+  return {
+    b0: alpha,
+    b1: 0,
+    b2: -alpha,
+    a0: 1 + alpha,
+    a1: -2 * cos,
+    a2: 1 - alpha
+  }
+}
+
 export function magnitudeDb(bq: Biquad, f: number): number {
   const w = (2 * Math.PI * f) / SR
   const c1 = Math.cos(w)

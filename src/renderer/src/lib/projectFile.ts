@@ -215,8 +215,11 @@ export function newProject(): void {
  * Discard the current document and return to the home screen. Asks before
  * discarding unsaved changes; returns false if the user cancelled.
  */
-export function closeProject(): boolean {
+export function closeProject(skipConfirm = false): boolean {
+  // The Exit button asks its own save/discard question first; everything
+  // else still gets the safety net.
   if (
+    !skipConfirm &&
     sessionFile.dirty &&
     !window.confirm('Discard unsaved changes and close the project?')
   ) {

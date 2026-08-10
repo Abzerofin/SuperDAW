@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react'
+import { useEffect, useState, useSyncExternalStore } from 'react'
 import { createPortal } from 'react-dom'
 import type { Track } from '@core/model/types'
 import { childTracksOf } from '@core/model/types'
@@ -6,7 +6,7 @@ import { buildDuplicateTrackOp } from '@core/ops/duplicateTrack'
 import { projectStore } from '@/state/projectStore'
 import { useProjectState } from '@/state/hooks'
 import { commentUi, useCommentUi } from '@/state/commentUi'
-import { automationUi } from '@/state/automationUi'
+import { automationUi, useAutomationUi } from '@/state/automationUi'
 import { recording, useRecording } from '@/state/recording'
 import { panels } from '@/state/panels'
 import { selection, useSelectionVersion } from '@/state/selection'
@@ -25,7 +25,10 @@ import {
   unfreezeTrack
 } from '@/lib/trackActions'
 import { exportTrackAudio } from '@/lib/exportAudio'
+import { conformTrackAudioToTempo } from '@/lib/tempoActions'
+import { audioEngine } from '@/state/audioInstance'
 import { CommentThread } from '../comments/CommentThread'
+import { historyUi } from '@/state/historyUi'
 import { TrackInputPanel } from '../track/TrackInputPanel'
 import { TrackStripControls } from './TrackStripControls'
 
@@ -68,6 +71,10 @@ export function TrackHeader({
   const canRecord = track.kind === 'audio' && !frozen
   const inputOpen = useTrackInputUi().trackId === track.id
   const monitoring = useTrackInputs().isMonitoring(track.id)
+  const looping = useSyncExternalStore(audioEngine.subscribeTrackLoops, () =>
+    audioEngine.isTrackLooping(track.id)
+  )
+  const autoOpen = useAutomationUi().isOpen(track.id)
   const collapsed = useFolderUi().isCollapsed(track.id)
   const childCount = isFolder ? childTracksOf(state, track.id).length : 0
 
@@ -212,8 +219,13 @@ export function TrackHeader({
 
       {!compact && (
       <div className="track-header-bottom">
-        <span className="track-kind">
-          {track.kind === 'audio' ? 'AUD' : track.kind === 'midi' ? 'MIDI' : 'FLDR'}
+        <span
+          className="track-kind"
+          title={
+            track.kind === 'audio' ? 'Audio track' : track.kind === 'midi' ? 'MIDI track' : 'Folder (bus)'
+          }
+        >
+          {track.kind === 'audio' ? 'A' : track.kind === 'midi' ? 'M' : 'F'}
         </span>
         <button
           className={`track-toggle track-fx ${hasFx || track.kind === 'midi' ? 'track-fx-has' : ''}`}
@@ -232,6 +244,19 @@ export function TrackHeader({
           FX
         </button>
         <div className="track-toggles">
+          <button
+            className={`track-toggle ${autoOpen ? 'track-toggle-auto' : ''}`}
+            title={
+              autoOpen
+                ? 'Hide the automation lane'
+                : 'Show the automation lane (volume, pan, effects)'
+            }
+            onClick={() => automationUi.toggle(track.id)}
+          >
+            <svg width="12" height="10" viewBox="0 0 12 10" fill="none" stroke="currentColor" strokeWidth="1.3" strokeLinecap="round">
+              <path d="M1 8 L4 3 L8 6 L11 2" />
+            </svg>
+          </button>
           {canRecord && (
             <>
               <button
@@ -259,6 +284,20 @@ export function TrackHeader({
               </button>
               <ArmToggle trackId={track.id} />
             </>
+          )}
+          {!isFolder && (
+            <button
+              className={`track-toggle ${looping ? 'track-toggle-loop' : ''}`}
+              title={
+                looping
+                  ? 'Track loop ON — this track repeats its material while the rest plays on (L)'
+                  : 'Loop this track: repeat its material while the rest of the song plays on — for working out melodies (L)'
+              }
+              disabled={frozen}
+              onClick={() => audioEngine.setTrackLoop(track.id, !looping)}
+            >
+              ↻
+            </button>
           )}
           <button
             className={`track-toggle ${track.muted ? 'track-toggle-mute' : ''}`}
@@ -307,7 +346,10 @@ export function TrackHeader({
             )}
             {canRecord &&
               menuItem('Input, channels & monitoring…', () => trackInputUi.open(track.id))}
-            {menuItem('Volume/pan automation', () => automationUi.toggle(track.id))}
+            {track.kind === 'audio' &&
+              !frozen &&
+              menuItem('Stretch audio to tempo', () => conformTrackAudioToTempo(track.id))}
+            {menuItem('Automation (volume, pan, effects)', () => automationUi.toggle(track.id))}
             {menuItem('Comments…', () => commentUi.open({ kind: 'track', id: track.id }))}
             {menuItem('Show routing…', () => routingUi.open(track.id))}
             <div className="menu-sep" />
@@ -332,6 +374,16 @@ export function TrackHeader({
             <div className="menu-sep" />
             {menuItem(isFolder ? 'Delete folder' : 'Delete track', () =>
               projectStore.dispatch({ type: 'track/delete', trackId: track.id })
+            )}
+            <div className="menu-sep" />
+            {menuItem('History…', () =>
+              historyUi.open({
+                kind: 'track',
+                id: track.id,
+                title: track.name,
+                x: menu.x,
+                y: menu.y
+              })
             )}
             {hasFx && <div className="menu-note">This track has effects</div>}
           </div>,

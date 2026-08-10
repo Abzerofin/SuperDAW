@@ -6,6 +6,9 @@ import {
   pluginsOfTrack,
   routesOfTrack
 } from '@core/model/types'
+import type { AutomationPoint } from '@core/model/types'
+import { denormalizeParam } from '@core/model/effects'
+import { paramDefsOf } from '@core/plugins/builtin'
 import type { AssetStore } from './assets'
 import { applyClipFades } from './fades'
 import { LivePreview } from './livePreview'
@@ -17,7 +20,9 @@ import {
   metronomeClicks,
   scheduleClips,
   scheduleNotes,
-  ticksPerSecond
+  ticksPerSecond,
+  trackLoopRepeatState,
+  trackLoopSpan
 } from './scheduling'
 
 /**
@@ -61,6 +66,14 @@ const GAIN_SMOOTHING_SEC = 0.015
 /** How far ahead loop iterations are queued, and how often that is topped up. */
 const LOOP_LOOKAHEAD_SEC = 4
 const LOOP_INTERVAL_MS = 250
+/**
+ * Insert-effect parameter automation is applied by sampling the curves on
+ * this cadence and pushing values through PluginNodes.apply (whose 20 ms
+ * smoothing turns the steps into inaudible glides). Time-driven rather
+ * than pre-scheduled: builtin nodes expose no per-param AudioParam handles
+ * to ramp, and sampling live state makes mid-play edits just work.
+ */
+const FX_AUTO_INTERVAL_MS = 50
 
 /** Seconds of finished VST3 audio produced per window. Also the latency. */
 const PREVIEW_WINDOW_SEC = 2
@@ -129,6 +142,20 @@ export class AudioEngine {
   /** Clock time the next un-queued loop iteration starts; null = not cycling. */
   private loopNextIterationSec: number | null = null
   private loopTimer: ReturnType<typeof setInterval> | null = null
+  /**
+   * Per-user track loops: each track in the set repeats its own material
+   * indefinitely while every other track plays the timeline as written —
+   * for auditioning a melody against the rest of the song. Ephemeral, never
+   * part of the document. Replaced (not mutated) on change so React
+   * subscribers can snapshot it.
+   */
+  private trackLoops: ReadonlySet<TrackId> = new Set()
+  private trackLoopListeners = new Set<() => void>()
+  private trackLoopTimer: ReturnType<typeof setInterval> | null = null
+  /** Next un-queued ghost-repeat index per looping track. */
+  private trackLoopNextRepeat = new Map<TrackId, number>()
+  /** Samples insert-param automation while playing (see FX_AUTO_INTERVAL_MS). */
+  private fxAutoTimer: ReturnType<typeof setInterval> | null = null
   private nextBeatIndex = 0
   /** The metronome's own anchor — re-based on each loop wrap. */
   private metroAnchorTicks = 0
@@ -357,6 +384,31 @@ export class AudioEngine {
     return this.fxNodes.get(instanceId)?.analysis ?? null
   }
 
+  /**
+   * Time-domain analyser for a routing-graph wire's SOURCE: an insert's
+   * output rides its existing internal analyser tap; the 'in' terminal
+   * gets a lazy tap on the track chain's input, keyed by the input node
+   * itself so a chain rebuild simply mints a fresh tap. Feeds the graph
+   * view's wire oscilloscopes; costs nothing until the view asks.
+   */
+  private inputWaveTaps = new WeakMap<GainNode, AnalyserNode>()
+
+  graphSourceAnalyser(trackId: TrackId, from: 'in' | PluginInstanceId): AnalyserNode | null {
+    if (from !== 'in') return this.fxNodes.get(from)?.analysis?.spectrum ?? null
+    const ctx = this.ctx
+    if (!ctx) return null
+    const chain = this.chains.get(trackId)
+    if (!chain) return null
+    let tap = this.inputWaveTaps.get(chain.input)
+    if (!tap) {
+      tap = ctx.createAnalyser()
+      tap.fftSize = 1024
+      chain.input.connect(tap)
+      this.inputWaveTaps.set(chain.input, tap)
+    }
+    return tap
+  }
+
   // ---------- Transport / state reactions ----------
 
   private onTransportEvent = (event: 'play' | 'stop' | 'seek'): void => {
@@ -365,6 +417,8 @@ export class AudioEngine {
       this.teardownPreview()
       this.stopMetronome()
       this.stopLoopScheduler()
+      this.stopTrackLoopScheduler()
+      this.stopFxAutomation()
       return
     }
     if (event === 'seek' && !this.transport.isPlaying) return
@@ -374,6 +428,8 @@ export class AudioEngine {
       void this.restart(() => {
         this.startMetronome()
         this.startLoopScheduler()
+        this.startTrackLoopScheduler()
+        this.startFxAutomation()
       })
     }
     if (ctx.state === 'suspended') void ctx.resume().then(go)
@@ -564,6 +620,158 @@ export class AudioEngine {
     this.loopNextIterationSec = null
   }
 
+  // ---------- Track loops ----------
+
+  isTrackLooping(trackId: TrackId): boolean {
+    return this.trackLoops.has(trackId)
+  }
+
+  subscribeTrackLoops = (listener: () => void): (() => void) => {
+    this.trackLoopListeners.add(listener)
+    return () => this.trackLoopListeners.delete(listener)
+  }
+
+  /**
+   * Toggle a track's own loop. Frozen tracks are left alone (their render
+   * plays as one source from tick 0 and cannot be re-anchored per repeat).
+   */
+  setTrackLoop(trackId: TrackId, on: boolean): void {
+    if (this.trackLoops.has(trackId) === on) return
+    if (on && this.store.state.tracks[trackId]?.frozenAssetId) return
+    const next = new Set(this.trackLoops)
+    if (on) next.add(trackId)
+    else next.delete(trackId)
+    this.trackLoops = next
+    for (const listener of this.trackLoopListeners) listener()
+    if (this.transport.isPlaying && this.ctx) {
+      void this.restart(() => {})
+      this.startTrackLoopScheduler()
+    }
+  }
+
+  private startTrackLoopScheduler(): void {
+    if (this.trackLoopTimer !== null) return
+    this.trackLoopTimer = setInterval(() => {
+      if (!this.transport.isPlaying) return
+      this.topUpTrackLoops()
+    }, LOOP_INTERVAL_MS)
+  }
+
+  private stopTrackLoopScheduler(): void {
+    if (this.trackLoopTimer !== null) clearInterval(this.trackLoopTimer)
+    this.trackLoopTimer = null
+    this.trackLoopNextRepeat.clear()
+  }
+
+  // ---------- Insert-parameter automation ----------
+
+  private startFxAutomation(): void {
+    if (this.fxAutoTimer !== null) return
+    this.fxAutoTimer = setInterval(() => this.applyFxAutomation(), FX_AUTO_INTERVAL_MS)
+  }
+
+  private stopFxAutomation(): void {
+    if (this.fxAutoTimer !== null) clearInterval(this.fxAutoTimer)
+    this.fxAutoTimer = null
+    // Settle every automated insert back onto its stored params, so a
+    // stopped transport leaves the knobs meaning what they say.
+    const ctx = this.ctx
+    if (!ctx) return
+    const state = this.store.state
+    for (const point of Object.values(state.automation)) {
+      if (point.instanceId === undefined) continue
+      const instance = state.plugins[point.instanceId]
+      if (instance) this.fxNodes.get(instance.id)?.apply(instance.params, ctx.currentTime)
+    }
+  }
+
+  /** Push each automated insert param's curve value into its live nodes. */
+  private applyFxAutomation(): void {
+    const ctx = this.ctx
+    if (!ctx || !this.transport.isPlaying) return
+    const state = this.store.state
+    // Group plugin-param points; skip everything when there are none.
+    let groups: Map<PluginInstanceId, Map<string, AutomationPoint[]>> | null = null
+    for (const point of Object.values(state.automation)) {
+      if (point.instanceId === undefined) continue
+      groups ??= new Map()
+      let params = groups.get(point.instanceId)
+      if (!params) groups.set(point.instanceId, (params = new Map()))
+      const list = params.get(point.param)
+      if (list) list.push(point)
+      else params.set(point.param, [point])
+    }
+    if (!groups) return
+    const nowTicks = this.transport.positionTicks()
+    for (const [instanceId, params] of groups) {
+      const instance = state.plugins[instanceId]
+      if (!instance || !instance.enabled) continue
+      if (state.tracks[instance.trackId]?.frozenAssetId) continue // baked
+      const nodes = this.fxNodes.get(instanceId)
+      if (!nodes) continue // missing/external plugin: nothing live to drive
+      const defs = paramDefsOf(instance.descriptor)
+      const merged: Record<string, number> = { ...instance.params }
+      for (const [param, points] of params) {
+        points.sort((a, b) => a.ticks - b.ticks)
+        const v = automationValueAt(points, nowTicks)
+        const def = defs?.[param]
+        merged[param] = def ? denormalizeParam(def, v) : v
+      }
+      nodes.apply(merged, ctx.currentTime)
+    }
+  }
+
+  /**
+   * Queue ghost repeats of each looping track until the lookahead horizon
+   * is covered. Each repeat is the ordinary schedule math run over a
+   * derived state holding only that track's clips shifted one period later
+   * — see trackLoopRepeatState. Inactive while the cycle region runs (the
+   * region already repeats everything inside it).
+   */
+  private topUpTrackLoops(): void {
+    const ctx = this.ctx
+    if (!ctx || this.trackLoops.size === 0 || this.transport.activeLoop()) return
+    const state = this.store.state
+    const tps = ticksPerSecond(state.tempo)
+    const horizonTicks =
+      this.anchorTicks + (ctx.currentTime + LOOP_LOOKAHEAD_SEC - this.anchorSec) * tps
+    for (const trackId of this.trackLoops) {
+      const track = state.tracks[trackId]
+      if (!track || track.frozenAssetId !== null) continue
+      const span = trackLoopSpan(state, trackId)
+      if (!span) continue
+      const period = span.end - span.start
+      // First repeat still audible at the anchor — repeats fully in the
+      // past schedule nothing, so skip straight past them.
+      const firstLive = Math.max(
+        1,
+        Math.floor((this.anchorTicks - span.end) / period) + 1
+      )
+      let repeat = Math.max(this.trackLoopNextRepeat.get(trackId) ?? 1, firstLive)
+      let guard = 0
+      while (span.start + repeat * period < horizonTicks && guard++ < 64) {
+        const repeatState = trackLoopRepeatState(state, trackId, repeat * period)
+        const fadeGains = new Map<string, GainNode>()
+        this.scheduleClipsPass(
+          this.anchorTicks,
+          this.anchorSec,
+          Number.POSITIVE_INFINITY,
+          fadeGains,
+          repeatState
+        )
+        this.scheduleNotesPass(
+          this.anchorTicks,
+          this.anchorSec,
+          Number.POSITIVE_INFINITY,
+          fadeGains,
+          repeatState
+        )
+        repeat++
+      }
+      this.trackLoopNextRepeat.set(trackId, repeat)
+    }
+  }
+
   /**
    * The metronome counts beats linearly from its anchor, which a wrap
    * invalidates — re-anchor it to the (wrapped) position when the playhead
@@ -725,11 +933,15 @@ export class AudioEngine {
     trackId: TrackId,
     fadeGains: Map<string, GainNode>,
     fromTicks: number,
-    atSec: number
+    atSec: number,
+    state: ProjectState = this.store.state
   ): AudioNode {
     const ctx = this.ctx!
     const chainInput = this.chain(trackId).input
-    const clip = this.store.state.clips[clipId]
+    // Looked up in the pass's own state: a track-loop ghost repeat carries
+    // shifted clip positions, so its fades land on the repeat, not the
+    // original.
+    const clip = state.clips[clipId]
     if (!clip || (clip.fadeIn <= 0 && clip.fadeOut <= 0)) return chainInput
     let gain = fadeGains.get(clipId)
     if (!gain) {
@@ -737,7 +949,7 @@ export class AudioEngine {
       gain.connect(chainInput)
       // Fades are relative to THIS pass's anchor, so a clip inside a loop
       // region tapers identically on every iteration.
-      applyClipFades(gain.gain, clip, this.store.state.tempo, fromTicks, atSec)
+      applyClipFades(gain.gain, clip, state.tempo, fromTicks, atSec)
       fadeGains.set(clipId, gain)
       this.fadeNodes.add(gain)
     }
@@ -750,10 +962,12 @@ export class AudioEngine {
    * and on audible edits.
    */
   private scheduleAll(): void {
+    this.trackLoopNextRepeat.clear()
     const loop = this.transport.activeLoop()
     if (!loop) {
       this.loopNextIterationSec = null
       this.schedulePass(this.anchorTicks, this.anchorSec, Number.POSITIVE_INFINITY)
+      this.topUpTrackLoops()
       return
     }
     const tps = ticksPerSecond(this.store.state.tempo)
@@ -784,11 +998,11 @@ export class AudioEngine {
     fromTicks: number,
     atSec: number,
     untilTicks: number,
-    fadeGains: Map<string, GainNode>
+    fadeGains: Map<string, GainNode>,
+    state: ProjectState = this.store.state
   ): void {
     const ctx = this.ctx
     if (!ctx) return
-    const state = this.store.state
     const schedules = scheduleClips(
       state,
       (id) => this.assets.getSeconds(id),
@@ -808,7 +1022,7 @@ export class AudioEngine {
       source.buffer = buffer
       // Resampling: pitch and stretch both land here (see clipRate).
       if (s.rate !== 1) source.playbackRate.value = s.rate
-      const dest = this.destinationFor(s.clipId, s.trackId, fadeGains, fromTicks, atSec)
+      const dest = this.destinationFor(s.clipId, s.trackId, fadeGains, fromTicks, atSec, state)
       source.connect(dest)
       source.onended = () => this.sources.delete(source)
       source.start(s.when, s.offsetSec, s.durationSec)
@@ -826,20 +1040,21 @@ export class AudioEngine {
     fromTicks: number,
     atSec: number,
     untilTicks: number,
-    fadeGains: Map<string, GainNode>
+    fadeGains: Map<string, GainNode>,
+    state: ProjectState = this.store.state
   ): void {
     const ctx = this.ctx
     if (!ctx) return
-    for (const s of scheduleNotes(this.store.state, fromTicks, atSec, untilTicks)) {
+    for (const s of scheduleNotes(state, fromTicks, atSec, untilTicks)) {
       // Previewed tracks get their audio as rendered windows (synth included).
       if (this.previewTracks.has(s.trackId)) continue
       // Voices go through the clip's fade envelope, so MIDI tapers too.
-      const dest = this.destinationFor(s.clipId, s.trackId, fadeGains, fromTicks, atSec)
+      const dest = this.destinationFor(s.clipId, s.trackId, fadeGains, fromTicks, atSec, state)
       const voices = buildSynthVoice(
         ctx,
         dest,
         s,
-        this.store.state.tracks[s.trackId]?.synth ?? {},
+        state.tracks[s.trackId]?.synth ?? {},
         (osc) => this.sources.delete(osc)
       )
       for (const osc of voices) this.sources.add(osc)

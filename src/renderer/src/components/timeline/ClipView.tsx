@@ -153,6 +153,44 @@ export function ClipView({
     })
   }
 
+  /**
+   * Double-click a trim handle to undo the trim — the same double-click-to-
+   * default convention as the stretch handle. The left handle restores the
+   * trimmed-off head (as far as the timeline start allows); the right handle
+   * extends to the end of the source material. Stretch and looping are
+   * untouched: this is purely the trim coming back.
+   */
+  const resetTrim = (e: React.MouseEvent, side: 'l' | 'r'): void => {
+    e.stopPropagation()
+    if (clip.assetId === null) return
+    if (side === 'l') {
+      const restore = Math.min(clip.offset, clip.start)
+      if (restore <= 0) return
+      projectStore.dispatch({
+        type: 'clip/resize',
+        clipId: clip.id,
+        start: clip.start - restore,
+        duration: clip.duration + restore,
+        offset: clip.offset - restore
+      })
+    } else {
+      const assetSeconds = assetStore.getSeconds(clip.assetId)
+      if (assetSeconds === null) return
+      const materialTicks = Math.max(
+        1,
+        Math.round((assetSeconds * ticksPerSecond(tempo)) / clipRate(clip)) - clip.offset
+      )
+      if (materialTicks === clip.duration) return
+      projectStore.dispatch({
+        type: 'clip/resize',
+        clipId: clip.id,
+        start: clip.start,
+        duration: materialTicks,
+        offset: clip.offset
+      })
+    }
+  }
+
   return (
     <div
       className={`clip ${selected ? 'clip-selected' : ''} ${preview ? 'clip-dragging' : ''} ${
@@ -265,7 +303,12 @@ export function ClipView({
           {commentCount}
         </button>
       )}
-      <div className="clip-handle clip-handle-l" onPointerDown={(e) => onPointerDown(e, 'resize-l')} />
+      <div
+        className="clip-handle clip-handle-l"
+        title="Trim — drag · double-click to restore the trimmed start"
+        onPointerDown={(e) => onPointerDown(e, 'resize-l')}
+        onDoubleClick={(e) => resetTrim(e, 'l')}
+      />
       {/* Right edge, stacked: loop (repeat), stretch (slower/faster), trim. */}
       <div
         className={`clip-handle clip-handle-loop ${clip.assetId === null ? 'clip-handle-half' : ''}`}
@@ -290,8 +333,9 @@ export function ClipView({
       )}
       <div
         className={`clip-handle clip-handle-r ${clip.assetId === null ? 'clip-handle-half' : ''}`}
-        title="Trim — lengthen or shorten the clip"
+        title="Trim — lengthen or shorten the clip · double-click for the material's full length"
         onPointerDown={(e) => onPointerDown(e, 'resize-r')}
+        onDoubleClick={(e) => resetTrim(e, 'r')}
       />
     </div>
   )

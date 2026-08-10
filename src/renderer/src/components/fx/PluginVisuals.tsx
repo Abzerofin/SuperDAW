@@ -2,7 +2,19 @@ import { useEffect, useRef } from 'react'
 import type { EffectType } from '@core/model/effects'
 import type { PluginInstanceId } from '@core/model/types'
 import { audioEngine } from '@/state/audioInstance'
-import { freqToX, magnitudeDb, peaking, shelf, xToFreq } from '@/lib/biquad'
+import {
+  bandpass,
+  freqToX,
+  highpass,
+  lowpass,
+  magnitudeDb,
+  notch,
+  peaking,
+  shelf,
+  xToFreq,
+  type Biquad
+} from '@/lib/biquad'
+import { LFO_WAVE_TYPES } from '@core/model/effects'
 import { ParametricEq } from './ParametricEq'
 
 /**
@@ -37,7 +49,183 @@ export function EffectVisual({
       return <DelayVisual instanceId={instanceId} params={params} />
     case 'reverb':
       return <ReverbVisual instanceId={instanceId} params={params} />
+    case 'lowpass':
+    case 'highpass':
+    case 'bandpass':
+    case 'notch':
+      return <FilterVisual type={type} instanceId={instanceId} params={params} />
+    case 'lfo':
+      return <LfoVisual params={params} />
   }
+}
+
+// ---------- Basic filters: response curve over a live output spectrum ----------
+
+const FILTER_RANGE_DB = 30
+
+function FilterVisual({
+  type,
+  instanceId,
+  params
+}: {
+  type: 'lowpass' | 'highpass' | 'bandpass' | 'notch'
+  instanceId: PluginInstanceId
+  params: Params
+}): React.JSX.Element {
+  const canvasRef = useRef<HTMLCanvasElement>(null)
+  const paramsRef = useParamsRef(params)
+
+  useEffect(() => {
+    const colors = theme()
+    const spectrumBuf: { current: Uint8Array<ArrayBuffer> | null } = { current: null }
+    let raf = 0
+
+    const curveOf = (cutoff: number, q: number): Biquad => {
+      switch (type) {
+        case 'lowpass':
+          return lowpass(cutoff, q)
+        case 'highpass':
+          return highpass(cutoff, q)
+        case 'bandpass':
+          return bandpass(cutoff, q)
+        case 'notch':
+          return notch(cutoff, q)
+      }
+    }
+
+    const draw = (): void => {
+      raf = requestAnimationFrame(draw)
+      const canvas = canvasRef.current
+      if (!canvas) return
+      const ctx = fitCanvas(canvas)
+      if (!ctx) return
+      const w = canvas.clientWidth
+      const h = canvas.clientHeight
+      ctx.clearRect(0, 0, w, h)
+
+      // Grid: frequency decades + the 0 dB line.
+      ctx.strokeStyle = colors.grid
+      ctx.fillStyle = colors.dim
+      ctx.font = '8px ui-monospace, monospace'
+      ctx.lineWidth = 1
+      ctx.globalAlpha = 0.6
+      for (const [f, label] of [
+        [100, '100'],
+        [1000, '1k'],
+        [10000, '10k']
+      ] as const) {
+        const x = Math.round(freqToX(f, w)) + 0.5
+        ctx.beginPath()
+        ctx.moveTo(x, 0)
+        ctx.lineTo(x, h)
+        ctx.stroke()
+        ctx.fillText(label, x + 2, h - 2)
+      }
+      const zeroY = Math.round(h * 0.35) + 0.5
+      ctx.beginPath()
+      ctx.moveTo(0, zeroY)
+      ctx.lineTo(w, zeroY)
+      ctx.stroke()
+      ctx.globalAlpha = 1
+
+      drawSpectrum(ctx, instanceId, w, h, colors.dim, spectrumBuf)
+
+      const p = paramsRef.current
+      const bq = curveOf(p.cutoff ?? 1000, p.resonance ?? 0.71)
+      ctx.beginPath()
+      for (let x = 0; x <= w; x++) {
+        const db = magnitudeDb(bq, xToFreq(x, w))
+        const y = zeroY - (db / FILTER_RANGE_DB) * (h * 0.65)
+        if (x === 0) ctx.moveTo(x, y)
+        else ctx.lineTo(x, y)
+      }
+      ctx.strokeStyle = colors.accent
+      ctx.lineWidth = 1.6
+      ctx.stroke()
+    }
+    draw()
+    return () => cancelAnimationFrame(raf)
+  }, [type, instanceId, paramsRef])
+
+  return <canvas ref={canvasRef} className="fx-visual" />
+}
+
+// ---------- LFO: one cycle of the modulation shape at its depth ----------
+
+function LfoVisual({ params }: { params: Params }): React.JSX.Element {
+  const canvasRef = useRef<HTMLCanvasElement>(null)
+  const paramsRef = useParamsRef(params)
+
+  useEffect(() => {
+    const colors = theme()
+    let raf = 0
+
+    const waveAt = (phase: number, wave: string): number => {
+      switch (wave) {
+        case 'triangle':
+          return 1 - 4 * Math.abs(((phase + 0.25) % 1) - 0.5)
+        case 'square':
+          return phase % 1 < 0.5 ? 1 : -1
+        case 'sawtooth':
+          return 2 * ((phase + 0.5) % 1) - 1
+        default:
+          return Math.sin(phase * 2 * Math.PI)
+      }
+    }
+
+    const draw = (): void => {
+      raf = requestAnimationFrame(draw)
+      const canvas = canvasRef.current
+      if (!canvas) return
+      const ctx = fitCanvas(canvas)
+      if (!ctx) return
+      const w = canvas.clientWidth
+      const h = canvas.clientHeight
+      ctx.clearRect(0, 0, w, h)
+
+      const p = paramsRef.current
+      const depth = Math.max(0, Math.min(1, p.depth ?? 0.5))
+      const rate = p.rate ?? 4
+      const waveIndex = Math.max(
+        0,
+        Math.min(LFO_WAVE_TYPES.length - 1, Math.round(p.wave ?? 0))
+      )
+      const wave = LFO_WAVE_TYPES[waveIndex]
+
+      // Unity line (no modulation) at the top quarter.
+      const unityY = Math.round(h * 0.2) + 0.5
+      ctx.strokeStyle = colors.grid
+      ctx.lineWidth = 1
+      ctx.globalAlpha = 0.6
+      ctx.beginPath()
+      ctx.moveTo(0, unityY)
+      ctx.lineTo(w, unityY)
+      ctx.stroke()
+      ctx.globalAlpha = 1
+      ctx.fillStyle = colors.dim
+      ctx.font = '8px ui-monospace, monospace'
+      ctx.fillText(`${wave} · ${rate.toFixed(2)} Hz`, 4, h - 4)
+
+      // The gain the effect actually applies: [1-depth, 1], animated at the
+      // real rate so the picture moves like the sound.
+      const t = (performance.now() / 1000) * rate
+      ctx.beginPath()
+      for (let x = 0; x <= w; x++) {
+        const phase = t + (x / w) * 2 // two cycles across
+        const gain = 1 - depth / 2 + (depth / 2) * waveAt(phase, wave)
+        const y = unityY + (1 - gain) * (h * 0.75)
+        if (x === 0) ctx.moveTo(x, y)
+        else ctx.lineTo(x, y)
+      }
+      ctx.strokeStyle = colors.accent
+      ctx.lineWidth = 1.6
+      ctx.stroke()
+    }
+    draw()
+    return () => cancelAnimationFrame(raf)
+  }, [paramsRef])
+
+  return <canvas ref={canvasRef} className="fx-visual" />
 }
 
 // ---------- Drawing helpers ----------

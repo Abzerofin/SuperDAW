@@ -12,6 +12,7 @@ import { LanNetworking } from '../../../net/lanNetworking'
 import type { ProjectAsset } from '@audio/assets'
 import { projectStore } from './projectStore'
 import { assetStore, audioEngine } from './audioInstance'
+import { preferences } from './preferences'
 
 /**
  * Session orchestration for the renderer. All networking goes through the
@@ -63,6 +64,14 @@ export interface ActivePing {
   readonly at: number
 }
 
+/** A collaborator's file awaiting the user's go-ahead to download. */
+export interface PendingDownload {
+  readonly assetId: string
+  readonly name: string
+  /** Bytes when known (announced assets); null on the join path. */
+  readonly size: number | null
+}
+
 const PING_LIFETIME_MS = 4000
 /**
  * How long a collaborator's last-known cursor stays visible. Departures
@@ -73,6 +82,20 @@ const PING_LIFETIME_MS = 4000
  */
 const CURSOR_STALE_MS = 30000
 const DEFAULT_RELAY_URL = 'ws://localhost:8787'
+
+/**
+ * Best available name for an asset we do not have yet: its File Bay entry,
+ * else a clip that plays it (the join path only carries ids).
+ */
+function assetDisplayName(state: ProjectState, assetId: string): string {
+  for (const node of Object.values(state.files)) {
+    if (node.assetId === assetId) return node.name
+  }
+  for (const clip of Object.values(state.clips)) {
+    if (clip.assetId === assetId) return clip.name
+  }
+  return 'audio file'
+}
 
 function metaOf(asset: ProjectAsset): TransferMeta {
   return {
@@ -102,6 +125,8 @@ class CollabStore {
   private identities = new Map<string, { name: string; colorIndex: number }>()
   /** Live downloads: assetId → progress (drives placeholder fills). */
   readonly assetProgress = new Map<string, { received: number; total: number }>()
+  /** Files waiting on the user (Settings ▸ Collaboration, auto-download off). */
+  readonly pendingDownloads = new Map<string, PendingDownload>()
 
   private active: CollabNetworking | null = null
   private relayNet: RelayNetworking | null = null
@@ -226,7 +251,19 @@ class CollabStore {
         },
         onPresence: (userId, data) => this.applyRemotePresence(userId, data),
         onAssetAvailable: (meta) => {
-          if (!assetStore.get(meta.assetId)) this.active?.requestAsset(meta.assetId)
+          if (assetStore.get(meta.assetId)) return
+          if (preferences.autoDownloadAssets) {
+            this.active?.requestAsset(meta.assetId)
+            return
+          }
+          // Deferred until the user says go — clips referencing it simply
+          // play silent in the meantime, so waiting is always safe.
+          this.pendingDownloads.set(meta.assetId, {
+            assetId: meta.assetId,
+            name: meta.name,
+            size: meta.size
+          })
+          this.emit()
         },
         onAssetProgress: (assetId, received, total) => {
           this.assetProgress.set(assetId, { received, total })
@@ -322,6 +359,7 @@ class CollabStore {
     this.users = []
     this.cursors.clear()
     this.assetProgress.clear()
+    this.pendingDownloads.clear()
     this.reconnecting = false
     this.hostAway = false
   }
@@ -385,13 +423,48 @@ class CollabStore {
   // ---------- assets ----------
 
   private requestMissingAssets(state: ProjectState): void {
+    let queued = false
     for (const assetId of referencedAssetIds(state)) {
-      if (!assetStore.get(assetId)) this.active?.requestAsset(assetId)
+      if (assetStore.get(assetId)) continue
+      if (preferences.autoDownloadAssets) {
+        this.active?.requestAsset(assetId)
+        continue
+      }
+      this.pendingDownloads.set(assetId, {
+        assetId,
+        name: assetDisplayName(state, assetId),
+        size: null
+      })
+      queued = true
     }
+    if (queued) this.emit()
+  }
+
+  /** User said go for one queued file. */
+  downloadPending(assetId: string): void {
+    if (!this.pendingDownloads.delete(assetId)) return
+    this.active?.requestAsset(assetId)
+    this.emit()
+  }
+
+  downloadAllPending(): void {
+    for (const assetId of [...this.pendingDownloads.keys()]) {
+      this.pendingDownloads.delete(assetId)
+      this.active?.requestAsset(assetId)
+    }
+    this.emit()
+  }
+
+  dismissPendingDownloads(): void {
+    if (this.pendingDownloads.size === 0) return
+    this.pendingDownloads.clear()
+    this.emit()
   }
 
   /** A transfer finished (download, or a guest upload while hosting). */
   private async receiveAsset(meta: TransferMeta, bytes: Uint8Array): Promise<void> {
+    // Arrived some other way (guest upload while hosting): no longer pending.
+    this.pendingDownloads.delete(meta.assetId)
     if (assetStore.get(meta.assetId)) return
     let buffer: AudioBuffer | null = null
     if (meta.kind === 'audio') {

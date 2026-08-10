@@ -47,6 +47,7 @@ function VolumeSlider({ track }: { track: Track }): React.JSX.Element {
   const [dragGain, setDragGain] = useState<number | null>(null)
   const barRef = useRef<HTMLDivElement>(null)
   const meterRef = useRef<HTMLDivElement>(null)
+  const peakRef = useRef<HTMLDivElement>(null)
   const shown = dragGain ?? track.volume
 
   // Live level, painted straight onto the DOM from a rAF loop so metering
@@ -55,7 +56,10 @@ function VolumeSlider({ track }: { track: Track }): React.JSX.Element {
     let raf = 0
     let level = 0
     let flashUntil = 0
+    let peak = 0
+    let peakUntil = 0
     const draw = (): void => {
+      const now = performance.now()
       const raw = audioEngine.trackLevel(track.id)
       // Decay toward zero, but snap to it: an asymptote would otherwise keep
       // writing denormal widths into the DOM forever on a silent track.
@@ -64,11 +68,23 @@ function VolumeSlider({ track }: { track: Track }): React.JSX.Element {
       if (meterRef.current) {
         meterRef.current.style.width = `${Math.min(100, level * 100)}%`
       }
+      // Peak-hold remnant: a marker stays where the level last peaked, then
+      // vanishes after a second of nothing louder arriving.
+      if (raw >= peak && raw > 0.001) {
+        peak = raw
+        peakUntil = now + 1000
+      } else if (now >= peakUntil) {
+        peak = 0
+      }
+      if (peakRef.current) {
+        peakRef.current.style.left = `${Math.min(100, peak * 100)}%`
+        peakRef.current.style.opacity = peak > 0 ? '1' : '0'
+      }
       // Peaking (the analyser clamps at 1.0): flash the whole header red,
       // held briefly so a single-sample spike is still visible.
-      if (raw >= 0.999) flashUntil = performance.now() + 350
+      if (raw >= 0.999) flashUntil = now + 350
       const header = meterRef.current?.closest('.track-header')
-      header?.classList.toggle('track-peak-flash', performance.now() < flashUntil)
+      header?.classList.toggle('track-peak-flash', now < flashUntil)
       raf = requestAnimationFrame(draw)
     }
     draw()
@@ -122,6 +138,7 @@ function VolumeSlider({ track }: { track: Track }): React.JSX.Element {
         }}
       >
         <div className="track-vol-meter" ref={meterRef} />
+        <div className="track-vol-peakmark" ref={peakRef} />
         <div className="track-vol-fill" style={{ width: `${(shown / MAX_GAIN) * 100}%` }} />
         <div className="track-vol-thumb" style={{ left: `${(shown / MAX_GAIN) * 100}%` }} />
       </div>

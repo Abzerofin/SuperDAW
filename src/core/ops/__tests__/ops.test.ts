@@ -171,6 +171,8 @@ suite('invert', () => {
   const roundTrips: Operation[] = [
     { type: 'project/rename', name: 'Renamed' },
     { type: 'project/setTempo', tempo: 140 },
+    // Conforming variant: undo must restore the clip's previous stretch.
+    { type: 'project/setTempo', tempo: 160, conform: [{ clipId: 'c1', stretch: 0.75 }] },
     { type: 'project/setTimeSignature', timeSignature: [7, 8] },
     {
       type: 'track/create',
@@ -210,6 +212,14 @@ suite('invert', () => {
     { type: 'track/setPan', trackId: 't2', pan: -0.4 },
     { type: 'project/setMasterVolume', volume: 1.2 },
     { type: 'automation/add', point: { id: 'ap1', trackId: 't1', param: 'volume', ticks: 960, value: 0.8 } },
+    // Item-history restores: absolute field sets, invert = current fields.
+    { type: 'clip/restore', clipId: 'c1', clip: { ...clip('c1', 't1', 480, 1920), pitch: 3, stretch: 1.5 } },
+    {
+      type: 'track/restore',
+      trackId: 't1',
+      track: { name: 'earlier', color: '#123456', muted: true, soloed: false, volume: 0.5, pan: -0.25, synth: {} }
+    },
+    { type: 'plugin/restore', instanceId: 'fxA', params: { low: 2, mid: -1, midFreq: 800, high: 0 }, enabled: false, stateBlob: null },
     { type: 'automation/move', pointId: 'apA', ticks: 1920, value: 0.25 },
     { type: 'automation/delete', pointId: 'apA' },
     { type: 'track/delete', trackId: 't1' },
@@ -569,6 +579,59 @@ suite('effect routing', () => {
     expect(copied.some((r) => r.to === 'out')).toBe(true)
     expect(copied.every((r) => !['rA', 'rB'].includes(r.id))).toBe(true)
     expect(copied.every((r) => r.from !== 'fxA' && r.to !== 'fxA')).toBe(true)
+  })
+
+  test('plugin-param automation: validated on add, cascades with the insert, restores on undo', () => {
+    const store = new ProjectStore(baseState(), 'tester')
+    // Rejected: unknown param on the insert, and wrong track.
+    store.dispatch({
+      type: 'automation/add',
+      point: { id: 'apX', trackId: 't1', param: 'nope', instanceId: 'fxA', ticks: 0, value: 0.5 }
+    })
+    store.dispatch({
+      type: 'automation/add',
+      point: { id: 'apY', trackId: 't2', param: 'low', instanceId: 'fxA', ticks: 0, value: 0.5 }
+    })
+    expect(store.state.automation['apX']).toBeUndefined()
+    expect(store.state.automation['apY']).toBeUndefined()
+    // Accepted: a real param of fxA (an eq3) on its own track.
+    store.dispatch({
+      type: 'automation/add',
+      point: { id: 'apF', trackId: 't1', param: 'low', instanceId: 'fxA', ticks: 480, value: 0.75 }
+    })
+    expect(store.state.automation['apF']).toBeDefined()
+    // Removing the insert cascades its curve away; undo restores both.
+    store.dispatch({ type: 'plugin/remove', instanceId: 'fxA' })
+    expect(store.state.automation['apF']).toBeUndefined()
+    store.undo()
+    expect(store.state.plugins['fxA']).toBeDefined()
+    expect(store.state.automation['apF']).toMatchObject({
+      instanceId: 'fxA',
+      param: 'low',
+      value: 0.75
+    })
+  })
+
+  test('graph terminal placement round-trips through undo (after first placement)', () => {
+    const store = new ProjectStore(baseState(), 'tester')
+    // First placement: nothing to restore, deliberately not undoable.
+    expect(
+      invert(store.state, {
+        type: 'track/setGraphTerminal',
+        trackId: 't1',
+        terminal: 'out',
+        x: 10,
+        y: 10
+      })
+    ).toBeNull()
+    store.dispatch({ type: 'track/setGraphTerminal', trackId: 't1', terminal: 'out', x: 500, y: 60 })
+    expect(store.state.tracks['t1'].graphOutX).toBe(500)
+    const placed = store.state
+    store.dispatch({ type: 'track/setGraphTerminal', trackId: 't1', terminal: 'out', x: 620, y: 90 })
+    store.undo()
+    expect(store.state).toEqual(placed)
+    // The other terminal is untouched throughout.
+    expect(store.state.tracks['t1'].graphInX).toBeUndefined()
   })
 
   test('first node placement is not undoable (nothing to restore); later moves are', () => {

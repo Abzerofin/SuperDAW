@@ -27,6 +27,8 @@ import { collab } from '@/state/collab'
 import { timelineViewport } from '@/state/timelineViewport'
 import { createTrack } from '@/lib/trackActions'
 import { capturePointer } from '@/lib/pointer'
+import { onMiddleClick } from '@/lib/middleMouse'
+import { buildPeakSnapTargets, peakSnapStart, type PeakSnapTargets } from '@/lib/peakSnap'
 import { commentUi, useCommentUi } from '@/state/commentUi'
 import { useAutomationUi } from '@/state/automationUi'
 import { pianoRollUi } from '@/state/pianoRollUi'
@@ -70,6 +72,8 @@ interface ReorderState {
 
 /** Height of the ruler strip that drags out a loop region. */
 const LOOP_STRIP_H = 12
+/** How close (px) a transient must come to another's to peak-snap. */
+const PEAK_SNAP_PX = 10
 
 /**
  * Rubber-band selection dragged across empty timeline space. Coordinates
@@ -130,6 +134,8 @@ interface DragState extends DragMember {
    */
   others: DragMember[]
   moved: boolean
+  /** Tick where a waveform-peak alignment snapped, for the guide line. */
+  snapGuide?: number | null
 }
 
 /**
@@ -224,6 +230,8 @@ export function TimelineView(): React.JSX.Element {
   }
   const [pxPerBeat, setPxPerBeat] = useState(32)
   const [drag, setDrag] = useState<DragState | null>(null)
+  /** Peak-snap candidates for the current move drag (built once per drag). */
+  const peakSnapRef = useRef<{ clipId: ClipId; targets: PeakSnapTargets } | null>(null)
   const [reorder, setReorderState] = useState<ReorderState | null>(null)
   // Authoritative copy: pointermove updates are batched at low priority by
   // React, so a fast drag could commit after pointerup reads the state.
@@ -480,6 +488,12 @@ export function TimelineView(): React.JSX.Element {
           .filter((m): m is DragMember => m !== null)
       : []
     capturePointer(e)
+    // Waveform-peak alignment: candidates computed once per drag from the
+    // cached asset onsets, so per-move matching is two binary searches.
+    peakSnapRef.current =
+      mode === 'move' && clip.assetId !== null
+        ? { clipId, targets: buildPeakSnapTargets(projectStore.state, clipId) }
+        : null
     setDrag({ ...member, mode, originX: e.clientX, originY: e.clientY, others, moved: false })
   }
 
@@ -574,29 +588,41 @@ export function TimelineView(): React.JSX.Element {
     collab.sendCursor({ ticks: x / pxPerTick, trackIndex, yFrac })
   }
 
-  /** Middle mouse = temporary ping identifying exactly what was clicked. */
-  const onGridMouseDown = (e: React.MouseEvent): void => {
-    if (e.button !== 1) return
-    e.preventDefault() // also suppresses browser autoscroll
+  /** Middle CLICK = temporary ping identifying exactly what was clicked. */
+  const gridPing = (clientX: number, clientY: number): boolean => {
     const rect = gridRef.current?.getBoundingClientRect()
-    if (!rect) return
-    const x = e.clientX - rect.left - HEADER_W
-    const y = e.clientY - rect.top
-    if (x < 0) return
+    if (!rect) return false
+    const x = clientX - rect.left - HEADER_W
+    const y = clientY - rect.top
+    if (x < 0) return false
     const ticks = Math.max(0, x / pxPerTick)
     const bar = Math.floor(ticks / barTicks) + 1
     if (y <= RULER_H) {
       collab.ping(ticks, null, `bar ${bar}`)
-      return
+      return true
     }
     const trackIndex = trackIndexAtY(y - RULER_H)
     const track = tracks[trackIndex]
-    if (!track) return
+    if (!track) return true
     const clip = Object.values(state.clips).find(
       (c) => c.trackId === track.id && c.start <= ticks && ticks < c.start + c.duration
     )
-    collab.ping(ticks, trackIndex, clip ? `clip "${clip.name}"` : `"${track.name}" Â· bar ${bar}`)
+    collab.ping(ticks, trackIndex, clip ? `clip "${clip.name}"` : `"${track.name}" · bar ${bar}`)
+    return true
   }
+  // Registered through lib/middleMouse so a middle-DRAG pans instead of
+  // pinging. The ref keeps one stable subscription across renders while
+  // the handler always sees current zoom/track math.
+  const gridPingRef = useRef(gridPing)
+  gridPingRef.current = gridPing
+  useEffect(
+    () =>
+      onMiddleClick(({ target, clientX, clientY }) => {
+        if (!gridRef.current?.contains(target)) return false
+        return gridPingRef.current(clientX, clientY)
+      }),
+    []
+  )
 
   const onPointerMove = (e: React.PointerEvent): void => {
     shareCursor(e)
@@ -658,6 +684,7 @@ export function TimelineView(): React.JSX.Element {
     setDrag((prev) => {
       if (!prev) return prev
       let { start, duration, offset, loopLength, stretch, trackIndex } = prev
+      let snapGuide: number | null = null
       if (prev.mode === 'loop-r') {
         // The loop handle: dragging out repeats the clip's material. The
         // period is the clip's length when the drag began (or its existing
@@ -679,7 +706,23 @@ export function TimelineView(): React.JSX.Element {
         loopLength =
           prev.origLoop > 0 ? Math.round((prev.origLoop * stretch) / prev.origStretch) : 0
       } else if (prev.mode === 'move') {
+        const raw = Math.max(0, prev.origStart + dxTicks)
         start = Math.max(0, snapTicks(prev.origStart + dxTicks, snapGrid))
+        // Peak snap: if one of the dragged clip's transients lands near a
+        // transient of another clip, that alignment beats the grid when it
+        // is the closer of the two. Shift (free move) bypasses both.
+        snapGuide = null
+        const peakTargets =
+          !e.shiftKey && peakSnapRef.current?.clipId === prev.clipId
+            ? peakSnapRef.current.targets
+            : null
+        if (peakTargets) {
+          const peak = peakSnapStart(peakTargets, raw, PEAK_SNAP_PX / pxPerTick)
+          if (peak && Math.abs(peak.start - raw) <= Math.abs(start - raw)) {
+            start = peak.start
+            snapGuide = peak.alignedTicks
+          }
+        }
         const yCenter =
           trackTops[prev.origTrackIndex] + laneH / 2 + (e.clientY - prev.originY)
         trackIndex = trackIndexAtY(yCenter)
@@ -717,7 +760,8 @@ export function TimelineView(): React.JSX.Element {
         stretch,
         trackIndex,
         others,
-        moved
+        moved,
+        snapGuide
       }
     })
   }
@@ -1063,6 +1107,7 @@ export function TimelineView(): React.JSX.Element {
     <div
       className="timeline"
       ref={scrollRef}
+      data-pan
       onDoubleClick={onEmptyDoubleClick}
       onContextMenu={onEmptyContextMenu}
     >
@@ -1076,7 +1121,6 @@ export function TimelineView(): React.JSX.Element {
         onPointerMove={onPointerMove}
         onPointerUp={onPointerUp}
         onPointerLeave={() => collab.sendCursor(null)}
-        onMouseDown={onGridMouseDown}
       >
         <div className="timeline-corner" style={{ gridRow: 1, gridColumn: 1 }}>
           <button className="corner-btn" onClick={() => addTrack('audio')}>
@@ -1301,6 +1345,16 @@ export function TimelineView(): React.JSX.Element {
                 width: Math.abs(marquee.x - marquee.originX),
                 height: Math.abs(marquee.y - marquee.originY)
               }}
+            />
+          </div>
+        )}
+
+        {drag?.snapGuide != null && (
+          <div className="marquee-layer" style={{ gridRow: `2 / ${lastGridRow}`, gridColumn: 2 }}>
+            <div
+              className="peak-snap-guide"
+              style={{ left: drag.snapGuide * pxPerTick }}
+              title="Waveform peaks aligned"
             />
           </div>
         )}

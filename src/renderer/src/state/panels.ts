@@ -76,18 +76,23 @@ function loadLayout(): DockLayout {
 class PanelStore {
   layout: DockLayout = loadLayout()
   unreadChat = 0
+  /** Document ops landed while the activity panel was hidden. */
+  unreadActivity = 0
 
   private version = 0
   private listeners = new Set<() => void>()
 
   constructor() {
     projectStore.onOperation((envelope) => {
-      if (
-        envelope.op.type === 'chat/post' &&
-        envelope.op.message.userId !== projectStore.userId &&
-        !this.isOpen('chat')
-      ) {
-        this.unreadChat++
+      if (envelope.op.type === 'chat/post') {
+        if (envelope.op.message.userId !== projectStore.userId && !this.isOpen('chat')) {
+          this.unreadChat++
+          this.emit()
+        }
+        return // chat is deliberately absent from the activity feed
+      }
+      if (!this.isOpen('activity')) {
+        this.unreadActivity++
         this.emit()
       }
     })
@@ -106,6 +111,7 @@ class PanelStore {
     if (this.layout.active[side] === id) return
     this.layout.active[side] = id
     if (id === 'chat') this.unreadChat = 0
+    if (id === 'activity') this.unreadActivity = 0
     this.persist()
     this.emit()
   }
@@ -131,6 +137,7 @@ class PanelStore {
     target.splice(Math.min(Math.max(0, index), target.length), 0, id)
     this.layout.active[side] = id
     if (id === 'chat') this.unreadChat = 0
+    if (id === 'activity') this.unreadActivity = 0
     this.persist()
     this.emit()
   }

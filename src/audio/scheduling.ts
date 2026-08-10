@@ -160,6 +160,53 @@ export function scheduleClips(
   return out
 }
 
+// ---------- Track loops (per-user audition; see AudioEngine) ----------
+
+export interface TrackLoopSpan {
+  /** Timeline extent of the track's clips, in ticks. */
+  readonly start: number
+  readonly end: number
+}
+
+/** The region a track loop repeats: the extent of the track's clips. */
+export function trackLoopSpan(state: ProjectState, trackId: string): TrackLoopSpan | null {
+  let start = Number.POSITIVE_INFINITY
+  let end = 0
+  for (const clip of Object.values(state.clips)) {
+    if (clip.trackId !== trackId) continue
+    start = Math.min(start, clip.start)
+    end = Math.max(end, clip.start + clip.duration)
+  }
+  if (!Number.isFinite(start) || end <= start) return null
+  return { start, end }
+}
+
+/**
+ * One ghost repeat of a looping track: a state holding ONLY that track's
+ * clips, shifted `shiftTicks` later. Notes ride along (they are
+ * clip-relative), every other track drops out, and automation is cleared —
+ * it stays on the real timeline rather than repeating. Feeding this
+ * through the ordinary schedule functions is what keeps track loops and
+ * normal playback mathematically identical.
+ */
+export function trackLoopRepeatState(
+  state: ProjectState,
+  trackId: string,
+  shiftTicks: number
+): ProjectState {
+  const track = state.tracks[trackId]
+  const clips: Record<string, Clip> = {}
+  for (const clip of Object.values(state.clips)) {
+    if (clip.trackId === trackId) clips[clip.id] = { ...clip, start: clip.start + shiftTicks }
+  }
+  return {
+    ...state,
+    tracks: track ? { [trackId]: track } : {},
+    clips,
+    automation: {}
+  }
+}
+
 export interface NoteSchedule {
   readonly trackId: string
   /** Owning clip — lets the engine route the voice through its fade envelope. */

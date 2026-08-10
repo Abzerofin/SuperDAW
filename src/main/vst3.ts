@@ -346,6 +346,27 @@ export function registerVst3Ipc(): void {
   })
 
   /**
+   * Push a document param value INTO an open editor — how a collaborator's
+   * plugin/setParam reaches this machine's GUI (and the hosted instance
+   * behind it), so an open editor never shows stale values and closing it
+   * cannot capture pre-edit state over a peer's change.
+   */
+  ipcMain.handle(
+    'vst3:set-editor-param',
+    (_event, args: { instanceId: string; paramId: number; value: number }): { error?: string } => {
+      const host = loadAddon()
+      if (!host) return { error: loadError ?? 'vst3 host unavailable' }
+      const editorHandle = editors.get(args.instanceId)
+      if (editorHandle === undefined) return {} // no editor open: nothing to update
+      try {
+        return host.setEditorParam(editorHandle, args.paramId, args.value)
+      } catch (error) {
+        return { error: error instanceof Error ? error.message : String(error) }
+      }
+    }
+  )
+
+  /**
    * DOCKED editors: a borderless native overlay glued over a reserved
    * area of the app window (a plugin cannot paint inside a Chromium
    * window — see the native-window commit). The renderer reports the

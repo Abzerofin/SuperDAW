@@ -30,8 +30,17 @@ export function invert(state: ProjectState, op: Operation): Operation | null {
     case 'project/rename':
       return { type: 'project/rename', name: state.name }
 
-    case 'project/setTempo':
-      return { type: 'project/setTempo', tempo: state.tempo }
+    case 'project/setTempo': {
+      // Undo restores the previous stretch of every clip the op conforms.
+      const conform = (op.conform ?? [])
+        .filter((entry) => state.clips[entry.clipId])
+        .map((entry) => ({ clipId: entry.clipId, stretch: state.clips[entry.clipId].stretch }))
+      return {
+        type: 'project/setTempo',
+        tempo: state.tempo,
+        ...(conform.length > 0 ? { conform } : {})
+      }
+    }
 
     case 'project/setTimeSignature':
       return { type: 'project/setTimeSignature', timeSignature: state.timeSignature }
@@ -163,12 +172,20 @@ export function invert(state: ProjectState, op: Operation): Operation | null {
     case 'plugin/remove': {
       const instance = state.plugins[op.instanceId]
       if (!instance) return null
-      // The remove cascades away the node's routing edges; carry them so
-      // undo restores the graph, not just the node.
+      // The remove cascades away the node's routing edges and parameter
+      // automation; carry both so undo restores everything, not just the node.
       const routes = Object.values(state.routes).filter(
         (r) => r.from === op.instanceId || r.to === op.instanceId
       )
-      return { type: 'plugin/add', instance, ...(routes.length > 0 ? { routes } : {}) }
+      const automation = Object.values(state.automation).filter(
+        (p) => p.instanceId === op.instanceId
+      )
+      return {
+        type: 'plugin/add',
+        instance,
+        ...(routes.length > 0 ? { routes } : {}),
+        ...(automation.length > 0 ? { automation } : {})
+      }
     }
 
     case 'route/addMany': {
@@ -196,6 +213,53 @@ export function invert(state: ProjectState, op: Operation): Operation | null {
         x: instance.graphX,
         y: instance.graphY
       }
+    }
+
+    case 'clip/restore': {
+      const clip = state.clips[op.clipId]
+      if (!clip) return null
+      return { type: 'clip/restore', clipId: op.clipId, clip }
+    }
+
+    case 'track/restore': {
+      const track = state.tracks[op.trackId]
+      if (!track) return null
+      return {
+        type: 'track/restore',
+        trackId: op.trackId,
+        track: {
+          name: track.name,
+          color: track.color,
+          muted: track.muted,
+          soloed: track.soloed,
+          volume: track.volume,
+          pan: track.pan,
+          synth: track.synth
+        }
+      }
+    }
+
+    case 'plugin/restore': {
+      const instance = state.plugins[op.instanceId]
+      if (!instance) return null
+      return {
+        type: 'plugin/restore',
+        instanceId: op.instanceId,
+        params: { ...instance.params },
+        enabled: instance.enabled,
+        stateBlob: instance.stateBlob
+      }
+    }
+
+    case 'track/setGraphTerminal': {
+      const track = state.tracks[op.trackId]
+      if (!track) return null
+      const x = op.terminal === 'in' ? track.graphInX : track.graphOutX
+      const y = op.terminal === 'in' ? track.graphInY : track.graphOutY
+      // Same convention as plugin/setGraphPos: the first placement has no
+      // position to restore and is deliberately not undoable (cosmetic).
+      if (x === undefined || y === undefined) return null
+      return { type: 'track/setGraphTerminal', trackId: op.trackId, terminal: op.terminal, x, y }
     }
 
     case 'plugin/setParam': {

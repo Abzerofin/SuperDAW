@@ -4,7 +4,21 @@
  * render controls from one source of truth. Pure data, no audio imports.
  */
 
-export type EffectType = 'paraeq' | 'eq3' | 'compressor' | 'limiter' | 'delay' | 'reverb'
+export type EffectType =
+  | 'paraeq'
+  | 'eq3'
+  | 'compressor'
+  | 'limiter'
+  | 'delay'
+  | 'reverb'
+  | 'lowpass'
+  | 'highpass'
+  | 'bandpass'
+  | 'notch'
+  | 'lfo'
+
+/** LFO waveforms, indexed by the `wave` param value. */
+export const LFO_WAVE_TYPES = ['sine', 'triangle', 'square', 'sawtooth'] as const
 
 export interface ParamDef {
   readonly label: string
@@ -118,6 +132,42 @@ export const EFFECT_DEFS: Readonly<Record<EffectType, EffectDef>> = {
       decay: p('Decay', 0.2, 8, 1.8, 's', 1),
       mix: p('Mix', 0, 1, 0.25, '', 2)
     }
+  },
+  lowpass: {
+    label: 'Low-pass Filter',
+    params: {
+      cutoff: p('Cutoff', 20, 20000, 2000, 'Hz', 0),
+      resonance: p('Resonance', 0.1, 12, 0.71, '', 2)
+    }
+  },
+  highpass: {
+    label: 'High-pass Filter',
+    params: {
+      cutoff: p('Cutoff', 20, 20000, 200, 'Hz', 0),
+      resonance: p('Resonance', 0.1, 12, 0.71, '', 2)
+    }
+  },
+  bandpass: {
+    label: 'Band-pass Filter',
+    params: {
+      cutoff: p('Cutoff', 20, 20000, 1000, 'Hz', 0),
+      resonance: p('Resonance', 0.1, 12, 1, '', 2)
+    }
+  },
+  notch: {
+    label: 'Notch Filter',
+    params: {
+      cutoff: p('Cutoff', 20, 20000, 1000, 'Hz', 0),
+      resonance: p('Resonance', 0.1, 12, 1, '', 2)
+    }
+  },
+  lfo: {
+    label: 'LFO',
+    params: {
+      rate: p('Rate', 0.05, 20, 4, 'Hz', 2),
+      depth: p('Depth', 0, 1, 0.5, '', 2),
+      wave: p('Wave', 0, LFO_WAVE_TYPES.length - 1, 0, '', 0)
+    }
   }
 }
 
@@ -170,4 +220,14 @@ export function effectDefaults(type: EffectType): Record<string, number> {
 export function clampParam(def: ParamDef | undefined, value: number): number {
   if (!def || !Number.isFinite(value)) return def?.default ?? 0
   return Math.min(def.max, Math.max(def.min, value))
+}
+
+/** Normalized 0..1 ↦ the param's real range (automation curve values). */
+export function denormalizeParam(def: ParamDef, v: number): number {
+  return def.min + Math.min(1, Math.max(0, v)) * (def.max - def.min)
+}
+
+/** The param's real range ↦ normalized 0..1. */
+export function normalizeParam(def: ParamDef, value: number): number {
+  return def.max === def.min ? 0 : (clampParam(def, value) - def.min) / (def.max - def.min)
 }

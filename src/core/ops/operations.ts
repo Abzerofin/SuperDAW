@@ -27,7 +27,17 @@ import type {
  */
 export type Operation =
   | { type: 'project/rename'; name: string }
-  | { type: 'project/setTempo'; tempo: number }
+  /**
+   * `conform` present = the gesture also stretched audio clips so their
+   * material keeps filling the same bars at the new tempo (tape-style
+   * resampling). Absolute stretch factors — re-delivery is idempotent —
+   * and entries whose clip is gone are skipped individually.
+   */
+  | {
+      type: 'project/setTempo'
+      tempo: number
+      conform?: Array<{ clipId: ClipId; stretch: number }>
+    }
   | { type: 'project/setTimeSignature'; timeSignature: TimeSignature }
   /**
    * Content arrays restore a deleted track on undo; all empty for new
@@ -77,7 +87,13 @@ export type Operation =
   | { type: 'note/delete'; noteIds: NoteId[] }
   | { type: 'note/addMany'; notes: Note[] }
   /** `routes` restores the instance's graph connections on undo of a remove. */
-  | { type: 'plugin/add'; instance: PluginInstance; routes?: Route[] }
+  | {
+      type: 'plugin/add'
+      instance: PluginInstance
+      routes?: Route[]
+      /** Parameter automation of a removed insert, restored on undo. */
+      automation?: AutomationPoint[]
+    }
   /** Also cascades away every route touching the instance (see invert). */
   | { type: 'plugin/remove'; instanceId: PluginInstanceId }
   /**
@@ -90,6 +106,14 @@ export type Operation =
   | { type: 'route/deleteMany'; routeIds: RouteId[] }
   /** Node position in the graph editor (document data, like clip colors). */
   | { type: 'plugin/setGraphPos'; instanceId: PluginInstanceId; x: number; y: number }
+  /** Position of a track's In / Mix Out terminal in the graph editor. */
+  | {
+      type: 'track/setGraphTerminal'
+      trackId: TrackId
+      terminal: 'in' | 'out'
+      x: number
+      y: number
+    }
   | { type: 'plugin/setParam'; instanceId: PluginInstanceId; param: string; value: number }
   /**
    * Set several params atomically — for gestures that move more than one
@@ -185,6 +209,44 @@ export type Operation =
         loopLength?: number
         stretch?: number
       }>
+    }
+  /**
+   * Restore a clip to an earlier state of ITSELF (the per-item history).
+   * Carries the full field set — absolute, so re-delivery is idempotent
+   * and the invert is simply the current field set. The id must already
+   * exist (deleted clips restore through undo, not item history); the
+   * stored trackId is honored only if that track still exists. Notes are
+   * their own entities and deliberately not part of this.
+   */
+  | { type: 'clip/restore'; clipId: ClipId; clip: Clip }
+  /**
+   * Restore a track's own knobs — name, color, mute/solo, volume, pan,
+   * synth — from its item history. Structure (kind, parent, freeze) and
+   * content stay untouched.
+   */
+  | {
+      type: 'track/restore'
+      trackId: TrackId
+      track: {
+        name: string
+        color: string
+        muted: boolean
+        soloed: boolean
+        volume: number
+        pan: number
+        synth: Readonly<Record<string, number>>
+      }
+    }
+  /**
+   * Restore an insert's sound — params, bypass, state chunk — from its
+   * item history. Rank and graph position stay where they are.
+   */
+  | {
+      type: 'plugin/restore'
+      instanceId: PluginInstanceId
+      params: Record<string, number>
+      enabled: boolean
+      stateBlob: string | null
     }
   | { type: 'clip/rename'; clipId: ClipId; name: string }
   /** null = revert to the track color. */

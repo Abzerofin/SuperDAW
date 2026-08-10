@@ -7,12 +7,27 @@ import { HomeScreen } from './components/home/HomeScreen'
 import { SettingsWindow } from './components/settings/SettingsWindow'
 import { CommandPalette } from './components/palette/CommandPalette'
 import { RoutingPanel } from './components/routing/RoutingPanel'
+import { AssetDownloadPrompt } from './components/collab/AssetDownloadPrompt'
+import { HistoryPopover } from './components/history/HistoryPopover'
+import { useEffect } from 'react'
 import { useAppShell } from './state/appShell'
 import { useGlobalShortcuts } from './lib/shortcuts'
+import { installMiddleMouse } from './lib/middleMouse'
+import { panels } from './state/panels'
 
 export default function App(): React.JSX.Element {
   const shell = useAppShell()
   useGlobalShortcuts()
+  // Middle button: hold-drag pans any [data-pan] panel, plain click pings.
+  useEffect(() => installMiddleMouse(), [])
+  // A project always opens with the communication panels tucked away; the
+  // buttons' notification bubbles say when they are worth opening.
+  useEffect(() => {
+    if (shell.view === 'project') {
+      panels.closePanel('chat')
+      panels.closePanel('activity')
+    }
+  }, [shell.view])
 
   if (shell.view === 'home') {
     return (
@@ -37,6 +52,8 @@ export default function App(): React.JSX.Element {
       <SettingsWindow />
       <CommandPalette />
       <RoutingPanel />
+      <AssetDownloadPrompt />
+      <HistoryPopover />
       <UiPings />
     </div>
   )

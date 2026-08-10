@@ -1,4 +1,4 @@
-import type { PluginInstance, ProjectState, TrackId } from '@core/model/types'
+import type { AutomationPoint, PluginInstance, ProjectState, TrackId } from '@core/model/types'
 import type { PluginDescriptor } from '@core/plugins/descriptor'
 import {
   automationOf,
@@ -8,6 +8,8 @@ import {
   pluginsOfTrack,
   routesOfTrack
 } from '@core/model/types'
+import { denormalizeParam } from '@core/model/effects'
+import { paramDefsOf } from '@core/plugins/builtin'
 import { applyClipFades } from './fades'
 import { pluginRegistry } from './pluginRegistry'
 import { buildSynthVoice } from './synth'
@@ -90,12 +92,20 @@ export function projectEndTicks(state: ProjectState): number {
  * (fan-out/fan-in sum natively); unresolvable or bypassed nodes short
  * through, mirroring the live engine exactly.
  */
-function buildInserts(ctx: BaseAudioContext, state: ProjectState, trackId: TrackId, input: AudioNode): AudioNode {
+function buildInserts(
+  ctx: BaseAudioContext,
+  state: ProjectState,
+  trackId: TrackId,
+  input: AudioNode,
+  /** Timeline tick at ctx time 0 — anchors insert-param automation. */
+  anchorTicks = 0
+): AudioNode {
   const localNodes = (instance: PluginInstance): { input: AudioNode; output: AudioNode } | null => {
     const resolved = pluginRegistry.resolve(instance.descriptor)
     if (!resolved) return null // MISSING on this client: bypass, as in live playback
     const nodes = resolved.provider.create(ctx)
     nodes.apply(instance.params, 0)
+    applyInsertAutomation(nodes, state, instance, anchorTicks)
     return nodes
   }
 
@@ -132,6 +142,45 @@ function buildInserts(ctx: BaseAudioContext, state: ProjectState, trackId: Track
     prev = nodes.output
   }
   return prev
+}
+
+/**
+ * Sampled insert-param automation for an offline render, mirroring the
+ * live engine's 50 ms cadence (PluginNodes.apply smoothing turns steps
+ * into glides). Sampling stops after the last point — curves hold their
+ * final value — so cost is bounded by the automated region, not the song.
+ */
+function applyInsertAutomation(
+  nodes: { apply(params: Readonly<Record<string, number>>, when: number): void },
+  state: ProjectState,
+  instance: PluginInstance,
+  anchorTicks: number
+): void {
+  const byParam = new Map<string, AutomationPoint[]>()
+  for (const point of Object.values(state.automation)) {
+    if (point.instanceId !== instance.id) continue
+    const list = byParam.get(point.param)
+    if (list) list.push(point)
+    else byParam.set(point.param, [point])
+  }
+  if (byParam.size === 0) return
+  const tps = ticksPerSecond(state.tempo)
+  let lastTicks = anchorTicks
+  for (const list of byParam.values()) {
+    list.sort((a, b) => a.ticks - b.ticks)
+    lastTicks = Math.max(lastTicks, list[list.length - 1].ticks)
+  }
+  const defs = paramDefsOf(instance.descriptor)
+  const stepTicks = tps * 0.05
+  for (let ticks = anchorTicks; ticks <= lastTicks + stepTicks; ticks += stepTicks) {
+    const merged: Record<string, number> = { ...instance.params }
+    for (const [param, points] of byParam) {
+      const v = automationValueAt(points, ticks)
+      const def = defs?.[param]
+      merged[param] = def ? denormalizeParam(def, v) : v
+    }
+    nodes.apply(merged, (ticks - anchorTicks) / tps)
+  }
 }
 
 /** Compile a track's volume automation onto a gain node from t=0. */
@@ -443,7 +492,7 @@ export async function renderPreviewWindow(
   const input = ctx.createGain()
   // Only the LOCAL inserts here; externals are applied afterwards by held
   // instances, which is the whole reason their state survives windows.
-  buildInserts(ctx, state, trackId, input).connect(ctx.destination)
+  buildInserts(ctx, state, trackId, input, fromTicks - preRollTicks).connect(ctx.destination)
   scheduleSources(
     ctx,
     state,
