@@ -10,8 +10,13 @@
 
 const LOCAL_PREFIX = 'superdaw.appdata.'
 
+/** DOM-less environments (the test runner) simply have no storage. */
+function bridgeOrNull(): typeof window.superdaw | undefined {
+  return typeof window === 'undefined' ? undefined : window.superdaw
+}
+
 export async function appStorageGet<T>(key: string): Promise<T | null> {
-  const bridge = window.superdaw
+  const bridge = bridgeOrNull()
   if (bridge) {
     try {
       return ((await bridge.appDataGet(key)) as T) ?? null
@@ -19,6 +24,7 @@ export async function appStorageGet<T>(key: string): Promise<T | null> {
       return null
     }
   }
+  if (typeof localStorage === 'undefined') return null
   try {
     const raw = localStorage.getItem(LOCAL_PREFIX + key)
     return raw ? (JSON.parse(raw) as T) : null
@@ -28,7 +34,7 @@ export async function appStorageGet<T>(key: string): Promise<T | null> {
 }
 
 export async function appStorageSet(key: string, value: unknown): Promise<void> {
-  const bridge = window.superdaw
+  const bridge = bridgeOrNull()
   if (bridge) {
     try {
       await bridge.appDataSet(key, value)
@@ -37,6 +43,7 @@ export async function appStorageSet(key: string, value: unknown): Promise<void> 
     }
     return
   }
+  if (typeof localStorage === 'undefined') return
   try {
     localStorage.setItem(LOCAL_PREFIX + key, JSON.stringify(value))
   } catch {

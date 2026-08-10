@@ -1,5 +1,10 @@
 import type { ProjectState } from '../model/types'
 import { SYNTH_DEFS } from '../model/effects'
+import {
+  patchKeys,
+  sanitizeSettingsPatch,
+  type ProjectSettings
+} from '../model/projectSettings'
 import { paramDefsOf } from '../plugins/builtin'
 import type { Operation } from './operations'
 
@@ -21,6 +26,13 @@ export function describe(state: ProjectState, op: Operation): string | null {
         : `Set tempo to ${op.tempo} BPM`
     case 'project/setTimeSignature':
       return `Set time signature to ${op.timeSignature[0]}/${op.timeSignature[1]}`
+    case 'project/updateSettings': {
+      const patch = sanitizeSettingsPatch(op.patch)
+      const keys = patchKeys(patch)
+      if (keys.length === 0) return null
+      if (keys.length > 1) return 'Changed project settings'
+      return describeSetting(keys[0], patch)
+    }
     case 'track/create':
       return `Created ${op.track.kind} track "${op.track.name}"`
     case 'track/delete':
@@ -306,6 +318,39 @@ export function describe(state: ProjectState, op: Operation): string | null {
         comment.anchor.id
       )}`
     }
+  }
+}
+
+/** One touched setting → a specific feed line (the common single-field case). */
+function describeSetting(
+  key: keyof ProjectSettings,
+  patch: Partial<ProjectSettings>
+): string {
+  switch (key) {
+    case 'loudnessTargetLufs': {
+      const target = patch.loudnessTargetLufs
+      return target === null || target === undefined
+        ? 'Cleared the loudness target'
+        : `Set loudness target to ${target} LUFS`
+    }
+    case 'defaultFadeTicks':
+      return patch.defaultFadeTicks === 0
+        ? 'Turned off default clip fades'
+        : `Set default clip fades to ${patch.defaultFadeTicks} ticks`
+    case 'swingPercent':
+      return patch.swingPercent === 0
+        ? 'Set quantize swing to straight'
+        : `Set quantize swing to ${patch.swingPercent}%`
+    case 'quantizeStrength':
+      return `Set quantize strength to ${Math.round((patch.quantizeStrength ?? 1) * 100)}%`
+    case 'humanizeTicks':
+      return `Set humanize amount to ±${patch.humanizeTicks} ticks`
+    case 'defaultGrid':
+      return `Set the project's default grid to ${patch.defaultGrid}`
+    case 'exportFormat':
+      return `Set default export format to ${patch.exportFormat?.toUpperCase()}`
+    case 'exportBitDepth':
+      return `Set export bit depth to ${patch.exportBitDepth}-bit`
   }
 }
 

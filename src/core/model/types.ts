@@ -1,5 +1,6 @@
 import type { TimeSignature } from './timebase'
 import type { PluginDescriptor } from '../plugins/descriptor'
+import { DEFAULT_PROJECT_SETTINGS, type ProjectSettings } from './projectSettings'
 
 export type TrackId = string
 export type ClipId = string
@@ -284,6 +285,8 @@ export interface ProjectState {
   readonly notes: Readonly<Record<NoteId, Note>>
   readonly plugins: Readonly<Record<PluginInstanceId, PluginInstance>>
   readonly routes: Readonly<Record<RouteId, Route>>
+  /** Shared project-scoped settings (loudness target, defaults). See projectSettings.ts. */
+  readonly settings: ProjectSettings
 }
 
 export function createEmptyProject(name: string, createdAt = 0): ProjectState {
@@ -303,7 +306,8 @@ export function createEmptyProject(name: string, createdAt = 0): ProjectState {
     automation: {},
     notes: {},
     plugins: {},
-    routes: {}
+    routes: {},
+    settings: DEFAULT_PROJECT_SETTINGS
   }
 }
 

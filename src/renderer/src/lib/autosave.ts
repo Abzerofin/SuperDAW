@@ -6,6 +6,7 @@ import {
 import { projectStore } from '@/state/projectStore'
 import { assetStore } from '@/state/audioInstance'
 import { sessionFile } from '@/state/sessionFile'
+import { preferences } from '@/state/preferences'
 
 /**
  * Crash recovery: while the project is dirty, snapshot it periodically into
@@ -26,7 +27,12 @@ import { sessionFile } from '@/state/sessionFile'
  * Electron-only by nature; in the browser build every entry point no-ops.
  */
 
-const SNAPSHOT_INTERVAL_MS = 20_000
+/**
+ * The heartbeat fires often; each beat snapshots only when the user's
+ * configured interval (Settings ▸ General, default 20 s) has elapsed —
+ * so the cadence follows the preference without rescheduling timers.
+ */
+const HEARTBEAT_MS = 5_000
 
 export interface RecoveryOffer {
   readonly name: string
@@ -41,14 +47,22 @@ class Autosave {
   private busy = false
   /** Bumped by clearRecovery so an in-flight tick stops polluting the slot. */
   private generation = 0
+  private lastSnapshotAt = 0
 
-  /** Snapshot now if dirty and changed; quietly does nothing otherwise. */
-  tick = async (): Promise<void> => {
+  /**
+   * Snapshot now if dirty, changed and due; quietly does nothing otherwise.
+   * `force` skips the interval check (window hide — the OS kills background
+   * apps first, so waiting out the cadence there risks real work).
+   */
+  tick = async (force = false): Promise<void> => {
     const bridge = window.superdaw
     if (!bridge || this.busy || !sessionFile.dirty) return
+    if (!force && performance.now() - this.lastSnapshotAt < preferences.autosaveIntervalSec * 1000)
+      return
     const state = projectStore.state
     if (state === this.lastSnapshotState) return
     this.busy = true
+    this.lastSnapshotAt = performance.now()
     const generation = this.generation
     try {
       const referenced = referencedAssetIds(state)
@@ -85,6 +99,7 @@ class Autosave {
     this.generation++
     this.written.clear()
     this.lastSnapshotState = null
+    this.lastSnapshotAt = 0
     try {
       await window.superdaw?.recoveryClear()
     } catch (error) {
@@ -109,8 +124,8 @@ export async function peekRecovery(): Promise<RecoveryOffer | null> {
 // Wired at import (from main.tsx, like the close guard). The hidden-window
 // snapshot matters: minimized apps are what the OS reclaims first.
 if (typeof window !== 'undefined' && window.superdaw) {
-  setInterval(() => void autosave.tick(), SNAPSHOT_INTERVAL_MS)
+  setInterval(() => void autosave.tick(), HEARTBEAT_MS)
   document.addEventListener('visibilitychange', () => {
-    if (document.visibilityState === 'hidden') void autosave.tick()
+    if (document.visibilityState === 'hidden') void autosave.tick(true)
   })
 }

@@ -1,5 +1,6 @@
 ﻿import { describe as suite, expect, test } from 'vitest'
 import { createEmptyProject } from '../../model/types'
+import { DEFAULT_PROJECT_SETTINGS } from '../../model/projectSettings'
 import { apply } from '../../ops/apply'
 import {
   FORMAT_VERSION,
@@ -148,6 +149,36 @@ suite('project file format', () => {
     )
     expect(corrupt.opLog).toBeUndefined()
     expect(corrupt.lineage?.projectId).toBe('prj_1')
+  })
+
+  test('project settings round-trip; old and doctored files normalize', () => {
+    let state = sampleState()
+    state = apply(state, {
+      type: 'project/updateSettings',
+      patch: { loudnessTargetLufs: -14, defaultFadeTicks: 96, exportFormat: 'mp3', exportBitDepth: 24 }
+    })
+    const parsed = parseProjectJson(serializeProjectJson(state, []))
+    expect(parsed.state.settings).toEqual(state.settings)
+
+    // Pre-settings files (the whole v1–v3 era) come back with defaults.
+    const legacyState = { ...sampleState() } as Record<string, unknown>
+    delete legacyState.settings
+    const legacy = parseProjectJson(
+      JSON.stringify({ formatVersion: 3, state: legacyState, assets: [] })
+    )
+    expect(legacy.state.settings).toEqual(DEFAULT_PROJECT_SETTINGS)
+
+    // Doctored values re-earn their place: clamped or replaced by defaults.
+    const doctored = {
+      ...sampleState(),
+      settings: { loudnessTargetLufs: -500, swingPercent: 'evil', extraKey: true }
+    }
+    const cleaned = parseProjectJson(
+      JSON.stringify({ formatVersion: 3, state: doctored, assets: [] })
+    )
+    expect(cleaned.state.settings.loudnessTargetLufs).toBe(-36)
+    expect(cleaned.state.settings.swingPercent).toBe(DEFAULT_PROJECT_SETTINGS.swingPercent)
+    expect('extraKey' in cleaned.state.settings).toBe(false)
   })
 
   test('referencedAssetIds collects clip and bay references', () => {

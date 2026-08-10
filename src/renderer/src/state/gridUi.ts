@@ -1,11 +1,15 @@
 import { useSyncExternalStore } from 'react'
 import { PPQ, ticksPerBar, ticksPerBeat, type TimeSignature } from '@core/model/timebase'
+import type { SnapChoice } from '@core/model/projectSettings'
 
 /**
  * Timeline snap resolution — ephemeral per-user UI state. 'auto' keeps the
  * original zoom-dependent behavior; 'off' disables snapping entirely.
+ * The resolution roster is core's SnapChoice: the project document stores a
+ * DEFAULT grid (`settings.defaultGrid`) that seeds this store at load; live
+ * switching stays per-user and syncs to no one.
  */
-export type GridChoice = 'auto' | 'bar' | 'beat' | '1/8' | '1/16' | 'off'
+export type GridChoice = SnapChoice
 
 export const GRID_CHOICES: readonly { value: GridChoice; label: string }[] = [
   { value: 'auto', label: 'Grid: Auto' },

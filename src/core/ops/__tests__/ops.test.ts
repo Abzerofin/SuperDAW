@@ -175,6 +175,18 @@ suite('invert', () => {
     // Conforming variant: undo must restore the clip's previous stretch.
     { type: 'project/setTempo', tempo: 160, conform: [{ clipId: 'c1', stretch: 0.75 }] },
     { type: 'project/setTimeSignature', timeSignature: [7, 8] },
+    { type: 'project/updateSettings', patch: { loudnessTargetLufs: -14, swingPercent: 55 } },
+    {
+      type: 'project/updateSettings',
+      patch: {
+        defaultFadeTicks: 96,
+        quantizeStrength: 0.5,
+        humanizeTicks: 12,
+        defaultGrid: '1/8',
+        exportFormat: 'mp3',
+        exportBitDepth: 24
+      }
+    },
     {
       type: 'track/create',
       track: track('t9'),
@@ -295,6 +307,72 @@ suite('invert', () => {
       expect(apply(after, inverse!)).toEqual(before)
     })
   }
+})
+
+suite('project/updateSettings', () => {
+  test('applies a patch of absolute values', () => {
+    const s = apply(baseState(), {
+      type: 'project/updateSettings',
+      patch: { loudnessTargetLufs: -14, defaultFadeTicks: 96 }
+    })
+    expect(s.settings.loudnessTargetLufs).toBe(-14)
+    expect(s.settings.defaultFadeTicks).toBe(96)
+    // Untouched fields keep their values.
+    expect(s.settings.swingPercent).toBe(0)
+  })
+
+  test('re-applying the same patch changes nothing (idempotent)', () => {
+    const op: Operation = {
+      type: 'project/updateSettings',
+      patch: { loudnessTargetLufs: -16, swingPercent: 60 }
+    }
+    const once = apply(baseState(), op)
+    expect(apply(once, op)).toBe(once)
+  })
+
+  test('unknown keys are dropped and values clamp deterministically', () => {
+    const before = baseState()
+    const s = apply(before, {
+      type: 'project/updateSettings',
+      patch: {
+        loudnessTargetLufs: -999, // clamps to -36
+        swingPercent: 400, // clamps to 100
+        quantizeStrength: -2, // clamps to 0
+        bogusKey: 'evil', // dropped
+        defaultGrid: 'nonsense', // invalid choice — dropped
+        exportBitDepth: 20 // not a supported word length — dropped
+      } as never
+    })
+    expect(s.settings.loudnessTargetLufs).toBe(-36)
+    expect(s.settings.swingPercent).toBe(100)
+    expect(s.settings.quantizeStrength).toBe(0)
+    expect(s.settings.defaultGrid).toBe(before.settings.defaultGrid)
+    expect(s.settings.exportBitDepth).toBe(before.settings.exportBitDepth)
+    expect('bogusKey' in s.settings).toBe(false)
+  })
+
+  test('null clears the loudness target', () => {
+    const withTarget = apply(baseState(), {
+      type: 'project/updateSettings',
+      patch: { loudnessTargetLufs: -14 }
+    })
+    const cleared = apply(withTarget, {
+      type: 'project/updateSettings',
+      patch: { loudnessTargetLufs: null }
+    })
+    expect(cleared.settings.loudnessTargetLufs).toBeNull()
+  })
+
+  test('a patch of only invalid keys is a no-op with a no-op invert', () => {
+    const before = baseState()
+    const op: Operation = {
+      type: 'project/updateSettings',
+      patch: { nothing: 1 } as never
+    }
+    expect(apply(before, op)).toBe(before)
+    // The inverse must not resurrect keys the reducer dropped.
+    expect(invert(before, op)).toEqual({ type: 'project/updateSettings', patch: {} })
+  })
 })
 
 suite('clip/slice', () => {

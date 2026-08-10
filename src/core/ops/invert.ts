@@ -8,6 +8,11 @@ import {
   trackSubtreeOf
 } from '../model/types'
 import { SYNTH_DEFS } from '../model/effects'
+import {
+  patchKeys,
+  sanitizeSettingsPatch,
+  type ProjectSettings
+} from '../model/projectSettings'
 
 function automationOfTrack(state: ProjectState, trackId: string) {
   return Object.values(state.automation).filter((p) => p.trackId === trackId)
@@ -47,6 +52,16 @@ export function invert(state: ProjectState, op: Operation): Operation | null {
 
     case 'project/setTimeSignature':
       return { type: 'project/setTimeSignature', timeSignature: state.timeSignature }
+
+    case 'project/updateSettings': {
+      // Undo restores the previous values of exactly the keys the sanitized
+      // patch would touch (keys the reducer drops must not resurrect here).
+      const patch: Record<string, unknown> = {}
+      for (const key of patchKeys(sanitizeSettingsPatch(op.patch))) {
+        patch[key] = state.settings[key]
+      }
+      return { type: 'project/updateSettings', patch: patch as Partial<ProjectSettings> }
+    }
 
     case 'track/create':
       return { type: 'track/delete', trackId: op.track.id }

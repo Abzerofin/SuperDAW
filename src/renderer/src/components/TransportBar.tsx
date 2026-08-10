@@ -12,13 +12,14 @@ import { GRID_CHOICES, gridUi, useGridChoice, type GridChoice } from '@/state/gr
 import { RULER_MODES, rulerUi, useRulerMode, type RulerMode } from '@/state/rulerUi'
 import {
   closeProject,
-  exportWav,
   mergeProjectFromFile,
   newProject,
   openProject,
   openRecentProject,
   saveProject
 } from '@/lib/projectFile'
+import { exportMixdown } from '@/lib/exportAudio'
+import { newProjectFromTemplate, saveProjectTemplate } from '@/lib/templateActions'
 import { appShell } from '@/state/appShell'
 import { settingsUi } from '@/state/settingsUi'
 import { preferences } from '@/state/preferences'
@@ -303,6 +304,21 @@ function FileMenu(): React.JSX.Element {
             disabled={inSession}
             title={
               inSession
+                ? 'Leave the session first — a new project cannot replace the document a running session is syncing'
+                : 'Start a new project from a saved template: tracks, effects, routing and project settings, no content'
+            }
+            onClick={() => {
+              setOpen(false)
+              void newProjectFromTemplate()
+            }}
+          >
+            <span>New from template…</span>
+          </button>
+          <button
+            className="menu-item"
+            disabled={inSession}
+            title={
+              inSession
                 ? 'Leave the session first — a loaded project cannot replace the document a running session is syncing'
                 : undefined
             }
@@ -354,8 +370,13 @@ function FileMenu(): React.JSX.Element {
           <div className="menu-sep" />
           {item('Save', 'Ctrl+S', () => void saveProject())}
           {item('Save as…', 'Ctrl+Shift+S', () => void saveProject(true))}
+          {item('Save as template…', null, () => void saveProjectTemplate())}
           <div className="menu-sep" />
-          {item('Export WAV…', null, () => void exportWav())}
+          {item(
+            `Export ${projectStore.state.settings.exportFormat.toUpperCase()}…`,
+            null,
+            () => void exportMixdown()
+          )}
           <div className="menu-sep" />
           {item('Close project', null, () => closeProject())}
           {item('Return to Home', null, () => appShell.goHome())}

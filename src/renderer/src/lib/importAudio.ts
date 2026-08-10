@@ -106,6 +106,17 @@ function bayNodesFor(assets: readonly ProjectAsset[], folderId: FileNodeId | nul
   return nodes
 }
 
+/**
+ * The project's default micro-fade for a fresh AUDIO clip (anti-click,
+ * Settings on the document — `settings.defaultFadeTicks`), clamped so both
+ * fades always fit inside the clip. MIDI clips never fade by default.
+ */
+function defaultFadeFor(kind: 'audio' | 'midi', durationTicks: number): number {
+  if (kind !== 'audio') return 0
+  const wanted = projectStore.state.settings.defaultFadeTicks
+  return Math.max(0, Math.min(wanted, Math.floor(durationTicks / 2)))
+}
+
 /** A clip (with MIDI notes) placing an asset on a track. */
 function clipFor(
   asset: ProjectAsset,
@@ -114,18 +125,20 @@ function clipFor(
 ): { clip: Clip; notes: Note[] } {
   const clipId = newId('clp')
   const { notes, totalTicks } = midiNotesFor(asset, clipId)
+  const duration = clipDurationTicks(asset, totalTicks)
+  const fade = defaultFadeFor(asset.kind, duration)
   return {
     clip: {
       id: clipId,
       trackId: track.id,
       name: baseName(asset.name),
       start: startTicks,
-      duration: clipDurationTicks(asset, totalTicks),
+      duration,
       assetId: asset.id,
       offset: 0,
       color: null,
-      fadeIn: 0,
-      fadeOut: 0,
+      fadeIn: fade,
+      fadeOut: fade,
       reverse: false,
       pitch: 0,
       stretch: 1,
@@ -324,6 +337,8 @@ export function createClipFromBayAsset(
   if (!asset || asset.kind !== track.kind) return
   const clipId = newId('clp')
   const { notes, totalTicks } = midiNotesFor(asset, clipId)
+  const duration = clipDurationTicks(asset, totalTicks)
+  const fade = defaultFadeFor(asset.kind, duration)
   projectStore.dispatch({
     type: 'clip/create',
     clip: {
@@ -331,12 +346,12 @@ export function createClipFromBayAsset(
       trackId: track.id,
       name: payload.name,
       start: Math.max(0, startTicks),
-      duration: clipDurationTicks(asset, totalTicks),
+      duration,
       assetId: asset.id,
       offset: 0,
       color: null,
-      fadeIn: 0,
-      fadeOut: 0,
+      fadeIn: fade,
+      fadeOut: fade,
       reverse: false,
       pitch: 0,
       stretch: 1,

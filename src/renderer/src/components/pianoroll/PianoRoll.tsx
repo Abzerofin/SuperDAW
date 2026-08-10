@@ -7,6 +7,7 @@ import { projectStore } from '@/state/projectStore'
 import { useProjectState } from '@/state/hooks'
 import { transport } from '@/state/transport'
 import { pianoRollUi } from '@/state/pianoRollUi'
+import { keymap } from '@/state/keymap'
 import { capturePointer } from '@/lib/pointer'
 import { humanizeNotes, quantizeNotes } from '@/lib/noteActions'
 import { parseNumberIn } from '@/lib/valueParse'
@@ -450,17 +451,19 @@ export function PianoRoll({ clipId }: { clipId: string }): React.JSX.Element | n
     // Don't steal keys from the velocity slider (or any future input).
     const target = e.target as HTMLElement
     if (target.tagName === 'INPUT') return
-    const mod = e.ctrlKey || e.metaKey
-    if ((e.key === 'Delete' || e.key === 'Backspace') && selected.size > 0) {
+    // Same rebindable actions as the timeline (state/keymap.ts), applied
+    // to NOTES here — stopPropagation keeps the global handler out.
+    const id = keymap.resolve(e.nativeEvent)
+    if (id === 'selection.delete' && selected.size > 0) {
       e.stopPropagation()
       projectStore.dispatch({ type: 'note/delete', noteIds: [...selected] })
       setSelected(new Set())
       return
     }
-    // Shift+A widens a note selection to every note ON THE TRACK. With
+    // Select-all widens a note selection to every note ON THE TRACK. With
     // nothing selected it deliberately does nothing — same contract as the
     // timeline's select-all.
-    if (e.key.toLowerCase() === 'a' && e.shiftKey && !mod && !e.altKey) {
+    if (id === 'selection.all') {
       if (selected.size > 0) {
         e.stopPropagation()
         e.preventDefault()
@@ -468,14 +471,14 @@ export function PianoRoll({ clipId }: { clipId: string }): React.JSX.Element | n
       }
       return
     }
-    // Q quantizes, H humanizes — the selection if there is one, else every
-    // note shown. One note/moveMany per press: one undo step.
-    if (e.key.toLowerCase() === 'q' && !mod && !e.altKey && !e.shiftKey) {
+    // Quantize/humanize — the selection if there is one, else every note
+    // shown. One note/moveMany per press: one undo step.
+    if (id === 'notes.quantize') {
       e.stopPropagation()
       quantizeNotes(selected.size > 0 ? selected : laid.map(({ note }) => note.id), gridTicks)
       return
     }
-    if (e.key.toLowerCase() === 'h' && !mod && !e.altKey && !e.shiftKey) {
+    if (id === 'notes.humanize') {
       e.stopPropagation()
       humanizeNotes(selected.size > 0 ? selected : laid.map(({ note }) => note.id))
       return

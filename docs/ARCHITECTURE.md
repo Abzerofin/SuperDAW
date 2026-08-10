@@ -240,12 +240,66 @@ future network layer will move snapshots through its own join path.
 Crash recovery (Electron only): while dirty, `lib/autosave.ts` snapshots
 into ONE recovery slot in userData every 20 s (and on window hide) —
 `project.json` rewritten when state changed, asset bytes written once each
-(immutable by id), everything atomic (`main/recovery.ts`). The slot clears
+(immutable by id), everything atomic (`main/recovery.ts`). Each snapshot
+rotates the previous two document generations (`project.1.json`,
+`project.2.json` — renames, never asset rewrites) and recovery loads the
+newest generation that parses, so one corrupt write costs one interval,
+not the session. Real saves keep the overwritten file's bytes as
+`<name>.sdaw.bak` (best-effort, never blocks the save). The slot clears
 on a real save or an explicit user discard — deliberately NOT on opening
 another project, so a crashed session's work survives until acted on. The
 home screen offers "Recover unsaved project", which loads through the
 ordinary open pipeline, reattaches the original path and marks the result
 dirty.
+
+## Settings: two scopes, one rule each
+
+Settings split by WHO a value describes, and each scope has exactly one
+mutation path:
+
+- **Project scope** (`ProjectState.settings`, `core/model/projectSettings.ts`)
+  — decisions every collaborator shares because they are properties of the
+  SONG: loudness target (LUFS, with platform presets), default clip
+  micro-fades, quantize swing/strength, humanize amount, the default snap
+  grid, the default export format. Mutated ONLY through the
+  `project/updateSettings` op: a patch of absolute per-field values, so
+  re-delivery is idempotent, undo restores the previous values of exactly
+  the touched keys, and concurrent edits from two peers resolve per field
+  by last-write-wins. The reducer sanitizes every patch deterministically
+  (unknown keys dropped, values clamped — the same rule plugin params
+  follow), and file loads run stored settings through the same normalizer,
+  so a doctored .sdaw cannot smuggle bad values. Additive in format v3:
+  older files simply gain defaults.
+- **User scope** (`renderer/state/preferences.ts` and friends, via the
+  appStorage seam) — personal or machine facts that would be wrong to sync:
+  devices, theme, latency hint (the AudioContext buffer-size request,
+  injected into the engine as a provider so `src/audio` stays free of app
+  state), count-in, tempo-conform policy, autosave cadence, display name,
+  UI scale, and the keymap (`state/keymap.ts`: a typed roster of actions
+  with default combos + fixed aliases; user overrides persist as
+  `appStorage.keymap`, and both the global handler and the piano roll
+  resolve keydowns through `keymap.resolve`, so a rebinding applies
+  everywhere from one definition — Settings ▸ Keyboard Shortcuts).
+
+Both scopes are edited in one place: the Settings window's Project pane is
+the ONE pane that edits the document (each control dispatches a
+`project/updateSettings` patch — undoable, in the activity feed, synced),
+every other pane edits app state. Export consumes the project's
+`exportFormat`/`exportBitDepth` (WAV 16/24-bit or MP3), and each mixdown
+measures its integrated loudness (BS.1770, `src/audio/loudness.ts` — pure
+math, unit-tested against the spec's calibration tone) and reports the
+distance to `loudnessTargetLufs` as a one-shot status-bar notice.
+
+Session templates (`core/persistence/projectTemplate.ts`, `.sdtpl` files)
+capture a project's SETUP — track tree, mixer/synth state, insert chains by
+descriptor, routing graphs, tempo/signature, project settings — and no
+content. Instantiation ("New from template…") validates field-by-field like
+the project format and mints fresh ids, so two projects from one template
+can never collide (the duplicate-track rule). See docs/SETTINGS_AUDIT.md
+for the full audit.
+
+The project's `defaultGrid` seeds each user's ephemeral grid choice at
+load; live switching stays per-user, exactly like zoom.
 
 ## App-level state (settings, recents, shell)
 
@@ -599,6 +653,21 @@ default).
     once each, atomic via the shared `writeFileAtomic`); home-screen
     "Recover unsaved project" offer; slot cleared by real saves and
     explicit discards only. See File Bay & persistence.
+
+22. ✅ **Settings systems** (audit: docs/SETTINGS_AUDIT.md) — Project pane
+    in Settings, the one document-editing pane (`project/updateSettings`
+    per gesture): loudness target with platform presets, quantize
+    swing/strength/humanize, default micro-fade/grid, export format +
+    16/24-bit WAV depth (new `exportBitDepth` field + PCM24 encoder, both
+    consumed by mixdown and track exports). BS.1770 integrated-loudness
+    measurement of every bounce, reported against the target in the status
+    bar (`audio/loudness.ts`). Rebindable keyboard shortcuts
+    (`state/keymap.ts` + Shortcuts pane; global handler and piano roll
+    resolve through one keymap). Session templates (`.sdtpl` — setup
+    without content, fresh ids at instantiation; File ▸ Save as
+    template… / New from template…). Autosave generations (3 rotated
+    recovery docs, newest-parseable wins) and `.sdaw.bak` on overwrite.
+    UI scale preference (75–150 %).
 
 Roadmap beyond: VST3 hosting (native module; first consumer of the
 provider/`stateBlob` contracts), collaborator audio streaming + proxy

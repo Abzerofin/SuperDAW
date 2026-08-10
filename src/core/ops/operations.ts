@@ -1,4 +1,5 @@
 import type { TimeSignature } from '../model/timebase'
+import type { ProjectSettings } from '../model/projectSettings'
 import type {
   AutomationPoint,
   AutomationPointId,
@@ -41,6 +42,13 @@ export type Operation =
       conform?: Array<{ clipId: ClipId; stretch: number }>
     }
   | { type: 'project/setTimeSignature'; timeSignature: TimeSignature }
+  /**
+   * Update project-scoped settings (core/model/projectSettings). The patch
+   * carries ABSOLUTE values for the fields it touches — idempotent on
+   * re-delivery, per-field last-write-wins between peers. One settings
+   * gesture = one patch; the invert is the previous values of the same keys.
+   */
+  | { type: 'project/updateSettings'; patch: Partial<ProjectSettings> }
   /**
    * Content arrays restore a deleted track on undo; all empty for new
    * tracks. `descendants` restores a deleted folder's subtree (each track

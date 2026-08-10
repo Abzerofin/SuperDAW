@@ -11,6 +11,7 @@ import { useAudioDevices } from '@/state/audioDevices'
 import { useCollab } from '@/state/collab'
 import { audioEngine, assetStore } from '@/state/audioInstance'
 import { healthSampler } from '@/state/health'
+import { statusNotice, useStatusNotice } from '@/state/statusNotice'
 
 export function StatusBar(): React.JSX.Element {
   const state = useProjectState()
@@ -29,6 +30,7 @@ export function StatusBar(): React.JSX.Element {
         <span className="statusbar-dim">Local project · {fileLabel}</span>
       </div>
       <DeviceNotice />
+      <AppNotice />
       <div className="statusbar-hint statusbar-dim">
         Drop audio or .mid files on a track · Double-click a lane to add a clip · Double-click a
         MIDI clip to edit notes · Right-click a clip for colors
@@ -156,6 +158,17 @@ function HealthStatus({ state }: { state: ProjectState }): React.JSX.Element {
         </div>
       )}
     </span>
+  )
+}
+
+/** One-shot app notice (export loudness reports etc.) — same contract. */
+function AppNotice(): React.JSX.Element | null {
+  const notice = useStatusNotice()
+  if (!notice) return null
+  return (
+    <button className="statusbar-notice" title="Dismiss" onClick={() => statusNotice.dismiss()}>
+      {notice}
+    </button>
   )
 }
 

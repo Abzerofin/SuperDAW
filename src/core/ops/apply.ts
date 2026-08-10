@@ -27,6 +27,7 @@ import {
   pluginsOfTrack
 } from '../model/types'
 import { SYNTH_DEFS, clampParam, type ParamDef } from '../model/effects'
+import { mergeSettings, sanitizeSettingsPatch } from '../model/projectSettings'
 import { paramDefsOf } from '../plugins/builtin'
 
 /** Insert notes, skipping ids that exist and notes whose clip is missing. */
@@ -114,6 +115,14 @@ export function apply(state: ProjectState, op: Operation): ProjectState {
       }
       if (state.tempo === tempo && !clipsChanged) return state
       return { ...state, tempo, clips }
+    }
+
+    case 'project/updateSettings': {
+      // The patch re-earns its place here: unknown keys dropped, values
+      // clamped deterministically — every peer sanitizes identically.
+      const settings = mergeSettings(state.settings, sanitizeSettingsPatch(op.patch))
+      if (settings === state.settings) return state
+      return { ...state, settings }
     }
 
     case 'project/setTimeSignature': {

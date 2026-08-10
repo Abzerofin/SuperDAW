@@ -2,6 +2,7 @@ import type { Clip, ProjectState, Track, TrackKind } from '@core/model/types'
 import { barsToTicks } from '@core/model/timebase'
 import { newId } from '@core/model/ids'
 import { synthDefaults } from '@core/model/effects'
+import { DEFAULT_PROJECT_SETTINGS } from '@core/model/projectSettings'
 import { nextTrackColor } from '@/lib/colors'
 
 /**
@@ -80,6 +81,7 @@ export function createDemoProject(): ProjectState {
     automation: {},
     notes: {},
     plugins: {},
-    routes: {}
+    routes: {},
+    settings: DEFAULT_PROJECT_SETTINGS
   }
 }

@@ -1,5 +1,5 @@
 import { app, BrowserWindow, dialog, ipcMain, Menu, shell } from 'electron'
-import { readFile } from 'node:fs/promises'
+import { copyFile, readFile } from 'node:fs/promises'
 import { basename, join } from 'node:path'
 import { asBuffer, writeFileAtomic } from './atomicWrite'
 import { readAppData, setAppData } from './appData'
@@ -40,6 +40,15 @@ function registerIpc(): void {
         })
         if (result.canceled || !result.filePath) return null
         filePath = result.filePath
+      }
+      // One-version-back safety: before overwriting, the previous save's
+      // bytes become <name>.sdaw.bak — so "I saved over the good version"
+      // is recoverable by renaming a file. Best-effort: a .bak that cannot
+      // be written (locked, read-only media) must never block the save.
+      try {
+        await copyFile(filePath, `${filePath}.bak`)
+      } catch {
+        // First save to this path, or the copy failed — save proceeds.
       }
       await writeFileAtomic(filePath, asBuffer(args.data))
       return filePath

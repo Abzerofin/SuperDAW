@@ -2,6 +2,7 @@ import type { Clip, PluginInstance, ProjectState, Track } from '../model/types'
 import { createEmptyProject } from '../model/types'
 import { routeIsValid } from '../model/routing'
 import { synthDefaults, EFFECT_DEFS, type EffectType } from '../model/effects'
+import { normalizeProjectSettings } from '../model/projectSettings'
 import { builtinEffectDescriptor } from '../plugins/builtin'
 import type { OpEnvelope } from '../ops/operations'
 import type { ProjectLineage } from '../state/store'
@@ -179,7 +180,15 @@ function normalizeState(state: ProjectState): ProjectState {
       loopLength: legacyLoopFlag === false ? 0 : (legacy.loopLength ?? 0)
     }
   }
-  const full: ProjectState = { ...merged, tracks, clips, plugins: migratePlugins(merged) }
+  const full: ProjectState = {
+    ...merged,
+    tracks,
+    clips,
+    plugins: migratePlugins(merged),
+    // Pre-settings files get defaults; stored values re-earn their place
+    // through the same normalizer the reducer uses (never trusted raw).
+    settings: normalizeProjectSettings(merged.settings)
+  }
   // v1 stored inserts under `effects`; migratePlugins consumed it.
   delete (full as { effects?: unknown }).effects
   return sanitizeRoutes(full)

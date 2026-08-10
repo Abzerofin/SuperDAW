@@ -4,6 +4,15 @@ import { collab } from './collab'
 import { recording } from './recording'
 import { panels } from './panels'
 import { audioEngine, assetStore } from './audioInstance'
+import {
+  generateStressProject,
+  capturePerformanceMetrics,
+  measureFramePerformance,
+  stressTestPlayback,
+  stressTestUndoRedo,
+  stressTestConcurrency,
+  runAllStressTests
+} from '../../../core/stressTest'
 
 /**
  * Dev-only debug handle: the LIVE singletons, immune to module-graph
@@ -18,7 +27,17 @@ if (import.meta.env.DEV) {
     recording,
     panels,
     audioEngine,
-    assetStore
+    assetStore,
+    // Stress testing utilities
+    stressTest: {
+      generate: (config?: any) => generateStressProject(projectStore, config),
+      memory: capturePerformanceMetrics,
+      framePerf: measureFramePerformance,
+      playback: (duration?: number) => stressTestPlayback(projectStore, duration),
+      undoRedo: () => stressTestUndoRedo(projectStore),
+      concurrency: () => stressTestConcurrency(projectStore),
+      runAll: () => runAllStressTests(projectStore)
+    }
   }
 }
 

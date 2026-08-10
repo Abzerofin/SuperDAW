@@ -7,6 +7,7 @@ import { useSyncExternalStore } from 'react'
  */
 export type SettingsSection =
   | 'general'
+  | 'project'
   | 'audio'
   | 'themes'
   | 'shortcuts'
@@ -16,8 +17,10 @@ export type SettingsSection =
 /** Sections that have a real pane today; the rest render as "coming soon". */
 export const IMPLEMENTED_SECTIONS: ReadonlySet<SettingsSection> = new Set([
   'general',
+  'project',
   'audio',
   'themes',
+  'shortcuts',
   'collaboration',
   'plugins'
 ])

@@ -8,19 +8,27 @@ import {
   useSettingsUi,
   type SettingsSection
 } from '@/state/settingsUi'
-import { preferences, usePreferences, type TempoConformChoice } from '@/state/preferences'
+import {
+  preferences,
+  usePreferences,
+  type LatencyHintChoice,
+  type TempoConformChoice
+} from '@/state/preferences'
 import { PluginsPane } from './PluginsPane'
 import { ThemesPane } from './ThemesPane'
+import { ProjectPane } from './ProjectPane'
+import { ShortcutsPane } from './ShortcutsPane'
 
 /**
  * The settings window: an in-app overlay (professional, no OS dialogs)
- * with a section sidebar built for expansion — General and Audio are live,
- * the rest are placeholders that gain panes without touching this shell.
- * Everything here is app-level state, fully independent of project files.
+ * with a section sidebar built for expansion. Every pane edits APP-level
+ * state except Project, which edits the open DOCUMENT through ordinary
+ * `project/updateSettings` ops (undoable, synced, saved in the .sdaw).
  */
 
 const SECTIONS: Array<{ id: SettingsSection; label: string }> = [
   { id: 'general', label: 'General' },
+  { id: 'project', label: 'Project' },
   { id: 'audio', label: 'Audio' },
   { id: 'themes', label: 'Themes' },
   { id: 'shortcuts', label: 'Keyboard Shortcuts' },
@@ -64,8 +72,10 @@ export function SettingsWindow(): React.JSX.Element | null {
             ×
           </button>
           {ui.section === 'general' && <GeneralPane />}
+          {ui.section === 'project' && <ProjectPane />}
           {ui.section === 'audio' && <AudioPane />}
           {ui.section === 'themes' && <ThemesPane />}
+          {ui.section === 'shortcuts' && <ShortcutsPane />}
           {ui.section === 'collaboration' && <CollaborationPane />}
           {ui.section === 'plugins' && <PluginsPane />}
           {!IMPLEMENTED_SECTIONS.has(ui.section) && (
@@ -181,6 +191,43 @@ function GeneralPane(): React.JSX.Element {
         </p>
       </div>
       <div className="settings-field">
+        <label htmlFor="settings-autosave">Crash-recovery snapshots</label>
+        <select
+          id="settings-autosave"
+          value={String(preferences.autosaveIntervalSec)}
+          onChange={(e) => preferences.set('autosaveIntervalSec', Number(e.target.value))}
+        >
+          <option value="10">Every 10 seconds</option>
+          <option value="20">Every 20 seconds</option>
+          <option value="60">Every minute</option>
+          <option value="300">Every 5 minutes</option>
+        </select>
+        <p className="settings-dim">
+          While a project has unsaved changes it is snapshotted in the background this often; a
+          crash offers the snapshot on the home screen. Snapshots after the first are cheap —
+          audio data is written once, only the document is rewritten.
+        </p>
+      </div>
+      <div className="settings-field">
+        <label htmlFor="settings-ui-scale">UI scale</label>
+        <select
+          id="settings-ui-scale"
+          value={String(preferences.uiScale)}
+          onChange={(e) => preferences.set('uiScale', Number(e.target.value))}
+        >
+          <option value="0.75">75%</option>
+          <option value="0.9">90%</option>
+          <option value="1">100%</option>
+          <option value="1.1">110%</option>
+          <option value="1.25">125%</option>
+          <option value="1.5">150%</option>
+        </select>
+        <p className="settings-dim">
+          Scales the whole interface — for 4K monitors or fitting more tracks on a laptop.
+          Applies immediately, personal to this machine.
+        </p>
+      </div>
+      <div className="settings-field">
         <label htmlFor="settings-middle-ping">Middle-click ping</label>
         <select
           id="settings-middle-ping"
@@ -258,6 +305,25 @@ function AudioPane(): React.JSX.Element {
   return (
     <div className="settings-pane">
       <h2>Audio</h2>
+
+      <div className="settings-field">
+        <label htmlFor="settings-latency-hint">Buffer size / latency</label>
+        <select
+          id="settings-latency-hint"
+          value={preferences.latencyHint}
+          onChange={(e) => preferences.set('latencyHint', e.target.value as LatencyHintChoice)}
+        >
+          <option value="interactive">Low latency — smallest buffers (recording, playing live)</option>
+          <option value="balanced">Balanced</option>
+          <option value="playback">Stability — biggest buffers (heavy mixing sessions)</option>
+        </select>
+        <p className="settings-dim">
+          Smaller buffers respond faster but cost more CPU; bigger buffers survive heavier
+          sessions without crackles. Takes effect the next time the audio engine starts
+          (restart SuperDAW to apply mid-session). The resulting buffer is shown under Engine
+          below.
+        </p>
+      </div>
 
       {!devices.labelsVisible && (
         <div className="settings-field">

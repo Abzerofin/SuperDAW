@@ -292,10 +292,23 @@ export class AudioEngine {
     })
   }
 
+  /**
+   * The latency request used when the context is created — the platform's
+   * buffer-size knob. Injected (the renderer wires it to its preferences)
+   * so the engine stays free of app-state imports. Read lazily at
+   * `ensureContext` time; once the context exists the hint is fixed for
+   * the session, so a changed preference applies at the next launch.
+   */
+  private latencyHintProvider: (() => AudioContextLatencyCategory | number) | null = null
+
+  setLatencyHintProvider(provider: () => AudioContextLatencyCategory | number): void {
+    this.latencyHintProvider = provider
+  }
+
   /** Create the AudioContext (idempotent). Safe pre-gesture; starts suspended. */
   ensureContext(): AudioContext {
     if (this.ctx) return this.ctx
-    const ctx = new AudioContext({ latencyHint: 'interactive' })
+    const ctx = new AudioContext({ latencyHint: this.latencyHintProvider?.() ?? 'interactive' })
     this.ctx = ctx
     this.master = ctx.createGain()
     this.master.gain.value = this.store.state.masterVolume

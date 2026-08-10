@@ -9,6 +9,7 @@ import { paletteUi } from '@/state/paletteUi'
 import { gridTicksFor, gridUi } from '@/state/gridUi'
 import { trackInputs } from '@/state/trackInputs'
 import { audioEngine } from '@/state/audioInstance'
+import { keymap } from '@/state/keymap'
 import { newProject, openProject, saveProject } from './projectFile'
 import {
   copySelectedClip,
@@ -36,7 +37,26 @@ function quantizeGridTicks(): number {
   return gridTicksFor(choice, projectStore.state.timeSignature, 48)
 }
 
-/** App-wide keyboard shortcuts. Inactive while a text field has focus. */
+/** Duplicate the selected track — or the selected clip's track. */
+function duplicateSelectedTrack(): void {
+  const trackId =
+    selection.selectedTrackId ??
+    (selection.selectedClipId
+      ? projectStore.state.clips[selection.selectedClipId]?.trackId
+      : undefined)
+  if (trackId) {
+    const op = buildDuplicateTrackOp(projectStore.state, trackId)
+    if (op) projectStore.dispatch(op)
+  }
+}
+
+/**
+ * App-wide keyboard shortcuts. Inactive while a text field has focus.
+ * WHAT combo triggers WHICH action lives in the keymap (state/keymap.ts,
+ * rebindable in Settings ▸ Keyboard Shortcuts); this handler only says what
+ * each action DOES and in which context it applies. The 2–9 slice keys are
+ * the one fixed family (a parameterized binding doesn't fit single combos).
+ */
 export function useGlobalShortcuts(): void {
   useEffect(() => {
     const onKeyDown = (e: KeyboardEvent): void => {
@@ -44,103 +64,83 @@ export function useGlobalShortcuts(): void {
       if (target.tagName === 'INPUT' || target.tagName === 'TEXTAREA' || target.isContentEditable)
         return
 
-      const mod = e.ctrlKey || e.metaKey
-
-      if (mod && e.key.toLowerCase() === 'p' && appShell.view === 'project') {
-        e.preventDefault() // overrides the browser's print dialog
-        paletteUi.toggle()
-        return
-      }
+      const id = keymap.resolve(e)
 
       // On the home screen only the launcher shortcuts apply.
       if (appShell.view === 'home') {
-        if (mod && e.key.toLowerCase() === 'o') {
+        if (id === 'project.open') {
           e.preventDefault()
           void openProject()
-        } else if (mod && e.shiftKey && e.key.toLowerCase() === 'n') {
+        } else if (id === 'project.new') {
           e.preventDefault()
           newProject()
         }
         return
       }
 
-      if (e.code === 'Space') {
-        e.preventDefault()
-        // Space stops-and-returns to where play began; Shift+Space goes
-        // to the very beginning of the song.
-        if (e.shiftKey) transport.returnToStart()
-        else transport.toggleReturn()
-        return
-      }
-      if (mod && e.key.toLowerCase() === 's') {
-        e.preventDefault()
-        void saveProject(e.shiftKey) // Ctrl+Shift+S = Save As
-        return
-      }
-      if (mod && e.key.toLowerCase() === 'o') {
-        e.preventDefault()
-        void openProject()
-        return
-      }
-      if (mod && e.shiftKey && e.key.toLowerCase() === 'n') {
-        e.preventDefault()
-        newProject()
-        return
-      }
-      if (mod && e.key.toLowerCase() === 'z') {
-        e.preventDefault()
-        if (e.shiftKey) projectStore.redo()
-        else projectStore.undo()
-        return
-      }
-      if (mod && e.key.toLowerCase() === 'y') {
-        e.preventDefault()
-        projectStore.redo()
-        return
-      }
-      if (mod && e.key.toLowerCase() === 'c') {
-        if (copySelectedClip()) e.preventDefault()
-        return
-      }
-      if (mod && e.key.toLowerCase() === 'x') {
-        e.preventDefault()
-        cutSelectedClip()
-        return
-      }
-      if (mod && e.key.toLowerCase() === 'v') {
-        e.preventDefault()
-        pasteClip()
-        return
-      }
-      if (mod && e.key.toLowerCase() === 'd') {
-        e.preventDefault()
-        if (e.shiftKey) {
-          // Ctrl+Shift+D duplicates the selected clip's track.
-          const clip = selection.selectedClipId
-            ? projectStore.state.clips[selection.selectedClipId]
-            : undefined
-          if (clip) {
-            const op = buildDuplicateTrackOp(projectStore.state, clip.trackId)
-            if (op) projectStore.dispatch(op)
-          }
-        } else {
+      switch (id) {
+        case 'palette.toggle':
+          e.preventDefault() // overrides the browser's print dialog
+          paletteUi.toggle()
+          return
+        case 'transport.playPause':
+          // Stops-and-returns to where play began.
+          e.preventDefault()
+          transport.toggleReturn()
+          return
+        case 'transport.returnToStart':
+          e.preventDefault()
+          transport.returnToStart()
+          return
+        case 'project.save':
+          e.preventDefault()
+          void saveProject(false)
+          return
+        case 'project.saveAs':
+          e.preventDefault()
+          void saveProject(true)
+          return
+        case 'project.open':
+          e.preventDefault()
+          void openProject()
+          return
+        case 'project.new':
+          e.preventDefault()
+          newProject()
+          return
+        case 'edit.undo':
+          e.preventDefault()
+          projectStore.undo()
+          return
+        case 'edit.redo':
+          e.preventDefault()
+          projectStore.redo()
+          return
+        case 'clip.copy':
+          if (copySelectedClip()) e.preventDefault()
+          return
+        case 'clip.cut':
+          e.preventDefault()
+          cutSelectedClip()
+          return
+        case 'clip.paste':
+          e.preventDefault()
+          pasteClip()
+          return
+        case 'clip.duplicate':
+          e.preventDefault()
           duplicateSelectedClip()
-        }
-        return
-      }
-      if (mod && e.key.toLowerCase() === 'e') {
-        e.preventDefault()
-        splitSelectedClipAtEditPoint()
-        return
-      }
-
-      // Bare-letter workflow keys. The piano roll handles Q/H/Shift+A for
-      // notes itself and stops propagation, so these act on the timeline.
-      if (!mod && !e.altKey) {
-        const key = e.key.toLowerCase()
-        // Shift+A widens a clip selection to every clip; with nothing
-        // selected it deliberately selects nothing.
-        if (key === 'a' && e.shiftKey) {
+          return
+        case 'track.duplicate':
+          e.preventDefault()
+          duplicateSelectedTrack()
+          return
+        case 'clip.split':
+          splitSelectedClipAtEditPoint()
+          return
+        case 'selection.all':
+          // Widens a clip selection to every clip; with nothing selected
+          // it deliberately selects nothing.
           if (selection.selectedClipIds.size > 0) {
             e.preventDefault()
             selection.selectClips(
@@ -149,12 +149,7 @@ export function useGlobalShortcuts(): void {
             )
           }
           return
-        }
-        if (key === 's' && !e.shiftKey) {
-          splitSelectedClipAtEditPoint()
-          return
-        }
-        if (key === 'm' && !e.shiftKey) {
+        case 'track.mute': {
           const trackId = selection.selectedTrackId
           const track = trackId ? projectStore.state.tracks[trackId] : undefined
           if (track) {
@@ -166,41 +161,42 @@ export function useGlobalShortcuts(): void {
           }
           return
         }
-        if (key === 'i' && !e.shiftKey) {
+        case 'track.monitor': {
           const trackId = selection.selectedTrackId
           if (trackId && projectStore.state.tracks[trackId]?.kind === 'audio') {
             void trackInputs.toggleMonitor(trackId)
           }
           return
         }
-        if (key === 'l' && !e.shiftKey) {
+        case 'track.loop': {
           const trackId = selection.selectedTrackId
           if (trackId) audioEngine.setTrackLoop(trackId, !audioEngine.isTrackLooping(trackId))
           return
         }
-        if (key === 'd') {
-          if (e.shiftKey) {
-            // Shift+D duplicates the selected track (or the selected clip's).
-            const trackId =
-              selection.selectedTrackId ??
-              (selection.selectedClipId
-                ? projectStore.state.clips[selection.selectedClipId]?.trackId
-                : undefined)
-            if (trackId) {
-              const op = buildDuplicateTrackOp(projectStore.state, trackId)
-              if (op) projectStore.dispatch(op)
-            }
-          } else {
-            duplicateSelectedClip()
+        case 'notes.quantize':
+          quantizeNotes(selectedClipNoteIds(), quantizeGridTicks())
+          return
+        case 'notes.humanize':
+          humanizeNotes(selectedClipNoteIds())
+          return
+        case 'clip.comment': {
+          const clipId = selection.selectedClipId
+          if (clipId) {
+            e.preventDefault()
+            commentUi.open({ kind: 'clip', id: clipId })
           }
           return
         }
-        if (key === 'q' && !e.shiftKey) {
-          quantizeNotes(selectedClipNoteIds(), quantizeGridTicks())
-          return
-        }
-        if (key === 'h' && !e.shiftKey) {
-          humanizeNotes(selectedClipNoteIds())
+        case 'selection.delete': {
+          const clipIds = [...selection.selectedClipIds]
+          if (clipIds.length > 0) {
+            selection.select(null)
+            projectStore.dispatch(
+              clipIds.length === 1
+                ? { type: 'clip/delete', clipId: clipIds[0] }
+                : { type: 'clip/deleteMany', clipIds }
+            )
+          }
           return
         }
       }
@@ -208,31 +204,10 @@ export function useGlobalShortcuts(): void {
       // 2..9 slice the selected clips into that many equal pieces. Bare
       // digits only: Ctrl/Alt combinations belong to the browser and to
       // future tool switching.
+      const mod = e.ctrlKey || e.metaKey
       if (!mod && !e.altKey && /^[2-9]$/.test(e.key) && selection.selectedClipIds.size > 0) {
         e.preventDefault()
         sliceSelectionIntoEqualParts(Number(e.key))
-        return
-      }
-
-      if (e.key.toLowerCase() === 'c' && !mod && !e.altKey) {
-        const clipId = selection.selectedClipId
-        if (clipId) {
-          e.preventDefault()
-          commentUi.open({ kind: 'clip', id: clipId })
-        }
-        return
-      }
-
-      if (e.key === 'Delete' || e.key === 'Backspace') {
-        const clipIds = [...selection.selectedClipIds]
-        if (clipIds.length > 0) {
-          selection.select(null)
-          projectStore.dispatch(
-            clipIds.length === 1
-              ? { type: 'clip/delete', clipId: clipIds[0] }
-              : { type: 'clip/deleteMany', clipIds }
-          )
-        }
       }
     }
 

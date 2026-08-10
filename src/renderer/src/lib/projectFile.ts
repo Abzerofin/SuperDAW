@@ -9,7 +9,6 @@ import {
 } from '@core/persistence/format'
 import { createEmptyProject } from '@core/model/types'
 import { canMerge, mergeForks } from '@core/merge/merge'
-import { renderMixdown } from '@audio/render'
 import { projectStore } from '@/state/projectStore'
 import { assetStore, audioEngine } from '@/state/audioInstance'
 import { transport } from '@/state/transport'
@@ -20,6 +19,7 @@ import { recentProjects, type RecentProject } from '@/state/recentProjects'
 import { appShell } from '@/state/appShell'
 import { trackInputs } from '@/state/trackInputs'
 import { collab } from '@/state/collab'
+import { gridUi } from '@/state/gridUi'
 import { autosave } from './autosave'
 
 /**
@@ -154,6 +154,9 @@ export async function loadProjectBytes(data: Uint8Array, path: string | null): P
   registerDecodedAssets(decoded)
 
   projectStore.loadProject(state, lineage, opLog)
+  // The project's default grid seeds this user's (ephemeral) snap choice;
+  // switching it afterwards stays personal, exactly like zoom.
+  gridUi.set(state.settings.defaultGrid)
   transport.setPosition(0)
   sessionFile.markLoaded(path)
   recentProjects.record(state, path)
@@ -280,34 +283,6 @@ export function closeProject(skipConfirm = false): boolean {
   return true
 }
 
-/**
- * Offline-render the whole project to a stereo 16-bit WAV and save it.
- * Rendering happens faster than realtime in an OfflineAudioContext.
- */
-export async function exportWav(): Promise<void> {
-  // Bounce at the live context rate — the rate every asset was decoded at
-  // — so the mixdown resamples nothing on the way out and a bounce
-  // re-imported on this machine round-trips rate-exact.
-  const data = await renderMixdown(
-    projectStore.state,
-    assetStore,
-    audioEngine.ensureContext().sampleRate
-  )
-  if (!data) return // empty project — nothing to bounce
-  const name = `${projectStore.state.name.trim() || 'Untitled'}.wav`
-  const bridge = window.superdaw
-  if (bridge) {
-    await bridge.exportFile({ data, defaultName: name, filterName: 'WAV audio', ext: 'wav' })
-    return
-  }
-  const url = URL.createObjectURL(new Blob([data.buffer as ArrayBuffer]))
-  const anchor = document.createElement('a')
-  anchor.href = url
-  anchor.download = name
-  anchor.click()
-  URL.revokeObjectURL(url)
-}
-
 export async function openProject(): Promise<void> {
   // Same guard as newProject: replacing the synced document breaks peers.
   if (collab.mode !== 'off') {
@@ -405,6 +380,7 @@ export async function recoverProject(): Promise<boolean> {
     registerDecodedAssets(decoded)
 
     projectStore.loadProject(parsed.state, parsed.lineage, parsed.opLog)
+    gridUi.set(parsed.state.settings.defaultGrid)
     transport.setPosition(0)
     sessionFile.markLoaded(payload.path)
     sessionFile.markDirty()

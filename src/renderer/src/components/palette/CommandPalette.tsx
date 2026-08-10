@@ -12,11 +12,12 @@ import { appShell } from '@/state/appShell'
 import { audioEngine } from '@/state/audioInstance'
 import {
   closeProject,
-  exportWav,
   newProject,
   openProject,
   saveProject
 } from '@/lib/projectFile'
+import { exportMixdown } from '@/lib/exportAudio'
+import { newProjectFromTemplate, saveProjectTemplate } from '@/lib/templateActions'
 import { createTrack, loadTrackPreset } from '@/lib/trackActions'
 
 /**
@@ -83,7 +84,13 @@ export function CommandPalette(): React.JSX.Element | null {
     cmd('Save project as…', () => void saveProject(true), 'Ctrl+Shift+S')
     cmd('Open project…', () => void openProject(), 'Ctrl+O')
     cmd('New project', () => newProject(), 'Ctrl+Shift+N')
-    cmd('Export WAV…', () => void exportWav())
+    cmd('New from template…', () => void newProjectFromTemplate())
+    cmd('Save as template…', () => void saveProjectTemplate(), 'Tracks + FX, no content')
+    cmd(
+      `Export ${state.settings.exportFormat.toUpperCase()}…`,
+      () => void exportMixdown(),
+      state.settings.exportFormat === 'wav' ? `${state.settings.exportBitDepth}-bit` : '192 kbps'
+    )
     cmd('Close project', () => closeProject())
     cmd('Return to Home', () => appShell.goHome())
     cmd('Toggle mixer', () => panels.togglePanel('mixer'))
@@ -99,11 +106,25 @@ export function CommandPalette(): React.JSX.Element | null {
       action: () => settingsUi.open('general')
     })
     out.push({
+      id: 'settings:project',
+      category: 'Settings',
+      label: 'Settings: Project',
+      detail: 'Loudness target, quantize feel, export defaults',
+      action: () => settingsUi.open('project')
+    })
+    out.push({
       id: 'settings:audio',
       category: 'Settings',
       label: 'Settings: Audio',
-      detail: 'Input/output devices',
+      detail: 'Buffer size, input/output devices',
       action: () => settingsUi.open('audio')
+    })
+    out.push({
+      id: 'settings:shortcuts',
+      category: 'Settings',
+      label: 'Settings: Keyboard Shortcuts',
+      detail: 'Rebind any action',
+      action: () => settingsUi.open('shortcuts')
     })
 
     for (const id of state.trackOrder) {

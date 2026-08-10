@@ -1,19 +1,25 @@
 import { app, ipcMain } from 'electron'
-import { access, mkdir, readdir, readFile, rm } from 'node:fs/promises'
+import { access, mkdir, readdir, readFile, rename, rm } from 'node:fs/promises'
 import { join } from 'node:path'
 import { asBuffer, writeFileAtomic } from './atomicWrite'
 
 /**
  * Crash-recovery storage: a single recovery slot in userData, holding the
- * last autosnapshot of whatever unsaved work was in flight.
+ * last autosnapshots of whatever unsaved work was in flight.
  *
  *   recovery/project.json    ordinary project.json (document + manifest +
  *                            lineage + op log) — same format as .sdaw
+ *   recovery/project.1.json  the previous two document generations, rotated
+ *   recovery/project.2.json  on every snapshot — recovery falls back to the
+ *                            newest one that still parses, so one corrupt
+ *                            write (power loss mid-flush, a bad disk
+ *                            sector) cannot cost the whole session
  *   recovery/meta.json       { name, path, savedAt } for the home-screen
  *                            offer, readable without parsing the document
  *   recovery/assets/<id>.<ext>  original encoded bytes, written ONCE each —
  *                            assets are immutable by id, so a snapshot tick
- *                            rewrites the small JSON, never the audio
+ *                            rewrites the small JSON, never the audio (and
+ *                            every generation shares the same asset pool)
  *
  * The renderer owns policy (when to snapshot, when to clear); this module
  * only moves bytes. Everything is atomic so a crash mid-snapshot leaves the
@@ -28,6 +34,20 @@ export interface RecoveryMeta {
 }
 
 const recoveryDir = (): string => join(app.getPath('userData'), 'recovery')
+
+/** Newest first: the live document, then the two rotated generations. */
+const DOC_GENERATIONS = ['project.json', 'project.1.json', 'project.2.json']
+
+/** Shift generations before a write: json → 1 → 2 (the oldest falls off). */
+async function rotateDocs(dir: string): Promise<void> {
+  for (let i = DOC_GENERATIONS.length - 1; i >= 1; i--) {
+    try {
+      await rename(join(dir, DOC_GENERATIONS[i - 1]), join(dir, DOC_GENERATIONS[i]))
+    } catch {
+      // The younger generation doesn't exist yet — nothing to shift.
+    }
+  }
+}
 
 /**
  * Asset file names come from the renderer, and asset IDS originate from
@@ -52,6 +72,7 @@ export function registerRecoveryIpc(): void {
     async (_event, args: { json: string; name: string; path: string | null }): Promise<void> => {
       const dir = recoveryDir()
       await mkdir(join(dir, 'assets'), { recursive: true })
+      await rotateDocs(dir)
       await writeFileAtomic(join(dir, 'project.json'), Buffer.from(args.json, 'utf8'))
       const meta: RecoveryMeta = {
         name: String(args.name),
@@ -80,7 +101,14 @@ export function registerRecoveryIpc(): void {
   ipcMain.handle('recovery:peek', async (): Promise<RecoveryMeta | null> => {
     const dir = recoveryDir()
     try {
-      if (!(await exists(join(dir, 'project.json')))) return null
+      let anyDoc = false
+      for (const name of DOC_GENERATIONS) {
+        if (await exists(join(dir, name))) {
+          anyDoc = true
+          break
+        }
+      }
+      if (!anyDoc) return null
       const raw = JSON.parse(await readFile(join(dir, 'meta.json'), 'utf8')) as RecoveryMeta
       if (typeof raw.name !== 'string' || typeof raw.savedAt !== 'number') return null
       return { name: raw.name, path: typeof raw.path === 'string' ? raw.path : null, savedAt: raw.savedAt }
@@ -98,7 +126,22 @@ export function registerRecoveryIpc(): void {
     } | null> => {
       const dir = recoveryDir()
       try {
-        const json = await readFile(join(dir, 'project.json'), 'utf8')
+        // Newest generation that is at least intact JSON; deep validation
+        // stays in the renderer's ordinary open pipeline. A truncated
+        // newest write (crash mid-snapshot is exactly recovery's domain)
+        // falls back one interval instead of losing the session.
+        let json: string | null = null
+        for (const name of DOC_GENERATIONS) {
+          try {
+            const candidate = await readFile(join(dir, name), 'utf8')
+            JSON.parse(candidate)
+            json = candidate
+            break
+          } catch {
+            // missing or unparseable — try the older generation
+          }
+        }
+        if (json === null) return null
         let path: string | null = null
         try {
           const meta = JSON.parse(await readFile(join(dir, 'meta.json'), 'utf8')) as RecoveryMeta
