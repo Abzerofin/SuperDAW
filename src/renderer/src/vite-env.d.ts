@@ -43,6 +43,15 @@ interface Window {
     }): Promise<string | null>
     setDirty(dirty: boolean): void
     onSaveRequest(handler: () => Promise<boolean>): () => void
+    recoveryWriteDoc(args: { json: string; name: string; path: string | null }): Promise<void>
+    recoveryWriteAsset(args: { fileName: string; data: Uint8Array }): Promise<boolean>
+    recoveryPeek(): Promise<{ name: string; path: string | null; savedAt: number } | null>
+    recoveryRead(): Promise<{
+      json: string
+      path: string | null
+      assets: { fileName: string; data: Uint8Array }[]
+    } | null>
+    recoveryClear(): Promise<void>
     collabHostStart(): Promise<{ host: string; port: number; token: string } | { error: string }>
     collabHostStop(): Promise<void>
     collabSendToPeer(connId: number, data: string): void

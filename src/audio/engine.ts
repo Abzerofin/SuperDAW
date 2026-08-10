@@ -1,4 +1,4 @@
-import type { PluginInstance, PluginInstanceId, ProjectState, Route, TrackId } from '@core/model/types'
+import type { Clip, PluginInstance, PluginInstanceId, ProjectState, Route, TrackId } from '@core/model/types'
 import {
   automationValueAt,
   isTrackAudible,
@@ -9,12 +9,11 @@ import type { AutomationPoint } from '@core/model/types'
 import { ticksPerBeat } from '@core/model/timebase'
 import { denormalizeParam } from '@core/model/effects'
 import { paramDefsOf } from '@core/plugins/builtin'
-import type { AssetStore } from './assets'
+import type { AssetEvent, AssetStore } from './assets'
 import { applyClipFades } from './fades'
 import { LivePreview } from './livePreview'
 import { pluginRegistry, type PluginAnalysis, type PluginNodes } from './pluginRegistry'
 import type { ExternalPluginHost } from './render'
-import { RENDER_SAMPLE_RATE } from './render'
 import { buildSynthVoice } from './synth'
 import {
   beatIndexAt,
@@ -23,7 +22,8 @@ import {
   scheduleNotes,
   ticksPerSecond,
   trackLoopRepeatState,
-  trackLoopSpan
+  trackLoopSpan,
+  type ScheduleWindow
 } from './scheduling'
 
 /**
@@ -40,11 +40,16 @@ import {
  * is compiled to Web Audio linear ramps on the autoGain node, so curves
  * are sample-accurate regardless of UI frame rate.
  *
- * Scheduling strategy: on play/seek/edit, all upcoming clip sources are
- * (re)scheduled in one pass against the audio clock — exact and simple at
- * project scale. The metronome uses a small lookahead loop since it is
- * unbounded. AudioWorklet DSP comes later with per-strip metering needs;
- * native nodes are the right tool for clip playback.
+ * Scheduling strategy: playback is WINDOWED — a pass queues only sources
+ * starting inside a ~4 s lookahead horizon, and a timer extends the
+ * horizon in slices (see ScheduleWindow). A source starting inside the
+ * window plays to its natural end, so nothing is ever split across a
+ * horizon seam; the song's size stops mattering to play/seek cost. Edits
+ * tear down and re-queue only the tracks they touch. The cycle region
+ * keeps its own machinery: whole iterations are queued pass-by-pass at
+ * their exact wrap times. The metronome uses a small lookahead loop since
+ * it is unbounded. AudioWorklet DSP comes later with per-strip metering
+ * needs; native nodes are the right tool for clip playback.
  */
 
 interface StoreLike {
@@ -57,6 +62,8 @@ interface TransportLike {
   positionTicks(): number
   onEvent(listener: (event: 'play' | 'stop' | 'seek') => void): () => void
   setTimeSource(source: { now(): number }): void
+  /** Told the live output-path latency so the drawn playhead can lag to match. */
+  setOutputLatency(seconds: number): void
   /** The cycle region when looping is on, else null. */
   activeLoop(): { start: number; end: number } | null
 }
@@ -64,9 +71,13 @@ interface TransportLike {
 const METRO_LOOKAHEAD_SEC = 0.15
 const METRO_INTERVAL_MS = 40
 const GAIN_SMOOTHING_SEC = 0.015
-/** How far ahead loop iterations are queued, and how often that is topped up. */
-const LOOP_LOOKAHEAD_SEC = 4
-const LOOP_INTERVAL_MS = 250
+/**
+ * How far ahead audio is queued — the linear lookahead window, loop
+ * iterations and track-loop repeats all share this horizon — and how often
+ * it is topped up.
+ */
+const SCHEDULE_LOOKAHEAD_SEC = 4
+const SCHEDULE_INTERVAL_MS = 250
 /**
  * Insert-effect parameter automation is applied by sampling the curves on
  * this cadence and pushing values through PluginNodes.apply (whose 20 ms
@@ -92,6 +103,24 @@ interface AutomationIndex {
 }
 
 const NO_POINTS: AutomationPoint[] = []
+
+/** True when two versions of a clip schedule identical audio — only cosmetic
+ *  fields (name, color) differ between them. */
+function clipAudiblySame(a: Clip, b: Clip): boolean {
+  return (
+    a.trackId === b.trackId &&
+    a.start === b.start &&
+    a.duration === b.duration &&
+    a.assetId === b.assetId &&
+    a.offset === b.offset &&
+    a.reverse === b.reverse &&
+    a.pitch === b.pitch &&
+    a.stretch === b.stretch &&
+    a.loopLength === b.loopLength &&
+    a.fadeIn === b.fadeIn &&
+    a.fadeOut === b.fadeOut
+  )
+}
 
 interface TrackChain {
   /** Where sources and synth voices connect; head of the insert chain. */
@@ -121,9 +150,12 @@ export class AudioEngine {
   private graphPorts = new Map<PluginInstanceId, { inlet: GainNode; outlet: GainNode }>()
   /** Everything currently scheduled: clip buffer sources AND synth oscillators. */
   private sources = new Set<AudioScheduledSourceNode>()
-  /** Per-clip fade envelope gains, mapped to the clock time their pass ends
-   *  (Infinity for open-ended passes) so loop iterations can be swept. */
-  private fadeNodes = new Map<GainNode, number>()
+  /** The same sources indexed by track, so an edit can tear down ONE track. */
+  private sourcesByTrack = new Map<TrackId, Set<AudioScheduledSourceNode>>()
+  /** Per-clip fade envelope gains, with the clock time their pass ends
+   *  (Infinity for open-ended passes) so loop iterations can be swept, and
+   *  their track so scoped reschedules can tear them down. */
+  private fadeNodes = new Map<GainNode, { endSec: number; trackId: TrackId }>()
   /** Live input monitors feeding track chains, by track. */
   private monitors = new Map<TrackId, AudioNode>()
 
@@ -154,7 +186,14 @@ export class AudioEngine {
   private metroTimer: ReturnType<typeof setInterval> | null = null
   /** Clock time the next un-queued loop iteration starts; null = not cycling. */
   private loopNextIterationSec: number | null = null
-  private loopTimer: ReturnType<typeof setInterval> | null = null
+  /**
+   * Linear playback's lookahead horizon: sources starting before this tick
+   * have been queued, and the scheduler timer advances it. Null while
+   * cycling (loop iterations own the lookahead there) or stopped.
+   */
+  private windowUntilTicks: number | null = null
+  /** Tops up the lookahead: loop iterations while cycling, else the window. */
+  private schedTimer: ReturnType<typeof setInterval> | null = null
   /**
    * Per-user track loops: each track in the set repeats its own material
    * indefinitely while every other track plays the timeline as written —
@@ -268,6 +307,7 @@ export class AudioEngine {
     // From here on the playhead runs on the audio clock — no drift between
     // what the user sees and what they hear.
     this.transport.setTimeSource({ now: () => ctx.currentTime })
+    this.transport.setOutputLatency(this.outputLatencySec())
     this.syncMixer()
     this.syncPlugins()
     void this.applyOutputDevice()
@@ -287,13 +327,33 @@ export class AudioEngine {
   }
 
   /** Info for the audio settings panel; null until a context exists. */
-  contextInfo(): { sampleRate: number; outputChannels: number; baseLatencySec: number | null } | null {
+  contextInfo(): {
+    sampleRate: number
+    outputChannels: number
+    baseLatencySec: number | null
+    outputLatencySec: number | null
+  } | null {
     if (!this.ctx) return null
+    const ctx = this.ctx as AudioContext & { outputLatency?: number }
     return {
       sampleRate: this.ctx.sampleRate,
       outputChannels: this.ctx.destination.maxChannelCount,
-      baseLatencySec: typeof this.ctx.baseLatency === 'number' ? this.ctx.baseLatency : null
+      baseLatencySec: typeof this.ctx.baseLatency === 'number' ? this.ctx.baseLatency : null,
+      outputLatencySec: typeof ctx.outputLatency === 'number' ? ctx.outputLatency : null
     }
+  }
+
+  /**
+   * Seconds the heard output lags the context clock: the graph's internal
+   * buffering (baseLatency) plus the device path (outputLatency). The
+   * drawn playhead and recorded-take placement both correct by this.
+   */
+  outputLatencySec(): number {
+    const ctx = this.ctx as (AudioContext & { outputLatency?: number }) | null
+    if (!ctx) return 0
+    const base = typeof ctx.baseLatency === 'number' ? ctx.baseLatency : 0
+    const out = typeof ctx.outputLatency === 'number' ? ctx.outputLatency : 0
+    return base + out
   }
 
   private async applyOutputDevice(): Promise<boolean> {
@@ -475,7 +535,7 @@ export class AudioEngine {
       this.stopAllSources()
       this.teardownPreview()
       this.stopMetronome()
-      this.stopLoopScheduler()
+      this.stopScheduler()
       this.stopTrackLoopScheduler()
       this.stopFxAutomation()
       return
@@ -484,14 +544,16 @@ export class AudioEngine {
 
     const ctx = this.ensureContext()
     const go = (): void => {
+      // Refresh per play/seek: outputLatency changes with output devices.
+      this.transport.setOutputLatency(this.outputLatencySec())
       void this.restart(() => {
-        // Each helper timer runs only while its precondition holds — four
-        // unconditional intervals were 50+ main-thread wakeups per second
-        // doing nothing on a plain, non-looping, un-automated play.
+        // The scheduler always runs while playing — it keeps the lookahead
+        // (window or loop iterations) topped up. The other helpers run only
+        // while their precondition holds; unconditional intervals were 50+
+        // main-thread wakeups per second doing nothing on a plain play.
+        this.startScheduler()
         if (this.metroEnabled) this.startMetronome()
         else this.stopMetronome()
-        if (this.transport.activeLoop()) this.startLoopScheduler()
-        else this.stopLoopScheduler()
         if (this.trackLoops.size > 0) this.startTrackLoopScheduler()
         else this.stopTrackLoopScheduler()
         if (this.automationIndex().byInstance.size > 0) this.startFxAutomation()
@@ -511,6 +573,12 @@ export class AudioEngine {
    */
   private async restart(after: () => void): Promise<void> {
     this.stopAllSources()
+    // Disarm the lookahead until scheduleAll re-establishes it: rendering
+    // the first preview window below yields to the event loop, and a
+    // scheduler tick landing in that gap would queue sources against stale
+    // horizons — sources the teardown above can no longer reach.
+    this.windowUntilTicks = null
+    this.loopNextIterationSec = null
     this.teardownPreview()
     const generation = this.previewGeneration
     const first = await this.preparePreview()
@@ -563,11 +631,11 @@ export class AudioEngine {
       fromTicks + Math.ceil(PREVIEW_WINDOW_SEC * ticksPerSecond(this.store.state.tempo))
 
     for (const trackId of tracks) {
-      // Windows are produced at the offline render rate; opening the plugin
-      // at the device rate would feed e.g. a 48 kHz-configured plugin
-      // 44.1 kHz material — audibly wrong for anything pitch- or
-      // time-aware. The engine resamples the returned buffer on playback.
-      if (!(await this.preview.open(trackId, RENDER_SAMPLE_RATE))) continue
+      // Plugins open at the LIVE context rate, and preview windows are
+      // rendered at the same rate (LivePreview keeps the two agreeing) —
+      // the plugin sees material at its negotiated rate and the returned
+      // windows play 1:1, no resample at either end.
+      if (!(await this.preview.open(trackId, ctx.sampleRate))) continue
       const buffer = await this.preview.renderWindow(trackId, fromTicks, untilTicks)
       if (generation !== this.previewGeneration) return new Map()
       if (!buffer) continue
@@ -606,9 +674,14 @@ export class AudioEngine {
     // Injected AFTER the inserts: the builtins are already baked into the
     // window, while `auto` still applies live volume automation.
     source.connect(this.chain(trackId).auto)
-    source.onended = () => this.sources.delete(source)
+    const byTrack = this.trackSources(trackId)
+    source.onended = () => {
+      this.sources.delete(source)
+      byTrack.delete(source)
+    }
     source.start(when, offsetSec)
     this.sources.add(source)
+    byTrack.add(source)
   }
 
   private startPreviewScheduler(): void {
@@ -671,23 +744,35 @@ export class AudioEngine {
   }
 
   /**
-   * Keeps the queue of loop iterations topped up while cycling. Only the
-   * horizon extends here — already-queued sources keep their exact start
-   * times, so a timer running late can never dent the loop's timing.
+   * Keeps the lookahead topped up while playing: whole loop iterations
+   * while cycling, otherwise the linear window. Only the horizon extends
+   * here — already-queued sources keep their exact start times, so a timer
+   * running late can never dent timing. Both modes are checked every tick
+   * because the active mode can flip mid-play (loop toggles re-emit seek;
+   * song-loop appears when clips land), and each top-up no-ops unless its
+   * mode's state is armed.
    */
-  private startLoopScheduler(): void {
-    if (this.loopTimer !== null) return
-    this.loopTimer = setInterval(() => {
-      if (!this.transport.isPlaying || !this.transport.activeLoop()) return
-      this.topUpLoopIterations()
-      this.resyncMetronomeIfWrapped()
-    }, LOOP_INTERVAL_MS)
+  private startScheduler(): void {
+    if (this.schedTimer !== null) return
+    this.schedTimer = setInterval(() => {
+      if (!this.transport.isPlaying) return
+      // Cheap, and keeps the drawn playhead honest if the output path's
+      // latency drifts mid-play (device hand-offs, bluetooth renegotiation).
+      this.transport.setOutputLatency(this.outputLatencySec())
+      if (this.transport.activeLoop()) {
+        this.topUpLoopIterations()
+        this.resyncMetronomeIfWrapped()
+      } else {
+        this.topUpWindow()
+      }
+    }, SCHEDULE_INTERVAL_MS)
   }
 
-  private stopLoopScheduler(): void {
-    if (this.loopTimer !== null) clearInterval(this.loopTimer)
-    this.loopTimer = null
+  private stopScheduler(): void {
+    if (this.schedTimer !== null) clearInterval(this.schedTimer)
+    this.schedTimer = null
     this.loopNextIterationSec = null
+    this.windowUntilTicks = null
   }
 
   // ---------- Track loops ----------
@@ -724,7 +809,7 @@ export class AudioEngine {
     this.trackLoopTimer = setInterval(() => {
       if (!this.transport.isPlaying) return
       this.topUpTrackLoops()
-    }, LOOP_INTERVAL_MS)
+    }, SCHEDULE_INTERVAL_MS)
   }
 
   private stopTrackLoopScheduler(): void {
@@ -795,7 +880,7 @@ export class AudioEngine {
     const state = this.store.state
     const tps = ticksPerSecond(state.tempo)
     const horizonTicks =
-      this.anchorTicks + (ctx.currentTime + LOOP_LOOKAHEAD_SEC - this.anchorSec) * tps
+      this.anchorTicks + (ctx.currentTime + SCHEDULE_LOOKAHEAD_SEC - this.anchorSec) * tps
     for (const trackId of this.trackLoops) {
       const track = state.tracks[trackId]
       if (!track || track.frozenAssetId !== null) continue
@@ -855,14 +940,15 @@ export class AudioEngine {
 
   private onStateChanged = (): void => {
     const state = this.store.state
-    // Synth param edits must reschedule voices (envelopes bake params in);
-    // freeze flips swap a track between live processing and its render.
-    let synthChanged = false
+    // Synth param edits must reschedule that track's voices (envelopes bake
+    // params in); freeze flips swap a track between live processing and its
+    // render.
+    const synthEdited = new Set<TrackId>()
     const frozenFlipped = new Set<TrackId>()
     if (state.tracks !== this.prevTracks) {
       for (const [id, track] of Object.entries(state.tracks)) {
         const prev = this.prevTracks[id]
-        if (prev && prev.synth !== track.synth) synthChanged = true
+        if (prev && prev.synth !== track.synth) synthEdited.add(id)
         if (prev && prev.frozenAssetId !== track.frozenAssetId) frozenFlipped.add(id)
       }
     }
@@ -945,52 +1031,113 @@ export class AudioEngine {
       // The first insert-param point mid-play needs the sampler running.
       if (this.automationIndex().byInstance.size > 0) this.startFxAutomation()
     }
-    const editedAudio =
-      state.clips !== this.prevClips ||
+    // Scope the reschedule to the tracks the edit audibly touches. Some
+    // changes have no per-track scope — tempo rescales the whole time
+    // mapping, freeze flips rewire chains and re-neutralize automation, and
+    // edits under a live preview change what the rendered windows sound
+    // like — so those restart everything.
+    const fullRestart =
       state.tempo !== this.prevTempo ||
-      state.notes !== this.prevNotes ||
-      synthChanged ||
       frozenChanged ||
       ((externalPluginChanged || routesChanged) && this.preview !== null)
+    const affected = new Set<TrackId>(synthEdited)
+    if (state.clips !== this.prevClips && !fullRestart) {
+      for (const [id, clip] of Object.entries(state.clips)) {
+        const before = this.prevClips[id]
+        if (before === clip) continue
+        // Renames and recolors must never interrupt their track's audio.
+        if (before && clipAudiblySame(before, clip)) continue
+        affected.add(clip.trackId)
+        if (before && before.trackId !== clip.trackId) affected.add(before.trackId)
+      }
+      for (const [id, clip] of Object.entries(this.prevClips)) {
+        if (!state.clips[id]) affected.add(clip.trackId)
+      }
+    }
+    if (state.notes !== this.prevNotes && !fullRestart) {
+      for (const [id, note] of Object.entries(state.notes)) {
+        const before = this.prevNotes[id]
+        if (before === note) continue
+        const clip = state.clips[note.clipId] ?? this.prevClips[note.clipId]
+        if (clip) affected.add(clip.trackId)
+        if (before && before.clipId !== note.clipId) {
+          const prevClip = state.clips[before.clipId] ?? this.prevClips[before.clipId]
+          if (prevClip) affected.add(prevClip.trackId)
+        }
+      }
+      for (const [id, note] of Object.entries(this.prevNotes)) {
+        if (state.notes[id]) continue
+        const clip = state.clips[note.clipId] ?? this.prevClips[note.clipId]
+        if (clip) affected.add(clip.trackId)
+      }
+    }
     this.prevClips = state.clips
     this.prevTempo = state.tempo
     this.prevNotes = state.notes
-    // Reschedule only when something audible changed; unrelated ops
-    // (renames etc.) must never interrupt playback. Already-rendered
-    // preview windows bake the OLD state in, so restart() re-renders them.
-    if (editedAudio && this.transport.isPlaying && this.ctx) {
+    // Reschedule only what audibly changed; unrelated ops must never
+    // interrupt playback, and one track's edit must never glitch another's
+    // audio. Already-rendered preview windows bake the OLD state in, so
+    // the preview paths restart() to re-render them.
+    if (this.transport.isPlaying && this.ctx) {
       // restart() resets and re-arms automation itself, so a freeze flip
       // (whose baked automation must go neutral) needs nothing extra here.
-      this.queueRestart()
+      if (fullRestart) this.queueRestart()
+      else if (affected.size > 0) this.queueRestart(affected)
     }
   }
 
-  private onAssetsChanged = (): void => {
-    // A newly decoded asset may belong to an already-scheduled silent clip.
-    if (this.transport.isPlaying && this.ctx) {
-      this.queueRestart()
+  private onAssetsChanged = (event?: AssetEvent): void => {
+    if (!this.transport.isPlaying || !this.ctx) return
+    // Eventless notifications are peak fills and project-switch clears:
+    // drawing data, and a path that always stops the transport first.
+    // Neither affects what is scheduled.
+    if (!event || event.asset.buffer === null) return
+    // A newly landed asset may belong to already-scheduled silent clips (or
+    // a frozen track awaiting its render) — re-queue just those tracks.
+    const state = this.store.state
+    const affected = new Set<TrackId>()
+    for (const clip of Object.values(state.clips)) {
+      if (clip.assetId === event.asset.id) affected.add(clip.trackId)
     }
+    for (const track of Object.values(state.tracks)) {
+      if (track.frozenAssetId === event.asset.id) affected.add(track.id)
+    }
+    if (affected.size > 0) this.queueRestart(affected)
   }
 
   /**
-   * Coalesce restarts: importing a folder of files fires an asset
+   * Coalesce reschedules: importing a folder of files fires an asset
    * registration plus ops PER FILE, and every one of those used to tear
    * down and rebuild every scheduled source in the song. At most one
-   * restart per ~120 ms keeps a burst to a handful of reschedules while a
-   * lone edit still responds immediately.
+   * reschedule per ~120 ms keeps a burst to a handful, while a lone edit
+   * still responds immediately. Scopes union across the burst; a single
+   * unscoped caller (tempo, freeze…) widens the whole flush to a full
+   * restart.
    */
   private restartPending = false
   private lastRestartAt = 0
-  private queueRestart(): void {
-    if (this.restartPending) return
+  /** Tracks the pending flush covers; null = restart everything. */
+  private pendingRestartTracks: Set<TrackId> | null = null
+  private queueRestart(tracks: ReadonlySet<TrackId> | null = null): void {
+    if (this.restartPending) {
+      if (tracks === null) this.pendingRestartTracks = null
+      else if (this.pendingRestartTracks !== null) {
+        for (const id of tracks) this.pendingRestartTracks.add(id)
+      }
+      return
+    }
     this.restartPending = true
+    this.pendingRestartTracks = tracks === null ? null : new Set(tracks)
     const since = performance.now() - this.lastRestartAt
     const delay = Math.max(0, 120 - since)
     setTimeout(() => {
       this.restartPending = false
       this.lastRestartAt = performance.now()
+      const scoped = this.pendingRestartTracks
+      this.pendingRestartTracks = null
       if (this.transport.isPlaying && this.ctx) {
-        void this.restart(() => this.resyncMetronome())
+        if (scoped === null) void this.restart(() => this.resyncMetronome())
+        else this.rescheduleTracks(scoped)
       }
     }, delay)
   }
@@ -1009,14 +1156,23 @@ export class AudioEngine {
    * at their exact wrap times, which is what makes cycling sample-accurate
    * instead of dependent on a timer firing on time.
    */
-  private schedulePass(fromTicks: number, atSec: number, untilTicks: number): void {
+  private schedulePass(
+    fromTicks: number,
+    atSec: number,
+    untilTicks: number,
+    window?: ScheduleWindow
+  ): void {
     // Clips and synth voices share one fade envelope per clip, so a MIDI
     // clip tapers exactly like an audio one.
     const fadeGains = new Map<string, GainNode>()
-    this.scheduleClipsPass(fromTicks, atSec, untilTicks, fadeGains)
-    this.scheduleNotesPass(fromTicks, atSec, untilTicks, fadeGains)
-    // Automation rides along so each loop iteration replays it.
-    this.scheduleAutomationPass(fromTicks, atSec, untilTicks)
+    this.scheduleClipsPass(fromTicks, atSec, untilTicks, fadeGains, undefined, window)
+    this.scheduleNotesPass(fromTicks, atSec, untilTicks, fadeGains, undefined, window)
+    // Automation rides along so each loop iteration replays it. Windowed
+    // top-up slices skip it: the initial pass already armed the whole
+    // curve (AudioParam events are cheap — it is sources that are not).
+    if (window?.startFromTicks === undefined) {
+      this.scheduleAutomationPass(fromTicks, atSec, untilTicks)
+    }
   }
 
   /**
@@ -1035,7 +1191,7 @@ export class AudioEngine {
       [this.anchorTicks, this.anchorSec, loop.end]
     ]
     if (spanSec <= 0) return passes
-    const horizon = ctx.currentTime + LOOP_LOOKAHEAD_SEC
+    const horizon = ctx.currentTime + SCHEDULE_LOOKAHEAD_SEC
     let at = this.anchorSec + (loop.end - this.anchorTicks) / tps
     let guard = 0
     while (at < horizon && guard++ < 64) {
@@ -1077,7 +1233,7 @@ export class AudioEngine {
       const endSec = Number.isFinite(untilTicks)
         ? atSec + (untilTicks - fromTicks) / ticksPerSecond(state.tempo)
         : Number.POSITIVE_INFINITY
-      this.fadeNodes.set(gain, endSec)
+      this.fadeNodes.set(gain, { endSec, trackId })
     }
     return gain
   }
@@ -1092,10 +1248,21 @@ export class AudioEngine {
     const loop = this.transport.activeLoop()
     if (!loop) {
       this.loopNextIterationSec = null
-      this.schedulePass(this.anchorTicks, this.anchorSec, Number.POSITIVE_INFINITY)
+      // Linear playback: queue only the lookahead window; the scheduler
+      // timer extends it. Automation is armed for the whole song here.
+      const ctx = this.ctx!
+      const tps = ticksPerSecond(this.store.state.tempo)
+      const horizon = Math.ceil(
+        this.anchorTicks + (ctx.currentTime + SCHEDULE_LOOKAHEAD_SEC - this.anchorSec) * tps
+      )
+      this.windowUntilTicks = horizon
+      this.schedulePass(this.anchorTicks, this.anchorSec, Number.POSITIVE_INFINITY, {
+        startBeforeTicks: horizon
+      })
       this.topUpTrackLoops()
       return
     }
+    this.windowUntilTicks = null
     const tps = ticksPerSecond(this.store.state.tempo)
     // The playhead may still be running up to the region; that part plays
     // once, and the first wrap happens when it reaches the region's end.
@@ -1113,7 +1280,7 @@ export class AudioEngine {
     const tps = ticksPerSecond(this.store.state.tempo)
     const spanSec = (loop.end - loop.start) / tps
     if (spanSec <= 0) return
-    const horizon = ctx.currentTime + LOOP_LOOKAHEAD_SEC
+    const horizon = ctx.currentTime + SCHEDULE_LOOKAHEAD_SEC
     let guard = 0
     while (this.loopNextIterationSec < horizon && guard++ < 64) {
       this.schedulePass(loop.start, this.loopNextIterationSec, loop.end)
@@ -1121,12 +1288,41 @@ export class AudioEngine {
     }
   }
 
+  /**
+   * Extend the linear lookahead window. Each extension is one pass over the
+   * document (scheduleClips/scheduleNotes scan every clip and note), so the
+   * horizon advances in half-window steps rather than per tick — a busy
+   * project is scanned every ~2 s, not four times a second.
+   */
+  private topUpWindow(): void {
+    const ctx = this.ctx
+    if (!ctx || this.windowUntilTicks === null) return
+    this.purgeExpiredFades(ctx.currentTime)
+    const tps = ticksPerSecond(this.store.state.tempo)
+    const untilSec = this.anchorSec + (this.windowUntilTicks - this.anchorTicks) / tps
+    if (untilSec - ctx.currentTime > SCHEDULE_LOOKAHEAD_SEC / 2) return
+    const horizon = Math.ceil(
+      this.anchorTicks + (ctx.currentTime + SCHEDULE_LOOKAHEAD_SEC - this.anchorSec) * tps
+    )
+    if (horizon <= this.windowUntilTicks) return
+    // Anchored at the ORIGINAL play anchor: `when` math stays one linear
+    // mapping for the whole play, and the slice bounds partition the
+    // timeline exactly — every source starts in exactly one slice.
+    this.schedulePass(this.anchorTicks, this.anchorSec, Number.POSITIVE_INFINITY, {
+      startFromTicks: this.windowUntilTicks,
+      startBeforeTicks: horizon
+    })
+    this.windowUntilTicks = horizon
+  }
+
   private scheduleClipsPass(
     fromTicks: number,
     atSec: number,
     untilTicks: number,
     fadeGains: Map<string, GainNode>,
-    state: ProjectState = this.store.state
+    state: ProjectState = this.store.state,
+    window?: ScheduleWindow,
+    only?: ReadonlySet<TrackId>
   ): void {
     const ctx = this.ctx
     if (!ctx) return
@@ -1135,9 +1331,12 @@ export class AudioEngine {
       (id) => this.assets.getSeconds(id),
       fromTicks,
       atSec,
-      untilTicks
+      untilTicks,
+      window
     )
     for (const s of schedules) {
+      // Scoped reschedules re-queue just the edited tracks' sources.
+      if (only !== undefined && !only.has(s.trackId)) continue
       // Previewed tracks: their finished audio (inserts included) arrives
       // as rendered windows — playing the dry clip too would double it.
       if (this.previewTracks.has(s.trackId)) continue
@@ -1159,9 +1358,14 @@ export class AudioEngine {
         state
       )
       source.connect(dest)
-      source.onended = () => this.sources.delete(source)
+      const byTrack = this.trackSources(s.trackId)
+      source.onended = () => {
+        this.sources.delete(source)
+        byTrack.delete(source)
+      }
       source.start(s.when, s.offsetSec, s.durationSec)
       this.sources.add(source)
+      byTrack.add(source)
     }
   }
 
@@ -1176,11 +1380,14 @@ export class AudioEngine {
     atSec: number,
     untilTicks: number,
     fadeGains: Map<string, GainNode>,
-    state: ProjectState = this.store.state
+    state: ProjectState = this.store.state,
+    window?: ScheduleWindow,
+    only?: ReadonlySet<TrackId>
   ): void {
     const ctx = this.ctx
     if (!ctx) return
-    for (const s of scheduleNotes(state, fromTicks, atSec, untilTicks)) {
+    for (const s of scheduleNotes(state, fromTicks, atSec, untilTicks, window)) {
+      if (only !== undefined && !only.has(s.trackId)) continue
       // Previewed tracks get their audio as rendered windows (synth included).
       if (this.previewTracks.has(s.trackId)) continue
       // Voices go through the clip's fade envelope, so MIDI tapers too.
@@ -1193,14 +1400,15 @@ export class AudioEngine {
         untilTicks,
         state
       )
-      const voices = buildSynthVoice(
-        ctx,
-        dest,
-        s,
-        state.tracks[s.trackId]?.synth ?? {},
-        (osc) => this.sources.delete(osc)
-      )
-      for (const osc of voices) this.sources.add(osc)
+      const byTrack = this.trackSources(s.trackId)
+      const voices = buildSynthVoice(ctx, dest, s, state.tracks[s.trackId]?.synth ?? {}, (osc) => {
+        this.sources.delete(osc)
+        byTrack.delete(osc)
+      })
+      for (const osc of voices) {
+        this.sources.add(osc)
+        byTrack.add(osc)
+      }
     }
   }
 
@@ -1281,6 +1489,12 @@ export class AudioEngine {
     }
   }
 
+  private trackSources(trackId: TrackId): Set<AudioScheduledSourceNode> {
+    let set = this.sourcesByTrack.get(trackId)
+    if (!set) this.sourcesByTrack.set(trackId, (set = new Set()))
+    return set
+  }
+
   private stopAllSources(): void {
     for (const source of this.sources) {
       // onended stays attached: synth voices disconnect their filter/env
@@ -1294,8 +1508,73 @@ export class AudioEngine {
       source.disconnect()
     }
     this.sources.clear()
+    this.sourcesByTrack.clear()
     for (const gain of this.fadeNodes.keys()) gain.disconnect()
     this.fadeNodes.clear()
+  }
+
+  /**
+   * Tear down ONE track's scheduled sources and fade envelopes, leaving
+   * every other track's live graph untouched — the difference between an
+   * edit glitching its own track and an edit glitching the whole mix.
+   */
+  private stopTrackSources(trackIds: ReadonlySet<TrackId>): void {
+    for (const trackId of trackIds) {
+      const set = this.sourcesByTrack.get(trackId)
+      if (!set) continue
+      for (const source of set) {
+        this.sources.delete(source)
+        try {
+          source.stop()
+        } catch {
+          // never started or already stopped — fine
+        }
+        source.disconnect()
+      }
+      this.sourcesByTrack.delete(trackId)
+    }
+    for (const [gain, info] of this.fadeNodes) {
+      if (trackIds.has(info.trackId)) {
+        gain.disconnect()
+        this.fadeNodes.delete(gain)
+      }
+    }
+  }
+
+  /**
+   * Re-queue the given tracks' sources from the current position up to the
+   * already-scheduled horizon, without touching any other track. Falls back
+   * to a full restart in the modes with more bookkeeping than a track can
+   * be carved out of: cycling (queued iterations) and live VST3 preview
+   * (windows bake document state in and must re-render regardless).
+   */
+  private rescheduleTracks(trackIds: ReadonlySet<TrackId>): void {
+    const ctx = this.ctx
+    if (!ctx || !this.transport.isPlaying) return
+    if (this.windowUntilTicks === null || this.previewTracks.size > 0) {
+      void this.restart(() => this.resyncMetronome())
+      return
+    }
+    this.stopTrackSources(trackIds)
+    // Anchored at NOW, not the play anchor: the schedule math treats
+    // anything before its anchor as "already sounding" and offsets into the
+    // material, which is exactly right for the edited clip under the
+    // playhead — but only against a current-time anchor.
+    const fromTicks = this.transport.positionTicks()
+    const atSec = ctx.currentTime
+    const fadeGains = new Map<string, GainNode>()
+    const window: ScheduleWindow = { startBeforeTicks: this.windowUntilTicks }
+    this.scheduleClipsPass(fromTicks, atSec, Number.POSITIVE_INFINITY, fadeGains, undefined, window, trackIds)
+    this.scheduleNotesPass(fromTicks, atSec, Number.POSITIVE_INFINITY, fadeGains, undefined, window, trackIds)
+    // A looping track's ghost repeats were torn down with it — re-queue.
+    let loopsTouched = false
+    for (const trackId of trackIds) {
+      if (this.trackLoops.has(trackId)) {
+        this.trackLoopNextRepeat.delete(trackId)
+        loopsTouched = true
+      }
+    }
+    if (loopsTouched) this.topUpTrackLoops()
   }
 
   /**
@@ -1304,7 +1583,7 @@ export class AudioEngine {
    * cycling a faded region accumulates thousands of connected gains.
    */
   private purgeExpiredFades(now: number): void {
-    for (const [gain, endSec] of this.fadeNodes) {
+    for (const [gain, { endSec }] of this.fadeNodes) {
       if (endSec < now - 0.5) {
         gain.disconnect()
         this.fadeNodes.delete(gain)

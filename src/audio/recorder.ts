@@ -10,9 +10,20 @@
 
 const WORKLET_SOURCE = `
 class SuperdawCapture extends AudioWorkletProcessor {
+  constructor() {
+    super()
+    this.announced = false
+  }
   process(inputs) {
     const input = inputs[0]
     if (input.length > 0) {
+      // The context time of the first captured sample, announced once —
+      // this is what lets a take be placed sample-accurately instead of
+      // guessing when the worklet actually spun up.
+      if (!this.announced) {
+        this.announced = true
+        this.port.postMessage({ startSec: currentTime })
+      }
       this.port.postMessage(input.map((channel) => channel.slice(0)))
     }
     return true
@@ -35,10 +46,13 @@ export interface Recording {
   readonly channels: Float32Array[]
   readonly sampleRate: number
   readonly seconds: number
+  /** AudioContext time of the first captured sample; null if none arrived. */
+  readonly startSec: number | null
 }
 
 export class Recorder {
   private chunks: Float32Array[][] = [] // [chunkIndex][channel]
+  private startSec: number | null = null
   private input: AudioNode | null = null
   private capture: AudioWorkletNode | null = null
   private sink: GainNode | null = null
@@ -54,13 +68,17 @@ export class Recorder {
     await ensureWorklet(ctx)
     this.ctx = ctx
     this.chunks = []
+    this.startSec = null
     this.input = input
     this.capture = new AudioWorkletNode(ctx, 'superdaw-capture', {
       numberOfInputs: 1,
       numberOfOutputs: 1
     })
-    this.capture.port.onmessage = (event: MessageEvent<Float32Array[]>) => {
-      this.chunks.push(event.data)
+    this.capture.port.onmessage = (
+      event: MessageEvent<Float32Array[] | { startSec: number }>
+    ) => {
+      if (Array.isArray(event.data)) this.chunks.push(event.data)
+      else if (typeof event.data?.startSec === 'number') this.startSec = event.data.startSec
     }
     // A silent sink keeps the worklet pulled by the graph without being audible.
     this.sink = ctx.createGain()
@@ -89,7 +107,9 @@ export class Recorder {
     this.ctx = null
 
     const chunks = this.chunks
+    const startSec = this.startSec
     this.chunks = []
+    this.startSec = null
     if (chunks.length === 0) return null
 
     const channelCount = Math.max(...chunks.map((c) => c.length))
@@ -105,6 +125,6 @@ export class Recorder {
       }
       channels.push(merged)
     }
-    return { channels, sampleRate: ctx.sampleRate, seconds: frames / ctx.sampleRate }
+    return { channels, sampleRate: ctx.sampleRate, seconds: frames / ctx.sampleRate, startSec }
   }
 }

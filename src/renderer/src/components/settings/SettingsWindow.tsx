@@ -244,6 +244,7 @@ function GeneralPane(): React.JSX.Element {
 
 function AudioPane(): React.JSX.Element {
   const devices = useAudioDevices()
+  usePreferences()
   // The context reports the live sample rate / channel layout; creating it
   // here is safe (it starts suspended until the first transport gesture).
   const [info, setInfo] = useState(audioEngine.contextInfo())
@@ -252,6 +253,7 @@ function AudioPane(): React.JSX.Element {
     setInfo(audioEngine.contextInfo())
     void audioDevices.refresh(false)
   }, [])
+  const ms = (seconds: number): string => `${Math.round(seconds * 1000 * 10) / 10} ms`
 
   return (
     <div className="settings-pane">
@@ -307,6 +309,31 @@ function AudioPane(): React.JSX.Element {
       </div>
 
       <div className="settings-field">
+        <label htmlFor="settings-latency-trim">Recording latency trim</label>
+        <div className="settings-trim-row">
+          <input
+            id="settings-latency-trim"
+            type="number"
+            min={-250}
+            max={250}
+            step={1}
+            value={preferences.recordLatencyTrimMs}
+            onChange={(e) => {
+              const value = Number(e.target.value)
+              if (!Number.isFinite(value)) return
+              preferences.set('recordLatencyTrimMs', Math.max(-250, Math.min(250, value)))
+            }}
+          />
+          <span className="settings-dim">ms</span>
+        </div>
+        <p className="settings-dim">
+          Output latency is compensated automatically; this absorbs your interface's INPUT
+          latency, which the system cannot measure. If takes land late, raise it — record a
+          click through a loopback cable to dial it in exactly.
+        </p>
+      </div>
+
+      <div className="settings-field">
         <label>Engine</label>
         {info ? (
           <div className="settings-info mono">
@@ -316,11 +343,17 @@ function AudioPane(): React.JSX.Element {
             <span>{info.outputChannels}</span>
             {info.baseLatencySec !== null && (
               <>
-                <span>Output latency</span>
+                <span>Buffer latency</span>
                 <span>
-                  ≈ {Math.round(info.baseLatencySec * 1000 * 10) / 10} ms (
+                  ≈ {ms(info.baseLatencySec)} (
                   {Math.round(info.baseLatencySec * info.sampleRate)} frames)
                 </span>
+              </>
+            )}
+            {info.outputLatencySec !== null && (
+              <>
+                <span>Output latency</span>
+                <span>≈ {ms(info.outputLatencySec)}</span>
               </>
             )}
           </div>
@@ -328,8 +361,9 @@ function AudioPane(): React.JSX.Element {
           <p className="settings-dim">The audio engine has not started yet.</p>
         )}
         <p className="settings-dim">
-          If a selected device disappears, SuperDAW falls back to the closest available one and
-          notes it in the status bar.
+          The playhead and recorded takes are compensated for the output path, so what you see
+          matches what you hear. If a selected device disappears, SuperDAW falls back to the
+          closest available one and notes it in the status bar.
         </p>
       </div>
     </div>

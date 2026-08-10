@@ -39,6 +39,8 @@ class RecordingStore {
   /** The count-in is clicking; capture starts when it ends. */
   countingIn = false
   recordStartTicks = 0
+  /** Context time paired with recordStartTicks — the roll's clock anchor. */
+  private rollAnchorSec = 0
   lastError: string | null = null
 
   private captures: TrackCapture[] = []
@@ -145,6 +147,7 @@ class RecordingStore {
         await capture.recorder.start(ctx, capture.tap.output)
       }
       this.recordStartTicks = transport.positionTicks()
+      this.rollAnchorSec = ctx.currentTime
       this.recording = true
       this.lastError = null
       if (!transport.isPlaying) transport.play()
@@ -191,22 +194,34 @@ class RecordingStore {
     this.emit()
 
     const ctx = audioEngine.ensureContext()
-    const startTicks = Math.max(0, Math.round(this.recordStartTicks))
     // Takes finish asynchronously: the WAV encode is chunked so hitting
     // Stop after a long multitrack take never freezes the app at the very
     // moment the user is most anxious about whether the take survived.
-    void this.finishTakes(takes, ctx, startTicks)
+    void this.finishTakes(takes, ctx, this.recordStartTicks, this.rollAnchorSec)
   }
 
   private async finishTakes(
     takes: Array<{ capture: TrackCapture; take: ReturnType<Recorder['stop']> }>,
     ctx: AudioContext,
-    startTicks: number
+    anchorTicks: number,
+    anchorSec: number
   ): Promise<void> {
+    // Latency compensation. The performer played along with audio they
+    // heard an output-latency LATE, so everything they did sits late in
+    // the take by that amount; the manual trim absorbs the input path
+    // (mic → buffers → worklet), which the platform does not report.
+    const compensationSec =
+      audioEngine.outputLatencySec() + preferences.recordLatencyTrimMs / 1000
+    const tps = ticksPerSecond(projectStore.state.tempo)
     for (const { capture, take } of takes) {
       if (!take || take.seconds < 0.05) continue
       const track = projectStore.state.tracks[capture.trackId]
       if (!track || track.kind !== 'audio') continue
+      // Place the take by where its FIRST SAMPLE actually sat on the audio
+      // clock (announced by the capture worklet), not by when start() was
+      // called — worklet spin-up would otherwise land every take late.
+      const skewSec = take.startSec !== null ? take.startSec - anchorSec : 0
+      const startTicks = Math.max(0, Math.round(anchorTicks + (skewSec - compensationSec) * tps))
 
       const buffer = ctx.createBuffer(
         Math.max(1, take.channels.length),

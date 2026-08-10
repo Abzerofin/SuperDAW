@@ -79,10 +79,14 @@ export interface ExternalInstance {
 
 /** Seconds of reverb/delay tail appended after the last clip ends. */
 const TAIL_SEC = 3
-/** Offline render rate — also what live-preview windows are produced at,
- *  so held plugins must be opened at THIS rate, not the device's. */
+/**
+ * FALLBACK offline render rate, used only when no live AudioContext exists
+ * to follow. Callers pass the live context's rate: assets are decoded AT
+ * that rate, so rendering at it reads them 1:1 — bounces round-trip
+ * without the decode-rate → render-rate second resample that a hardcoded
+ * rate forced on every machine whose device does not run at 44.1 kHz.
+ */
 export const RENDER_SAMPLE_RATE = 44100
-const SAMPLE_RATE = RENDER_SAMPLE_RATE
 
 /** Timeline end in ticks (0 for an empty project). */
 export function projectEndTicks(state: ProjectState): number {
@@ -264,22 +268,24 @@ function scheduleSources(
 /** Offline mixdown to encoded 16-bit WAV bytes. */
 export async function renderMixdown(
   state: ProjectState,
-  assets: AssetSourceLike
+  assets: AssetSourceLike,
+  sampleRate = RENDER_SAMPLE_RATE
 ): Promise<Uint8Array | null> {
-  const mixed = await renderMixdownChannels(state, assets)
+  const mixed = await renderMixdownChannels(state, assets, sampleRate)
   return mixed ? encodeWavPcm16(mixed.channels, mixed.sampleRate) : null
 }
 
 /** Offline mixdown to raw per-channel samples (for non-WAV encoders). */
 export async function renderMixdownChannels(
   state: ProjectState,
-  assets: AssetSourceLike
+  assets: AssetSourceLike,
+  sampleRate = RENDER_SAMPLE_RATE
 ): Promise<{ channels: Float32Array[]; sampleRate: number } | null> {
   const endTicks = projectEndTicks(state)
   if (endTicks <= 0) return null
   const tps = ticksPerSecond(state.tempo)
   const lengthSec = endTicks / tps + TAIL_SEC
-  const ctx = new OfflineAudioContext(2, Math.ceil(lengthSec * SAMPLE_RATE), SAMPLE_RATE)
+  const ctx = new OfflineAudioContext(2, Math.ceil(lengthSec * sampleRate), sampleRate)
 
   const master = ctx.createGain()
   master.gain.value = state.masterVolume
@@ -345,7 +351,8 @@ export async function renderMixdownChannels(
 export function renderTrackChannels(
   state: ProjectState,
   trackId: TrackId,
-  assets: AssetSourceLike
+  assets: AssetSourceLike,
+  sampleRate = RENDER_SAMPLE_RATE
 ): Promise<{ channels: Float32Array[]; sampleRate: number } | null> {
   if (!state.tracks[trackId]) return Promise.resolve(null)
   const tracks = Object.fromEntries(
@@ -354,7 +361,7 @@ export function renderTrackChannels(
       { ...track, soloed: id === trackId, muted: false }
     ])
   )
-  return renderMixdownChannels({ ...state, tracks }, assets)
+  return renderMixdownChannels({ ...state, tracks }, assets, sampleRate)
 }
 
 /**
@@ -368,7 +375,8 @@ export async function renderTrackFreeze(
   state: ProjectState,
   trackId: TrackId,
   assets: AssetSourceLike,
-  external?: ExternalPluginHost
+  external?: ExternalPluginHost,
+  sampleRate = RENDER_SAMPLE_RATE
 ): Promise<AudioBuffer | null> {
   const endTicks = clipsOfTrack(state, trackId).reduce(
     (max, c) => Math.max(max, c.start + c.duration),
@@ -377,7 +385,7 @@ export async function renderTrackFreeze(
   if (endTicks <= 0) return null
   const tps = ticksPerSecond(state.tempo)
   const lengthSec = endTicks / tps + TAIL_SEC
-  const frames = Math.ceil(lengthSec * SAMPLE_RATE)
+  const frames = Math.ceil(lengthSec * sampleRate)
 
   const externalInserts = external
     ? pluginsOfTrack(state, trackId).filter(
@@ -390,7 +398,7 @@ export async function renderTrackFreeze(
   // too — segmenting assumes a LINEAR chain, so their external inserts
   // pass through in the graph (same audible result as live playback).
   if (externalInserts.length === 0 || routesOfTrack(state, trackId).length > 0) {
-    const ctx = new OfflineAudioContext(2, frames, SAMPLE_RATE)
+    const ctx = new OfflineAudioContext(2, frames, sampleRate)
     const input = ctx.createGain()
     const auto = ctx.createGain()
     buildInserts(ctx, state, trackId, input).connect(auto)
@@ -405,7 +413,7 @@ export async function renderTrackFreeze(
   // chain is rendered in SEGMENTS: consecutive runs of same-kind inserts,
   // in rank order. Order is what must be preserved — an EQ before a
   // saturator does not sound like a saturator before an EQ.
-  const sourcesCtx = new OfflineAudioContext(2, frames, SAMPLE_RATE)
+  const sourcesCtx = new OfflineAudioContext(2, frames, sampleRate)
   const input = sourcesCtx.createGain()
   input.connect(sourcesCtx.destination)
   scheduleSources(sourcesCtx, state, assets, new Map([[trackId, input]]))
@@ -481,7 +489,8 @@ export async function renderPreviewWindow(
   trackId: TrackId,
   assets: AssetSourceLike,
   fromTicks: number,
-  untilTicks: number
+  untilTicks: number,
+  sampleRate = RENDER_SAMPLE_RATE
 ): Promise<AudioBuffer | null> {
   const tps = ticksPerSecond(state.tempo)
   const windowSec = (untilTicks - fromTicks) / tps
@@ -489,8 +498,8 @@ export async function renderPreviewWindow(
 
   const preRollTicks = Math.min(fromTicks, Math.ceil(PREVIEW_PREROLL_SEC * tps))
   const preRollSec = preRollTicks / tps
-  const totalFrames = Math.ceil((preRollSec + windowSec) * SAMPLE_RATE)
-  const ctx = new OfflineAudioContext(2, totalFrames, SAMPLE_RATE)
+  const totalFrames = Math.ceil((preRollSec + windowSec) * sampleRate)
+  const ctx = new OfflineAudioContext(2, totalFrames, sampleRate)
 
   const input = ctx.createGain()
   // Only the LOCAL inserts here; externals are applied afterwards by held
@@ -507,7 +516,7 @@ export async function renderPreviewWindow(
   )
 
   const rendered = await ctx.startRendering()
-  const skip = Math.round(preRollSec * SAMPLE_RATE)
+  const skip = Math.round(preRollSec * sampleRate)
   if (skip <= 0) return rendered
 
   const frames = rendered.length - skip

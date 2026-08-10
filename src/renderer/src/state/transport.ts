@@ -68,6 +68,13 @@ export class Transport {
    * top of playback. Per-user and ephemeral, like the playhead itself.
    */
   private marker: number | null = null
+  /**
+   * Seconds the HEARD output lags the audio clock (base + output latency;
+   * the engine keeps it fresh). Display-only: scheduling stays on the raw
+   * clock, but the playhead is drawn — and playhead-anchored edits land —
+   * where the listener actually is in the song, not 10–100 ms ahead.
+   */
+  private outputLatencySec = 0
   private timeSource: TimeSource = { now: () => performance.now() / 1000 }
   private frameListeners = new Set<() => void>()
   private uiListeners = new Set<() => void>()
@@ -174,13 +181,33 @@ export class Transport {
   }
 
   /**
-   * Where the playhead is now. Cycling wraps here with pure modulo math off
-   * the audio clock, so the reported position is exact — no polling, and
-   * no drift between what is heard and what is drawn.
+   * Where the playhead is now, on the RAW audio clock — the engine's
+   * scheduling domain. Cycling wraps here with pure modulo math, so the
+   * reported position is exact — no polling, no drift.
    */
   positionTicks(): number {
     if (!this.playing) return this.baseTicks
-    const elapsedSec = this.timeSource.now() - this.startedAt
+    return this.positionAt(this.timeSource.now())
+  }
+
+  /**
+   * Where the playhead should be DRAWN: the position whose audio is
+   * reaching the ears right now, i.e. the raw position an output-latency
+   * ago. Clamped to the play start so pressing play never shows a
+   * backwards hop while the first buffers are still in flight.
+   */
+  displayTicks(): number {
+    if (!this.playing || this.outputLatencySec === 0) return this.positionTicks()
+    return this.positionAt(Math.max(this.startedAt, this.timeSource.now() - this.outputLatencySec))
+  }
+
+  /** The engine reports the live output-path latency here. */
+  setOutputLatency(seconds: number): void {
+    this.outputLatencySec = Number.isFinite(seconds) ? Math.max(0, seconds) : 0
+  }
+
+  private positionAt(nowSec: number): number {
+    const elapsedSec = nowSec - this.startedAt
     const ticksPerSec = (this.tempo / 60) * PPQ
     const raw = this.baseTicks + elapsedSec * ticksPerSec
     const loop = this.activeLoop()
@@ -213,11 +240,11 @@ export class Transport {
 
   /**
    * Where an edit lands: the marker when one is pinned, otherwise the
-   * playhead. Everything that used to read `positionTicks()` for an EDIT
-   * (as opposed to for drawing) goes through this.
+   * playhead — the DRAWN one, so slicing at the playhead cuts where the
+   * user sees (and hears) it, not where the clock has silently run ahead.
    */
   editTicks(): number {
-    return this.marker ?? this.positionTicks()
+    return this.marker ?? this.displayTicks()
   }
 
   /** Swap the clock (e.g. to AudioContext time) without moving the playhead. */

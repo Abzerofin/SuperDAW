@@ -462,7 +462,7 @@ export function TimelineView(): React.JSX.Element {
       transport.subscribe(() => {
         const el = scrollRef.current
         if (!el || !transport.isPlaying) return
-        const x = transport.positionTicks() * followRef.current.pxPerTick
+        const x = transport.displayTicks() * followRef.current.pxPerTick
         const visW = el.clientWidth - HEADER_W
         const rel = x - el.scrollLeft
         const prevRel = followRef.current.prevRel
@@ -1677,7 +1677,7 @@ function PlayheadCap({
     <div
       className="playhead-cap"
       title="Playhead — drag to scrub"
-      style={{ left: transport.positionTicks() * pxPerTick }}
+      style={{ left: transport.displayTicks() * pxPerTick }}
       onPointerDown={(e) => {
         if (e.button !== 0) return
         e.stopPropagation()
@@ -1711,7 +1711,7 @@ function RecordingRegions({
   useEffect(() => transport.subscribe(force), [])
   if (!rec.recording) return null
   const left = rec.recordStartTicks * pxPerTick
-  const width = Math.max(2, (transport.positionTicks() - rec.recordStartTicks) * pxPerTick)
+  const width = Math.max(2, (transport.displayTicks() - rec.recordStartTicks) * pxPerTick)
   return (
     <>
       {trackIds.map((trackId, i) =>
@@ -1733,7 +1733,7 @@ function Playhead({ pxPerTick }: { pxPerTick: number }): React.JSX.Element {
   return (
     <div
       className="playhead"
-      style={{ transform: `translateX(${transport.positionTicks() * pxPerTick}px)` }}
+      style={{ transform: `translateX(${transport.displayTicks() * pxPerTick}px)` }}
     />
   )
 }

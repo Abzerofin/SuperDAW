@@ -65,27 +65,56 @@ export function clipSegments(clip: Clip): ClipSegment[] {
 }
 
 /**
+ * Bounds on which sources a pass INCLUDES, by their start tick — the
+ * windowed (linear, non-cycling) scheduler's primitive. Unlike
+ * `untilTicks`, a window never cuts material: a source starting inside the
+ * window plays to its natural end, so the horizon can advance in slices
+ * without ever splitting a note or a clip across a seam. Slices partition
+ * the timeline exactly (start ∈ [startFromTicks, startBeforeTicks)), so a
+ * source is scheduled by exactly one slice.
+ */
+export interface ScheduleWindow {
+  /**
+   * Only sources starting at/after this tick. Omitted on the initial pass
+   * so material already sounding at the anchor is picked up (with the
+   * usual mid-source offset); set on top-up slices, which must not
+   * re-schedule what previous passes already queued.
+   */
+  readonly startFromTicks?: number
+  /** Only sources starting before this tick (the lookahead horizon). */
+  readonly startBeforeTicks: number
+}
+
+/**
  * Upcoming clip sources.
  *
  * `untilTicks` bounds the pass at a musical position — the loop region's
  * end when cycling, so one iteration's sources never bleed past the wrap
- * point (see AudioEngine's loop scheduling).
+ * point (see AudioEngine's loop scheduling). `window`, by contrast, bounds
+ * which sources START in this pass without cutting their material — the
+ * two are used by different scheduling modes and never combined.
  */
 export function scheduleClips(
   state: ProjectState,
   assetSeconds: (assetId: string) => number | null,
   anchorTicks: number,
   anchorSec: number,
-  untilTicks = Number.POSITIVE_INFINITY
+  untilTicks = Number.POSITIVE_INFINITY,
+  window?: ScheduleWindow
 ): ClipSchedule[] {
   const tps = ticksPerSecond(state.tempo)
   const out: ClipSchedule[] = []
 
   // Frozen tracks play their pre-rendered asset as one source from tick 0
   // (the render bakes clips, notes, inserts and volume automation), which
-  // is the entire CPU point of freezing.
+  // is the entire CPU point of freezing. As one long source "starting" at
+  // tick 0 it belongs to the initial windowed pass only — top-up slices
+  // (start bound > 0) must not schedule it again.
+  const frozenInWindow =
+    window === undefined ||
+    ((window.startFromTicks ?? Number.NEGATIVE_INFINITY) <= 0 && window.startBeforeTicks > 0)
   for (const track of Object.values(state.tracks)) {
-    if (!track.frozenAssetId) continue
+    if (!track.frozenAssetId || !frozenInWindow) continue
     const bufferSec = assetSeconds(track.frozenAssetId)
     if (bufferSec === null) continue // still transferring: silent until it lands
     const startSec = anchorSec + (0 - anchorTicks) / tps
@@ -123,6 +152,15 @@ export function scheduleClips(
     // A looped clip is scheduled as one source per repeat; each replays the
     // same material from the clip's offset in its own timeline window.
     for (const segment of clipSegments(clip)) {
+      // Windowed pass: each repeat is its own source with its own start, so
+      // the window admits repeats individually — exactly one slice each.
+      if (
+        window !== undefined &&
+        (segment.start < (window.startFromTicks ?? Number.NEGATIVE_INFINITY) ||
+          segment.start >= window.startBeforeTicks)
+      ) {
+        continue
+      }
       const segStartSec = anchorSec + (segment.start - anchorTicks) / tps
       const segEndSec = anchorSec + (segment.start + segment.duration - anchorTicks) / tps
       if (segEndSec <= anchorSec) continue // entirely in the past
@@ -230,7 +268,8 @@ export function scheduleNotes(
   state: ProjectState,
   anchorTicks: number,
   anchorSec: number,
-  untilTicks = Number.POSITIVE_INFINITY
+  untilTicks = Number.POSITIVE_INFINITY,
+  window?: ScheduleWindow
 ): NoteSchedule[] {
   const tps = ticksPerSecond(state.tempo)
   const out: NoteSchedule[] = []
@@ -259,6 +298,15 @@ export function scheduleNotes(
     for (const segment of segments) {
       if (note.start >= segment.duration) continue // past this repeat's window
       const absStart = segment.start + note.start
+      // Windowed pass: a note plays in the slice its START falls in, and
+      // rings to its natural end — never re-attacked at a horizon seam.
+      if (
+        window !== undefined &&
+        (absStart < (window.startFromTicks ?? Number.NEGATIVE_INFINITY) ||
+          absStart >= window.startBeforeTicks)
+      ) {
+        continue
+      }
       const absEnd = Math.min(absStart + note.duration, segment.start + segment.duration, untilTicks)
       if (absEnd <= absStart) continue // entirely past the segment end / window
       if (absEnd <= anchorTicks) continue // in the past

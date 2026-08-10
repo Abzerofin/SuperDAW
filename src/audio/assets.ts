@@ -167,6 +167,48 @@ export class AssetStore {
       .catch(() => {})
   }
 
+  /**
+   * Free the decoded memory of the given assets (policy — WHICH ids are
+   * safe and WHEN — lives with the caller, which knows the document; this
+   * store deliberately does not). Encoded bytes, seconds and peaks are
+   * kept: they are the save/transfer source of truth and stay valid across
+   * decode cycles, so an undo that re-references an evicted asset costs
+   * one re-decode (see rehydrate), not a re-import. Reversed copies are a
+   * pure cache rebuilt on demand, so everything outside `keepReversed` is
+   * dropped unconditionally. Returns how many decoded buffers were freed.
+   */
+  evict(ids: ReadonlySet<string>, keepReversed: ReadonlySet<string>): number {
+    let freed = 0
+    for (const id of ids) {
+      const asset = this.assets.get(id)
+      if (!asset || asset.buffer === null) continue
+      this.assets.set(id, { ...asset, buffer: null })
+      freed++
+    }
+    for (const id of [...this.reversed.keys()]) {
+      if (!keepReversed.has(id) || ids.has(id)) this.reversed.delete(id)
+    }
+    return freed
+  }
+
+  /**
+   * Re-attach a decoded buffer to an evicted asset. Notifies subscribers
+   * with a 'restored' event so the engine re-queues the clips that were
+   * playing silent — and so collab never re-offers it as new material.
+   */
+  rehydrate(id: string, buffer: AudioBuffer): void {
+    const current = this.assets.get(id)
+    if (!current || current.buffer !== null) return
+    const updated: ProjectAsset = {
+      ...current,
+      buffer,
+      seconds: buffer.length / buffer.sampleRate
+    }
+    this.assets.set(id, updated)
+    for (const listener of this.listeners) listener({ asset: updated, origin: 'restored' })
+    if (!updated.peaks) this.fillPeaksLater(id, buffer)
+  }
+
   get(id: string): ProjectAsset | undefined {
     return this.assets.get(id)
   }

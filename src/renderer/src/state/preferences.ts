@@ -19,13 +19,23 @@ interface Preferences {
   tempoConform: TempoConformChoice
   /** Metronome bars clicked before recording starts rolling (0 = off). */
   countInBars: 0 | 1 | 2
+  /**
+   * Extra milliseconds recorded takes are pulled EARLIER on the timeline,
+   * on top of the automatic output-latency compensation — the knob for the
+   * input path (interface buffers), which the platform does not report.
+   */
+  recordLatencyTrimMs: number
 }
+
+/** The trim is a correction, not an offset tool — keep it in sane bounds. */
+const LATENCY_TRIM_LIMIT_MS = 250
 
 const DEFAULTS: Preferences = {
   middleClickPing: true,
   autoDownloadAssets: false,
   tempoConform: 'ask',
-  countInBars: 1
+  countInBars: 1,
+  recordLatencyTrimMs: 0
 }
 
 const STORAGE_KEY = 'preferences'
@@ -56,7 +66,15 @@ class PreferencesStore {
         : DEFAULTS.tempoConform,
       countInBars: [0, 1, 2].includes(stored.countInBars as number)
         ? (stored.countInBars as 0 | 1 | 2)
-        : DEFAULTS.countInBars
+        : DEFAULTS.countInBars,
+      recordLatencyTrimMs:
+        typeof stored.recordLatencyTrimMs === 'number' &&
+        Number.isFinite(stored.recordLatencyTrimMs)
+          ? Math.max(
+              -LATENCY_TRIM_LIMIT_MS,
+              Math.min(LATENCY_TRIM_LIMIT_MS, stored.recordLatencyTrimMs)
+            )
+          : DEFAULTS.recordLatencyTrimMs
     }
     this.emit()
   }
@@ -75,6 +93,10 @@ class PreferencesStore {
 
   get countInBars(): 0 | 1 | 2 {
     return this.prefs.countInBars
+  }
+
+  get recordLatencyTrimMs(): number {
+    return this.prefs.recordLatencyTrimMs
   }
 
   set<K extends keyof Preferences>(key: K, value: Preferences[K]): void {

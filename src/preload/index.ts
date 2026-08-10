@@ -64,6 +64,29 @@ const api = {
     ipcRenderer.send('project:set-dirty', dirty)
   },
 
+  // ----- Crash recovery (see src/main/recovery.ts) -----
+
+  /** Write/refresh the recovery snapshot's document + metadata. */
+  recoveryWriteDoc: (args: { json: string; name: string; path: string | null }): Promise<void> =>
+    ipcRenderer.invoke('recovery:write-doc', args),
+
+  /** Persist one asset's bytes into the snapshot. False = already there. */
+  recoveryWriteAsset: (args: { fileName: string; data: Uint8Array }): Promise<boolean> =>
+    ipcRenderer.invoke('recovery:write-asset', args),
+
+  /** Is there a snapshot to offer? Cheap — reads only the metadata. */
+  recoveryPeek: (): Promise<{ name: string; path: string | null; savedAt: number } | null> =>
+    ipcRenderer.invoke('recovery:peek'),
+
+  /** The full snapshot: document JSON plus every persisted asset. */
+  recoveryRead: (): Promise<{
+    json: string
+    path: string | null
+    assets: { fileName: string; data: Uint8Array }[]
+  } | null> => ipcRenderer.invoke('recovery:read'),
+
+  recoveryClear: (): Promise<void> => ipcRenderer.invoke('recovery:clear'),
+
   /**
    * Close-guard handshake: main asks us to save before closing; we report
    * back whether the save completed (false = user cancelled the dialog).

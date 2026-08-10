@@ -3415,6 +3415,56 @@ body.middle-panning * {
   cursor: default;
 }
 
+/* Crash-recovery offer: work survived a crash and is one click away. */
+.home-action-recover {
+  cursor: default;
+  border-color: var(--accent);
+}
+
+.home-recover-row {
+  display: flex;
+  gap: 6px;
+  width: 100%;
+  margin-top: 5px;
+}
+
+.home-recover-btn,
+.home-recover-discard {
+  flex: 1;
+  padding: 4px 8px;
+  font-size: 11px;
+  background: var(--bg-2);
+  border: 1px solid var(--border);
+  border-radius: 3px;
+}
+
+.home-recover-btn {
+  border-color: var(--accent);
+}
+
+.home-recover-btn:hover {
+  background: var(--bg-3);
+}
+
+.home-recover-discard {
+  color: var(--text-dim);
+}
+
+.home-recover-discard:hover {
+  color: var(--danger);
+  border-color: var(--danger);
+}
+
+.settings-trim-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.settings-trim-row input {
+  width: 80px;
+}
+
 .home-join-row {
   display: flex;
   gap: 6px;

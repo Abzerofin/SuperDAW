@@ -94,19 +94,40 @@ and asset store through narrow structural interfaces.
 
 - **Clock authority.** Once an `AudioContext` exists, the engine installs it
   as the transport's `TimeSource`, so the playhead and scheduled audio share
-  one clock and cannot drift.
+  one clock and cannot drift. Latency compensation rides on top: the DRAWN
+  playhead (`transport.displayTicks`, also where playhead-anchored edits
+  land) lags the raw clock by the reported output-path latency
+  (baseLatency + outputLatency, refreshed live), and recorded takes are
+  placed by their first captured sample's clock time — announced by the
+  capture worklet — minus that latency, plus a manual input trim
+  (Settings ▸ Audio) for the unreported mic→buffer path. Scheduling always
+  stays on the raw clock.
 - **Scheduling** (`scheduling.ts`) is pure math — (state, anchor) → list of
-  `(when, offset, duration)` — and fully unit-tested. All upcoming clip
-  sources are (re)scheduled in one pass on play/seek/audible-edit; the
-  reference-equality checks on `state.clips`/`state.tempo` guarantee that
-  unrelated ops (e.g. renames) never interrupt playback. The metronome uses
-  a small lookahead loop because it is unbounded.
+  `(when, offset, duration)` — and fully unit-tested. Playback is
+  windowed: a pass queues only sources STARTING inside a ~4 s lookahead
+  horizon (`ScheduleWindow`), which a 4 Hz timer extends in slices; an
+  admitted source plays to its natural end, so nothing is ever split or
+  re-attacked at a horizon seam, and play/seek cost stops scaling with
+  song length. Edits tear down and re-queue only the tracks they touch
+  (sources are indexed per track); tempo changes, freeze flips and
+  live-preview edits still restart the engine wholesale. The
+  reference-equality checks on `state.clips`/`state.tempo` — plus an
+  audible-fields comparison per clip — guarantee that unrelated ops
+  (e.g. renames) never interrupt playback. The metronome uses a small
+  lookahead loop because it is unbounded.
 - **Mute/solo are gain-level**, not schedule-level, so toggling mid-playback
   is seamless (smoothed with `setTargetAtTime` to avoid clicks).
 - **Assets** (`assets.ts`) live outside project state; the document
   references them by id only. This split is what later allows instant state
   sync while binaries transfer in the background. Waveform peaks are
-  computed once per asset at 120 buckets/second.
+  computed once per asset at 120 buckets/second. Decoded memory is
+  BOUNDED: `renderer/state/assetMemory.ts` refcounts assets against the
+  document (clips + bay + frozen tracks — the save-GC rule) and evicts
+  decoded buffers of assets unreferenced past a grace period, plus
+  reversed copies no clip plays reversed anymore. Encoded bytes are never
+  evicted (they are what saves and transfers read); an undo that
+  re-references an evicted asset re-decodes and rehydrates it, and the
+  engine re-queues just those tracks.
 - AudioWorklet is deliberately deferred: buffer sources + gain graphs are
   the right primitives for clip playback. Worklets arrive with custom DSP
   (mixing/metering) needs.
@@ -210,6 +231,16 @@ native dialogs via IPC (`project:save` / `project:open`); the browser dev
 build falls back to download/file-picker. Loading is NOT an operation —
 `ProjectStore.loadProject` swaps the document and resets history; the
 future network layer will move snapshots through its own join path.
+
+Crash recovery (Electron only): while dirty, `lib/autosave.ts` snapshots
+into ONE recovery slot in userData every 20 s (and on window hide) —
+`project.json` rewritten when state changed, asset bytes written once each
+(immutable by id), everything atomic (`main/recovery.ts`). The slot clears
+on a real save or an explicit user discard — deliberately NOT on opening
+another project, so a crashed session's work survives until acted on. The
+home screen offers "Recover unsaved project", which loads through the
+ordinary open pipeline, reattaches the original path and marks the result
+dirty.
 
 ## App-level state (settings, recents, shell)
 
@@ -557,6 +588,12 @@ default).
     between clips, add-note targets the clip under the pointer, scrolls
     freely across the song); the Exit button asks Save / Save As / Don't
     Save / Cancel in-app.
+
+21. ✅ **Autosave + crash recovery** — periodic dirty-state snapshots into
+    a single userData recovery slot (document JSON per change, asset bytes
+    once each, atomic via the shared `writeFileAtomic`); home-screen
+    "Recover unsaved project" offer; slot cleared by real saves and
+    explicit discards only. See File Bay & persistence.
 
 Roadmap beyond: VST3 hosting (native module; first consumer of the
 provider/`stateBlob` contracts), collaborator audio streaming + proxy

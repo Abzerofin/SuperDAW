@@ -12,7 +12,7 @@ import {
 import { renderTrackFreeze } from '@audio/render'
 import { encodeWavPcm16Async } from '@audio/wav'
 import { projectStore } from '@/state/projectStore'
-import { assetStore } from '@/state/audioInstance'
+import { assetStore, audioEngine } from '@/state/audioInstance'
 import { externalPluginHost } from '@/state/externalPlugins'
 import { selection } from '@/state/selection'
 
@@ -163,11 +163,14 @@ export async function freezeTrack(trackId: TrackId): Promise<void> {
     // cannot run in the renderer's graph, so their processing happens here
     // and bakes into the asset — which then reaches collaborators who
     // don't own the plugin through the ordinary asset transfer.
+    // Rendered at the live context rate: the freeze asset then plays 1:1
+    // (no per-playback resample) and matches what the track sounded like.
     const rendered = await renderTrackFreeze(
       state,
       trackId,
       assetStore,
-      externalPluginHost() ?? undefined
+      externalPluginHost() ?? undefined,
+      audioEngine.ensureContext().sampleRate
     )
     if (!rendered) return // nothing on the track — nothing to freeze
     const channels: Float32Array[] = []

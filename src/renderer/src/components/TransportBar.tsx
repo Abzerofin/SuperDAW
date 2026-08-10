@@ -575,7 +575,7 @@ function PositionDisplay(): React.JSX.Element {
   const [, force] = useReducer((c: number) => c + 1, 0)
   useEffect(() => transport.subscribe(force), [])
   const sig = useProjectState().timeSignature
-  return <div className="transport-pos mono">{formatPosition(transport.positionTicks(), sig)}</div>
+  return <div className="transport-pos mono">{formatPosition(transport.displayTicks(), sig)}</div>
 }
 
 function TempoField({ tempo }: { tempo: number }): React.JSX.Element {

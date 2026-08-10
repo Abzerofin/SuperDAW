@@ -1,4 +1,4 @@
-import { useState } from 'react'
+import { useEffect, useState } from 'react'
 import { formatPosition } from '@core/model/timebase'
 import { ticksPerSecond } from '@audio/scheduling'
 import { appShell, useAppShell } from '@/state/appShell'
@@ -6,7 +6,8 @@ import { useRecentProjects, type RecentProject } from '@/state/recentProjects'
 import { useSessionFile } from '@/state/sessionFile'
 import { useProjectState } from '@/state/hooks'
 import { settingsUi } from '@/state/settingsUi'
-import { newProject, openProject, openRecentProject } from '@/lib/projectFile'
+import { newProject, openProject, openRecentProject, recoverProject } from '@/lib/projectFile'
+import { autosave, peekRecovery, type RecoveryOffer } from '@/lib/autosave'
 import { recentProjects } from '@/state/recentProjects'
 import { collab } from '@/state/collab'
 
@@ -23,6 +24,19 @@ export function HomeScreen(): React.JSX.Element {
   const currentName = useProjectState().name
   const [query, setQuery] = useState('')
   const [joinCode, setJoinCode] = useState('')
+  const [recovery, setRecovery] = useState<RecoveryOffer | null>(null)
+
+  // A snapshot on disk means a session ended without its work being saved
+  // (crash, power loss). Offer it until it is recovered or discarded.
+  useEffect(() => {
+    let live = true
+    void peekRecovery().then((offer) => {
+      if (live) setRecovery(offer)
+    })
+    return () => {
+      live = false
+    }
+  }, [])
 
   const q = query.trim().toLowerCase()
   const filtered = q ? recents.filter((r) => r.name.toLowerCase().includes(q)) : recents
@@ -55,6 +69,36 @@ export function HomeScreen(): React.JSX.Element {
 
       <div className="home-main">
         <div className="home-actions">
+          {recovery && (
+            <div className="home-action home-action-recover">
+              <span className="home-action-title">Recover unsaved project</span>
+              <span className="home-action-sub">
+                “{recovery.name || 'Untitled'}” — last snapshot {formatLastOpened(recovery.savedAt)}
+              </span>
+              <div className="home-recover-row">
+                <button
+                  className="home-recover-btn"
+                  onClick={() => {
+                    void recoverProject().then((ok) => {
+                      if (ok) setRecovery(null)
+                    })
+                  }}
+                >
+                  Recover
+                </button>
+                <button
+                  className="home-recover-discard"
+                  onClick={() => {
+                    if (!window.confirm('Permanently discard the recovered snapshot?')) return
+                    void autosave.clearRecovery()
+                    setRecovery(null)
+                  }}
+                >
+                  Discard
+                </button>
+              </div>
+            </div>
+          )}
           {shell.projectOpen && (
             <button className="home-action home-action-resume" onClick={() => appShell.enterProject()}>
               <span className="home-action-title">Back to “{currentName}”</span>

@@ -816,7 +816,7 @@ function VelocityControl({ note }: { note: Note }): React.JSX.Element {
 function RollPlayhead({ pxPerTick }: { pxPerTick: number }): React.JSX.Element | null {
   const [, force] = useReducer((c: number) => c + 1, 0)
   useEffect(() => transport.subscribe(force), [])
-  const ticks = transport.positionTicks()
+  const ticks = transport.displayTicks()
   if (ticks < 0) return null
   return <div className="playhead" style={{ transform: `translateX(${ticks * pxPerTick}px)` }} />
 }

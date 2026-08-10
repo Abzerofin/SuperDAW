@@ -7,6 +7,8 @@ import './styles.css'
 import './styles/analog.css'
 import './state/devHandle'
 import './lib/closeGuard'
+import './lib/autosave'
+import './state/assetMemory'
 
 ReactDOM.createRoot(document.getElementById('root')!).render(
   <React.StrictMode>

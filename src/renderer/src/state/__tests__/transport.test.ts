@@ -26,6 +26,42 @@ function transportAt(): { transport: Transport; advance: (seconds: number) => vo
 // The store defaults to 120 BPM: 1 beat = 960 ticks = 0.5 s.
 const BEAT = PPQ
 
+suite('latency-compensated display position', () => {
+  test('the drawn playhead lags the raw clock by the output latency', () => {
+    const { transport, advance } = transportAt()
+    transport.setOutputLatency(0.5) // half a second = 1 beat at 120 BPM
+    transport.play()
+    advance(2)
+    expect(transport.positionTicks()).toBeCloseTo(BEAT * 4)
+    expect(transport.displayTicks()).toBeCloseTo(BEAT * 3)
+    // Edits at the playhead land where the user SEES the playhead.
+    expect(transport.editTicks()).toBeCloseTo(BEAT * 3)
+  })
+
+  test('display is clamped at play start — no backwards hop', () => {
+    const { transport, advance } = transportAt()
+    transport.setOutputLatency(0.5)
+    transport.setPosition(BEAT * 2)
+    transport.play()
+    advance(0.1) // less than the latency has elapsed
+    expect(transport.displayTicks()).toBeCloseTo(BEAT * 2)
+    // With no latency reported, display IS the raw position.
+    transport.setOutputLatency(0)
+    expect(transport.displayTicks()).toBeCloseTo(transport.positionTicks())
+  })
+
+  test('display wraps through the cycle region on the delayed clock', () => {
+    const { transport, advance } = transportAt()
+    transport.setOutputLatency(0.5)
+    transport.setLoopRegion(0, BEAT * 4) // 2 s
+    transport.play()
+    advance(2.25) // raw has wrapped to half a beat in...
+    expect(transport.positionTicks()).toBeCloseTo(BEAT * 0.5)
+    // ...but the ears are still hearing the end of the region.
+    expect(transport.displayTicks()).toBeCloseTo(BEAT * 3.5)
+  })
+})
+
 suite('transport loop region', () => {
   test('playback wraps back into the region at its end', () => {
     const { transport, advance } = transportAt()

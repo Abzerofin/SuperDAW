@@ -20,6 +20,7 @@ import { recentProjects, type RecentProject } from '@/state/recentProjects'
 import { appShell } from '@/state/appShell'
 import { trackInputs } from '@/state/trackInputs'
 import { collab } from '@/state/collab'
+import { autosave } from './autosave'
 
 /**
  * Save/open orchestration. The .sdaw container is a ZIP of project.json
@@ -191,6 +192,8 @@ export async function saveProject(forceDialog = false): Promise<void> {
       if (path !== null) {
         sessionFile.markSaved(path)
         recentProjects.record(projectStore.state, path)
+        // The work is on disk for real — the recovery snapshot is obsolete.
+        void autosave.clearRecovery()
       }
       return
     }
@@ -205,6 +208,7 @@ export async function saveProject(forceDialog = false): Promise<void> {
     setTimeout(() => URL.revokeObjectURL(url), 60_000)
     sessionFile.markSaved(null)
     recentProjects.record(projectStore.state, null)
+    void autosave.clearRecovery()
   } catch (error) {
     // Deliberately not rethrown: every caller fires this and forgets. The
     // failure is still legible downstream because markSaved() never ran, so
@@ -229,10 +233,8 @@ export function newProject(): void {
     )
     return
   }
-  if (
-    sessionFile.dirty &&
-    !window.confirm('Discard unsaved changes and start a new project?')
-  ) {
+  const wasDirty = sessionFile.dirty
+  if (wasDirty && !window.confirm('Discard unsaved changes and start a new project?')) {
     return
   }
   transport.stop()
@@ -243,6 +245,8 @@ export function newProject(): void {
   assetStore.clear()
   projectStore.loadProject(createEmptyProject('Untitled', Date.now()))
   sessionFile.markLoaded(null)
+  // An explicit, confirmed discard also discards the recovery snapshot.
+  if (wasDirty) void autosave.clearRecovery()
   appShell.enterProject()
 }
 
@@ -253,9 +257,10 @@ export function newProject(): void {
 export function closeProject(skipConfirm = false): boolean {
   // The Exit button asks its own save/discard question first; everything
   // else still gets the safety net.
+  const wasDirty = sessionFile.dirty
   if (
     !skipConfirm &&
-    sessionFile.dirty &&
+    wasDirty &&
     !window.confirm('Discard unsaved changes and close the project?')
   ) {
     return false
@@ -268,6 +273,9 @@ export function closeProject(skipConfirm = false): boolean {
   assetStore.clear()
   projectStore.loadProject(createEmptyProject('Untitled'))
   sessionFile.markLoaded(null)
+  // Both routes here are explicit discards (the Exit button asked its own
+  // Save / Don't Save question first) — the snapshot goes with them.
+  if (wasDirty) void autosave.clearRecovery()
   appShell.markProjectClosed()
   return true
 }
@@ -277,7 +285,14 @@ export function closeProject(skipConfirm = false): boolean {
  * Rendering happens faster than realtime in an OfflineAudioContext.
  */
 export async function exportWav(): Promise<void> {
-  const data = await renderMixdown(projectStore.state, assetStore)
+  // Bounce at the live context rate — the rate every asset was decoded at
+  // — so the mixdown resamples nothing on the way out and a bounce
+  // re-imported on this machine round-trips rate-exact.
+  const data = await renderMixdown(
+    projectStore.state,
+    assetStore,
+    audioEngine.ensureContext().sampleRate
+  )
   if (!data) return // empty project — nothing to bounce
   const name = `${projectStore.state.name.trim() || 'Untitled'}.wav`
   const bridge = window.superdaw
@@ -349,6 +364,61 @@ export async function openRecentProject(entry: RecentProject): Promise<void> {
   }
   await loadProjectBytes(result.data, result.path)
   appShell.enterProject()
+}
+
+/**
+ * Load the crash-recovery snapshot as the open project. Same pipeline as
+ * opening a .sdaw (the snapshot's project.json IS that format): parse,
+ * decode assets without touching the store, then swap. The result keeps
+ * the original file path (Ctrl+S saves back where the project lived) but
+ * is marked DIRTY — recovered work is unsaved by definition, so the close
+ * guard and the autosnapshotter keep protecting it until a real save.
+ */
+export async function recoverProject(): Promise<boolean> {
+  if (collab.mode !== 'off') {
+    window.alert(
+      'Leave the collaboration session first — recovery cannot replace the document a running session is syncing.'
+    )
+    return false
+  }
+  const bridge = window.superdaw
+  if (!bridge) return false
+  if (
+    sessionFile.dirty &&
+    !window.confirm('Discard the current unsaved changes and load the recovered snapshot?')
+  ) {
+    return false
+  }
+  try {
+    const payload = await bridge.recoveryRead()
+    if (!payload) return false
+    const parsed = parseProjectJson(payload.json)
+    const archive: Record<string, Uint8Array> = {}
+    for (const { fileName, data } of payload.assets) archive[`assets/${fileName}`] = data
+    const decoded = await decodeArchiveAssets(archive, parsed.assets, { skipExisting: false })
+
+    transport.stop()
+    selection.select(null)
+    pianoRollUi.close()
+    void trackInputs.stopAllMonitors()
+    assetStore.clear()
+    registerDecodedAssets(decoded)
+
+    projectStore.loadProject(parsed.state, parsed.lineage, parsed.opLog)
+    transport.setPosition(0)
+    sessionFile.markLoaded(payload.path)
+    sessionFile.markDirty()
+    appShell.enterProject()
+    return true
+  } catch (error) {
+    console.error('Recovery failed', error)
+    window.alert(
+      `The recovery snapshot could not be loaded.\n\n${
+        error instanceof Error ? error.message : String(error)
+      }`
+    )
+    return false
+  }
 }
 
 /**

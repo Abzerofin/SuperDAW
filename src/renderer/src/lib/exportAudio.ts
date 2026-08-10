@@ -3,7 +3,7 @@ import type { TrackId } from '@core/model/types'
 import { encodeWavPcm16Async } from '@audio/wav'
 import { renderTrackChannels } from '@audio/render'
 import { projectStore } from '@/state/projectStore'
-import { assetStore } from '@/state/audioInstance'
+import { assetStore, audioEngine } from '@/state/audioInstance'
 
 /**
  * Per-track audio export. The render is the track's contribution to the
@@ -79,7 +79,14 @@ export async function exportTrackAudio(trackId: TrackId, format: ExportFormat): 
   const state = projectStore.state
   const track = state.tracks[trackId]
   if (!track) return false
-  const mixed = await renderTrackChannels(state, trackId, assetStore)
+  // The context rate is what every asset was decoded at — rendering there
+  // reads them 1:1 instead of resampling a second time on the way out.
+  const mixed = await renderTrackChannels(
+    state,
+    trackId,
+    assetStore,
+    audioEngine.ensureContext().sampleRate
+  )
   if (!mixed) return false
   const data =
     format === 'wav'

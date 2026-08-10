@@ -4,6 +4,7 @@ import { pluginRegistry } from './pluginRegistry'
 import {
   canLivePreview,
   renderPreviewWindow,
+  RENDER_SAMPLE_RATE,
   type ExternalInstance,
   type ExternalPluginHost
 } from './render'
@@ -41,6 +42,12 @@ export class LivePreview {
   private instances = new Map<TrackId, HeldInstance[]>()
   /** Inserts already reported as failing, so the log isn't per-window spam. */
   private reportedFailures = new Set<string>()
+  /**
+   * The rate everything previewed runs at, set at open(): plugins are
+   * opened at it AND windows are rendered at it, so the two always agree.
+   * The engine passes its live context rate — windows then play 1:1.
+   */
+  private sampleRate = RENDER_SAMPLE_RATE
 
   constructor(
     private store: { state: ProjectState },
@@ -64,6 +71,7 @@ export class LivePreview {
    * their tails continuous rather than reloading the plugin.
    */
   async open(trackId: TrackId, sampleRate: number): Promise<boolean> {
+    this.sampleRate = sampleRate
     if (this.instances.has(trackId)) return true
     if (!this.host.open) return false
     const state = this.store.state
@@ -106,7 +114,8 @@ export class LivePreview {
       trackId,
       this.assets,
       fromTicks,
-      untilTicks
+      untilTicks,
+      this.sampleRate
     )
     if (!dry) return null
 

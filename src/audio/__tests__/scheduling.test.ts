@@ -391,6 +391,133 @@ suite('loop-region bounded passes', () => {
   })
 })
 
+suite('windowed passes', () => {
+  test('the initial window includes sounding and upcoming sources, and never cuts them', () => {
+    const s = stateWith([
+      { start: 0, duration: PPQ * 4 }, // already sounding at the anchor
+      { start: PPQ * 2, duration: PPQ * 8 }, // starts inside, ends past the horizon
+      { start: PPQ * 8, duration: PPQ * 4 } // starts beyond the horizon
+    ])
+    const scheds = scheduleClips(s, tenSecondAsset, PPQ, 100, Number.POSITIVE_INFINITY, {
+      startBeforeTicks: PPQ * 8
+    })
+    expect(scheds.map((x) => x.clipId)).toEqual(['c0', 'c1'])
+    // The sounding clip resumes mid-material exactly as an unbounded pass would.
+    expect(scheds[0].offsetSec).toBeCloseTo(0.5)
+    // The horizon bounds STARTS only: c1 plays its full material, no cut.
+    expect(scheds[1].durationSec).toBeCloseTo((PPQ * 8) / TPS)
+  })
+
+  test('top-up slices partition the timeline — every source queued exactly once', () => {
+    const s = stateWith([
+      { start: 0, duration: PPQ * 2 },
+      { start: PPQ * 4, duration: PPQ * 2 }, // starts exactly on the slice boundary
+      { start: PPQ * 6, duration: PPQ * 2 }
+    ])
+    const first = scheduleClips(s, tenSecondAsset, 0, 100, Number.POSITIVE_INFINITY, {
+      startBeforeTicks: PPQ * 4
+    })
+    const second = scheduleClips(s, tenSecondAsset, 0, 100, Number.POSITIVE_INFINITY, {
+      startFromTicks: PPQ * 4,
+      startBeforeTicks: PPQ * 8
+    })
+    expect(first.map((x) => x.clipId)).toEqual(['c0'])
+    expect(second.map((x) => x.clipId)).toEqual(['c1', 'c2'])
+    // A top-up slice never re-queues material already sounding at the anchor.
+    expect(second.every((x) => x.when >= 100 + (PPQ * 4) / TPS)).toBe(true)
+  })
+
+  test('a looped clip is admitted repeat by repeat, each in its own slice', () => {
+    const s = stateWith([{ start: 0, duration: PPQ * 8, loopLength: PPQ * 2 }])
+    const first = scheduleClips(s, tenSecondAsset, 0, 100, Number.POSITIVE_INFINITY, {
+      startBeforeTicks: PPQ * 4
+    })
+    const rest = scheduleClips(s, tenSecondAsset, 0, 100, Number.POSITIVE_INFINITY, {
+      startFromTicks: PPQ * 4,
+      startBeforeTicks: PPQ * 16
+    })
+    expect(first).toHaveLength(2) // repeats at 0 and 2 beats
+    expect(rest).toHaveLength(2) // repeats at 4 and 6 beats
+    expect(rest[0].when).toBeCloseTo(102)
+    expect(rest[1].when).toBeCloseTo(103)
+  })
+
+  test('a note starting inside the window rings to its natural end, never re-attacked', () => {
+    let s = createEmptyProject('Test')
+    s = { ...s, tempo: TEMPO }
+    s = apply(s, {
+      type: 'track/create',
+      track: {
+        id: 'm1',
+        kind: 'midi',
+        name: 'M',
+        color: '#fff',
+        muted: false,
+        soloed: false,
+        parentId: null,
+        frozenAssetId: null,
+        volume: 1,
+        pan: 0,
+        synth: {}
+      },
+      index: 0,
+      clips: [],
+      automation: [],
+      notes: [],
+      plugins: []
+    })
+    s = apply(s, {
+      type: 'clip/create',
+      clip: {
+        id: 'mc1',
+        trackId: 'm1',
+        name: 'MC',
+        start: 0,
+        duration: PPQ * 8,
+        assetId: null,
+        offset: 0,
+        color: null,
+        fadeIn: 0,
+        fadeOut: 0,
+        reverse: false,
+        pitch: 0,
+        stretch: 1,
+        loopLength: 0
+      },
+      // Starts at 1.5 s, crosses the 2 s horizon, ends at 3.5 s.
+      notes: [{ id: 'n1', clipId: 'mc1', pitch: 60, start: PPQ * 3, duration: PPQ * 4, velocity: 100 }]
+    })
+    const first = scheduleNotes(s, 0, 100, Number.POSITIVE_INFINITY, {
+      startBeforeTicks: PPQ * 4
+    })
+    expect(first).toHaveLength(1)
+    expect(first[0].startSec).toBeCloseTo(101.5)
+    expect(first[0].endSec).toBeCloseTo(103.5) // full duration, no cut at the horizon
+    // The next slice must not re-attack it.
+    const next = scheduleNotes(s, 0, 100, Number.POSITIVE_INFINITY, {
+      startFromTicks: PPQ * 4,
+      startBeforeTicks: PPQ * 8
+    })
+    expect(next).toHaveLength(0)
+  })
+
+  test('a frozen render belongs to the initial window only and is never cut', () => {
+    let s = stateWith([{ start: 0, duration: PPQ * 4 }])
+    s = apply(s, { type: 'track/freeze', trackId: 't1', assetId: 'fz' })
+    const sec = (id: string): number => (id === 'fz' ? 6 : 10)
+    const initial = scheduleClips(s, sec, 0, 100, Number.POSITIVE_INFINITY, {
+      startBeforeTicks: PPQ * 4
+    })
+    expect(initial.map((x) => x.assetId)).toEqual(['fz'])
+    expect(initial[0].durationSec).toBeCloseTo(6)
+    const topUp = scheduleClips(s, sec, 0, 100, Number.POSITIVE_INFINITY, {
+      startFromTicks: PPQ * 4,
+      startBeforeTicks: PPQ * 8
+    })
+    expect(topUp).toHaveLength(0)
+  })
+})
+
 suite('frozen tracks', () => {
   function frozenState(): ProjectState {
     let s = stateWith([{ start: 0, duration: PPQ * 4 }])
