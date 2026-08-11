@@ -35,7 +35,11 @@ import {
 /**
  * Synthetic audio assets for stress runs, so generated audio clips
  * reference REAL registered buffers instead of dangling ids (which made
- * audio-playback stress hollow). Registered once, reused across runs.
+ * audio-playback stress hollow). Registered via addAudio — origin 'local'
+ * — so an active collab session announces them to peers like recorded or
+ * imported audio (restore() tags 'restored', which attachAssetOffers
+ * ignores, leaving remote stress clips silent). addAudio mints ids, so
+ * reuse across runs is by name lookup instead of a fixed id.
  * Feature-detected: absent AudioBuffer (old browsers) just means empty
  * audio clips, same as headless runs.
  */
@@ -45,21 +49,23 @@ function ensureStressAssets(): string[] {
   try {
     const sampleRate = 48000
     for (let k = 0; k < 4; k++) {
-      const id = `stress-asset-${k}`
-      if (!assetStore.get(id)) {
-        const length = sampleRate // 1 second
-        const data = new Float32Array(length)
-        const freq = 110 * (k + 1)
-        for (let i = 0; i < length; i++) {
-          const env = Math.min(1, i / 480, (length - i) / 4800)
-          data[i] = Math.sin((2 * Math.PI * freq * i) / sampleRate) * 0.4 * env
-        }
-        const buffer = new AudioBuffer({ numberOfChannels: 1, length, sampleRate })
-        buffer.copyToChannel(data, 0)
-        const encoded = encodeWavPcm16([data], sampleRate)
-        assetStore.restore(id, `Stress tone ${k + 1}`, 'audio', 'wav', encoded, buffer)
+      const name = `Stress tone ${k + 1}`
+      const existing = assetStore.all().find((a) => a.kind === 'audio' && a.name === name)
+      if (existing) {
+        ids.push(existing.id)
+        continue
       }
-      ids.push(id)
+      const length = sampleRate // 1 second
+      const data = new Float32Array(length)
+      const freq = 110 * (k + 1)
+      for (let i = 0; i < length; i++) {
+        const env = Math.min(1, i / 480, (length - i) / 4800)
+        data[i] = Math.sin((2 * Math.PI * freq * i) / sampleRate) * 0.4 * env
+      }
+      const buffer = new AudioBuffer({ numberOfChannels: 1, length, sampleRate })
+      buffer.copyToChannel(data, 0)
+      const encoded = encodeWavPcm16([data], sampleRate)
+      ids.push(assetStore.addAudio(name, 'wav', encoded, buffer).id)
     }
   } catch {
     return []

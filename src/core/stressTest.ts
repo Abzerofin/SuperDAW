@@ -230,6 +230,8 @@ export interface StressTestConfig {
   notesPerClip: number
   /** Suppress console output (headless runs). */
   quiet: boolean
+  /** Seed for ALL generator randomness — same seed, same project content. */
+  seed: number
   /**
    * Registered asset ids to reference from generated audio clips (round-
    * robin). Without them audio clips are created empty (assetId null) —
@@ -245,20 +247,28 @@ const DEFAULT_CONFIG: StressTestConfig = {
   clipsPerTrack: 3,
   notesPerClip: 50,
   quiet: false,
+  seed: 0x5da5,
   audioAssetIds: null
 }
 
-function randomChoice<T>(arr: readonly T[]): T {
-  return arr[Math.floor(Math.random() * arr.length)]
+// Generators draw ONLY from the caller's LCG — a stray Math.random here
+// would break the seeded-replay guarantee the suite advertises.
+function randomChoice<T>(arr: readonly T[], rng: () => number): T {
+  return arr[Math.floor(rng() * arr.length)]
 }
 
-function generateTrack(id: string, index: number, kind: 'audio' | 'midi' | 'folder' = index % 3 === 0 ? 'midi' : 'audio'): Track {
+function generateTrack(
+  id: string,
+  index: number,
+  rng: () => number,
+  kind: 'audio' | 'midi' | 'folder' = index % 3 === 0 ? 'midi' : 'audio'
+): Track {
   const colors = ['#e74c3c', '#3498db', '#2ecc71', '#f39c12', '#9b59b6', '#1abc9c']
   return {
     id,
     kind,
     name: `Track ${index + 1}`,
-    color: randomChoice(colors),
+    color: randomChoice(colors, rng),
     muted: false,
     soloed: false,
     parentId: null,
@@ -275,7 +285,8 @@ function generateClip(
   startTick: number,
   isMidi: boolean,
   notesPerClip: number,
-  assetId: string | null
+  assetId: string | null,
+  rng: () => number
 ): [Clip, Note[]] {
   const duration = 1920 // 2 bars at 960 ticks/bar
   const clip: Clip = {
@@ -301,13 +312,13 @@ function generateClip(
       notes.push({
         id: newId('note'),
         clipId: id,
-        pitch: 36 + Math.floor(Math.random() * 48), // C2-C6
-        start: Math.floor(Math.random() * (duration - 120)),
-        duration: 60 + Math.floor(Math.random() * 240),
+        pitch: 36 + Math.floor(rng() * 48), // C2-C6
+        start: Math.floor(rng() * (duration - 120)),
+        duration: 60 + Math.floor(rng() * 240),
         // Integer 1..127 velocity. (The old generator emitted 0.6..1.0
         // floats, which the reducer clamps to 1 — every stress note was
         // near-silent and the "MIDI playback" stress was hollow.)
-        velocity: 60 + Math.floor(Math.random() * 67)
+        velocity: 60 + Math.floor(rng() * 67)
       })
     }
   }
@@ -315,13 +326,13 @@ function generateClip(
   return [clip, notes]
 }
 
-function generatePlugin(id: string, trackId: string, rank: number): PluginInstance {
-  const effectType = randomChoice(EFFECT_TYPES)
+function generatePlugin(id: string, trackId: string, rank: number, rng: () => number): PluginInstance {
+  const effectType = randomChoice(EFFECT_TYPES, rng)
   return {
     id,
     trackId,
     descriptor: builtinEffectDescriptor(effectType),
-    enabled: Math.random() > 0.2, // 80% enabled
+    enabled: rng() > 0.2, // 80% enabled
     rank,
     params: effectDefaults(effectType),
     stateBlob: null
@@ -352,6 +363,7 @@ export async function generateStressProject(
   config: Partial<StressTestConfig> = {}
 ): Promise<PerformanceMetrics> {
   const c = { ...DEFAULT_CONFIG, ...config }
+  const rng = makeRng(c.seed)
   const log = c.quiet ? () => {} : console.log
   const metrics: PerformanceMetrics = {
     startTime: performance.now(),
@@ -376,7 +388,7 @@ export async function generateStressProject(
   for (let i = 0; i < c.trackCount; i++) {
     const trackId = newId('track')
     trackIds.push(trackId)
-    const trackObj = generateTrack(trackId, i)
+    const trackObj = generateTrack(trackId, i, rng)
 
     const op: Operation = {
       type: 'track/create',
@@ -397,7 +409,7 @@ export async function generateStressProject(
   for (const trackId of trackIds) {
     for (let i = 0; i < c.effectsPerTrack; i++) {
       const pluginId = newId('plugin')
-      const plugin = generatePlugin(pluginId, trackId, i + 1)
+      const plugin = generatePlugin(pluginId, trackId, i + 1, rng)
       store.dispatch({ type: 'plugin/add', instance: plugin }, 'local')
       metrics.pluginCount++
     }
@@ -418,7 +430,7 @@ export async function generateStressProject(
         c.audioAssetIds && c.audioAssetIds.length > 0
           ? c.audioAssetIds[clipIndex % c.audioAssetIds.length]
           : null
-      const [clipObj, notes] = generateClip(clipId, trackId, startTick, isMidi, c.notesPerClip, assetId)
+      const [clipObj, notes] = generateClip(clipId, trackId, startTick, isMidi, c.notesPerClip, assetId, rng)
       clipIndex++
 
       store.dispatch({ type: 'clip/create', clip: clipObj, notes }, 'local')
@@ -469,21 +481,63 @@ export function capturePerformanceMetrics() {
   }
 }
 
-/**
- * Monitor FPS and frame time over a duration (ms). Browser-only (rAF).
- */
-export async function measureFramePerformance(durationMs: number = 5000): Promise<{
+export interface FramePerfResult {
   avgFps: number
   minFps: number
   maxFps: number
   avgFrameTime: number
-}> {
+  /** Set when the tab went hidden — partial data, stats untrustworthy. */
+  aborted?: 'hidden'
+}
+
+/**
+ * Monitor FPS and frame time over a duration (ms). Browser-only (rAF).
+ * A hidden tab stops rAF entirely, which would stall the await forever
+ * and record one giant frame delta on return — so the measurement bails
+ * out (aborted: 'hidden') the moment visibility is lost. `document` is
+ * feature-detected: headless callers just get an unguarded measurement.
+ */
+export async function measureFramePerformance(durationMs: number = 5000): Promise<FramePerfResult> {
   return new Promise((resolve) => {
     const frameTimes: number[] = []
     let lastTime = performance.now()
     const startTime = performance.now()
+    const doc = typeof document !== 'undefined' ? document : null
+    let settled = false
+
+    const finish = (aborted: boolean): void => {
+      if (settled) return
+      settled = true
+      if (doc) doc.removeEventListener('visibilitychange', onVisibility)
+      if (frameTimes.length === 0) {
+        resolve({ avgFps: 0, minFps: 0, maxFps: 0, avgFrameTime: 0, aborted: 'hidden' })
+        return
+      }
+      const avgFrameTime = frameTimes.reduce((a, b) => a + b, 0) / frameTimes.length
+      const fps = 1000 / avgFrameTime
+      const sortedTimes = [...frameTimes].sort((a, b) => a - b)
+      resolve({
+        avgFps: Math.round(fps * 10) / 10,
+        minFps: Math.round((1000 / sortedTimes[sortedTimes.length - 1]) * 10) / 10,
+        maxFps: Math.round((1000 / sortedTimes[0]) * 10) / 10,
+        avgFrameTime: Math.round(avgFrameTime * 10) / 10,
+        ...(aborted ? { aborted: 'hidden' as const } : {})
+      })
+    }
+
+    const onVisibility = (): void => {
+      if (doc?.hidden) finish(true)
+    }
+    if (doc) {
+      if (doc.hidden) {
+        finish(true)
+        return
+      }
+      doc.addEventListener('visibilitychange', onVisibility)
+    }
 
     function measure() {
+      if (settled) return // aborted while this frame was queued
       const now = performance.now()
       frameTimes.push(now - lastTime)
       lastTime = now
@@ -491,16 +545,7 @@ export async function measureFramePerformance(durationMs: number = 5000): Promis
       if (now - startTime < durationMs) {
         requestAnimationFrame(measure)
       } else {
-        const avgFrameTime = frameTimes.reduce((a, b) => a + b, 0) / frameTimes.length
-        const fps = 1000 / avgFrameTime
-        const sortedTimes = [...frameTimes].sort((a, b) => a - b)
-
-        resolve({
-          avgFps: Math.round(fps * 10) / 10,
-          minFps: Math.round((1000 / sortedTimes[sortedTimes.length - 1]) * 10) / 10,
-          maxFps: Math.round((1000 / sortedTimes[0]) * 10) / 10,
-          avgFrameTime: Math.round(avgFrameTime * 10) / 10
-        })
+        finish(false)
       }
     }
 
@@ -525,6 +570,7 @@ export async function stressTestPlayback(
   memoryAtStart: string
   memoryAtEnd: string
   audioContextState: string
+  aborted?: 'hidden'
 }> {
   const memStart = capturePerformanceMetrics()
 
@@ -549,7 +595,8 @@ export async function stressTestPlayback(
     avgFrameTime: framePerf.avgFrameTime,
     memoryAtStart: memStart?.usedMemory || 'N/A',
     memoryAtEnd: memEnd?.usedMemory || 'N/A',
-    audioContextState
+    audioContextState,
+    ...(framePerf.aborted ? { aborted: framePerf.aborted } : {})
   }
 }
 
@@ -738,6 +785,7 @@ export function stressTestRouting(
   const trackCount = config.tracks ?? 20
   const pluginsPerTrack = Math.max(3, config.pluginsPerTrack ?? 8)
   const assertions: StressAssertion[] = []
+  const rng = makeRng(0x9047)
 
   // Fresh plugin-laden tracks so the scenario is self-sufficient.
   const setupStart = performance.now()
@@ -749,7 +797,7 @@ export function stressTestRouting(
     store.dispatch(
       {
         type: 'track/create',
-        track: { ...generateTrack(trackId, t, 'audio'), name: `Routing ${t + 1}` },
+        track: { ...generateTrack(trackId, t, rng, 'audio'), name: `Routing ${t + 1}` },
         index: store.state.trackOrder.length,
         clips: [],
         automation: [],
@@ -762,7 +810,7 @@ export function stressTestRouting(
     for (let p = 0; p < pluginsPerTrack; p++) {
       const pluginId = newId('plugin')
       plugins.push(pluginId)
-      store.dispatch({ type: 'plugin/add', instance: generatePlugin(pluginId, trackId, p + 1) }, 'local')
+      store.dispatch({ type: 'plugin/add', instance: generatePlugin(pluginId, trackId, p + 1, rng) }, 'local')
     }
     pluginIdsByTrack.push(plugins)
   }
@@ -918,7 +966,7 @@ export function stressTestFolderNesting(
       const id = newId('track')
       chain.push(id)
       const folder: Track = {
-        ...generateTrack(id, d, 'folder'),
+        ...generateTrack(id, d, rng, 'folder'),
         name: `Tree${t + 1}/F${d + 1}`,
         parentId
       }
@@ -942,7 +990,7 @@ export function stressTestFolderNesting(
     store.dispatch(
       {
         type: 'track/create',
-        track: { ...generateTrack(leafId, t, 'audio'), name: `Tree${t + 1}/Leaf`, parentId },
+        track: { ...generateTrack(leafId, t, rng, 'audio'), name: `Tree${t + 1}/Leaf`, parentId },
         index: store.state.trackOrder.length,
         clips: [],
         automation: [],
@@ -1037,7 +1085,7 @@ export function stressTestAutomation(
   store.dispatch(
     {
       type: 'track/create',
-      track: { ...generateTrack(trackId, 0, 'audio'), name: 'Automation stress' },
+      track: { ...generateTrack(trackId, 0, rng, 'audio'), name: 'Automation stress' },
       index: store.state.trackOrder.length,
       clips: [],
       automation: [],
@@ -1151,12 +1199,13 @@ export function stressTestDensePianoRoll(
   const noteCount = config.notes ?? 2500
   const storms = config.storms ?? 6
   const assertions: StressAssertion[] = []
+  const rng = makeRng(0xd15c)
 
   const trackId = newId('track')
   store.dispatch(
     {
       type: 'track/create',
-      track: { ...generateTrack(trackId, 0, 'midi'), name: 'Dense piano roll' },
+      track: { ...generateTrack(trackId, 0, rng, 'midi'), name: 'Dense piano roll' },
       index: store.state.trackOrder.length,
       clips: [],
       automation: [],
@@ -1290,7 +1339,7 @@ export function stressTestStructuralStorm(
     store.dispatch(
       {
         type: 'track/create',
-        track: { ...generateTrack(trackId, i, kind), name: `Storm ${i + 1}` },
+        track: { ...generateTrack(trackId, i, rng, kind), name: `Storm ${i + 1}` },
         index: store.state.trackOrder.length,
         clips: [],
         automation: [],
@@ -1301,7 +1350,7 @@ export function stressTestStructuralStorm(
     )
     const clipId = newId('clip')
     myClips.push(clipId)
-    const [clip, notes] = generateClip(clipId, trackId, 0, kind === 'midi', 5, null)
+    const [clip, notes] = generateClip(clipId, trackId, 0, kind === 'midi', 5, null, rng)
     store.dispatch({ type: 'clip/create', clip, notes }, 'local')
   }
   const setupMs = performance.now() - setupStart
@@ -1329,7 +1378,7 @@ export function stressTestStructuralStorm(
       myPlugins.push(pluginId)
       op = {
         type: 'plugin/add',
-        instance: generatePlugin(pluginId, trackId, 1 + Math.floor(rng() * 10))
+        instance: generatePlugin(pluginId, trackId, 1 + Math.floor(rng() * 10), rng)
       }
     } else if (roll < 0.3 && pluginsAlive.length > 0) {
       action = 'plugin/remove'
@@ -1340,7 +1389,7 @@ export function stressTestStructuralStorm(
       const isMidi = store.state.tracks[trackId]?.kind === 'midi'
       const clipId = newId('clip')
       myClips.push(clipId)
-      const [clip, notes] = generateClip(clipId, trackId, Math.floor(rng() * 20) * 960, isMidi, 5, null)
+      const [clip, notes] = generateClip(clipId, trackId, Math.floor(rng() * 20) * 960, isMidi, 5, null, rng)
       op = { type: 'clip/create', clip, notes }
     } else if (roll < 0.65 && clipsAlive.length > 0 && tracksAlive.length > 0) {
       action = 'clip/move'
@@ -1374,7 +1423,7 @@ export function stressTestStructuralStorm(
       myTracks.push(trackId)
       op = {
         type: 'track/create',
-        track: { ...generateTrack(trackId, i, rng() < 0.3 ? 'midi' : 'audio'), name: `Storm+${i}` },
+        track: { ...generateTrack(trackId, i, rng, rng() < 0.3 ? 'midi' : 'audio'), name: `Storm+${i}` },
         index: store.state.trackOrder.length,
         clips: [],
         automation: [],
@@ -1441,7 +1490,7 @@ export function stressTestRemoteDelivery(
     host.dispatch(
       {
         type: 'track/create',
-        track: generateTrack(trackId, i, kind),
+        track: generateTrack(trackId, i, rng, kind),
         index: i,
         clips: [],
         automation: [],
@@ -1451,7 +1500,7 @@ export function stressTestRemoteDelivery(
       'local'
     )
     const clipId = newId('clip')
-    const [clip, notes] = generateClip(clipId, trackId, 0, kind === 'midi', 10, null)
+    const [clip, notes] = generateClip(clipId, trackId, 0, kind === 'midi', 10, null, rng)
     if (kind === 'midi') midiClips.push(clipId)
     host.dispatch({ type: 'clip/create', clip, notes }, 'local')
   }
@@ -1510,7 +1559,7 @@ export function stressTestRemoteDelivery(
       const trackId = tracksAlive[Math.floor(rng() * tracksAlive.length)]
       hostPlugins.push(pluginId)
       host.dispatch(
-        { type: 'plugin/add', instance: generatePlugin(pluginId, trackId, 1 + Math.floor(rng() * 5)) },
+        { type: 'plugin/add', instance: generatePlugin(pluginId, trackId, 1 + Math.floor(rng() * 5), rng) },
         'local'
       )
     } else if (roll < 0.92) {
@@ -1631,6 +1680,7 @@ export function stressTestOpLogFold(
   config: { quiet?: boolean } = {}
 ): ScenarioResult {
   const assertions: StressAssertion[] = []
+  const rng = makeRng(0xf07d)
   const store = new ProjectStore(createEmptyProject('Fold stress'), 'folder')
   const trackA = newId('track')
   const trackB = newId('track')
@@ -1638,7 +1688,7 @@ export function stressTestOpLogFold(
     store.dispatch(
       {
         type: 'track/create',
-        track: generateTrack(id, i, i === 0 ? 'midi' : 'audio'),
+        track: generateTrack(id, i, rng, i === 0 ? 'midi' : 'audio'),
         index: i,
         clips: [],
         automation: [],
@@ -1649,7 +1699,7 @@ export function stressTestOpLogFold(
     )
   }
   const clipId = newId('clip')
-  const [clip, notes] = generateClip(clipId, trackA, 0, true, 20, null)
+  const [clip, notes] = generateClip(clipId, trackA, 0, true, 20, null, rng)
   store.dispatch({ type: 'clip/create', clip, notes }, 'local')
 
   // Alternating real changes until the log folds (LOG_LIMIT internal to the
@@ -1787,6 +1837,12 @@ export interface StressSuiteResult {
   totalMs: number
   passed: boolean
   failures: string[]
+  /**
+   * Scenarios the suite was asked to run but could not (playback without
+   * a transport, frame probes in a hidden tab). Distinct from failures —
+   * passed can be true with skips, but the caller sees exactly what ran.
+   */
+  skippedScenarios: string[]
   results: Record<string, unknown>
 }
 
@@ -1799,6 +1855,7 @@ export async function runAllStressTests(
   const suiteStart = performance.now()
   const results: Record<string, unknown> = {}
   const failures: string[] = []
+  const skippedScenarios: string[] = []
 
   const record = (name: string, r: ScenarioResult): void => {
     results[name] = r
@@ -1816,8 +1873,36 @@ export async function runAllStressTests(
     }
   }
 
+  // Generation is asserted against the request, not just recorded — the
+  // store may hold a pre-existing project, so compare GROWTH to expected.
+  const genConfig = { ...DEFAULT_CONFIG, quiet, ...options.generate }
+  const before = {
+    tracks: Object.keys(store.state.tracks).length,
+    plugins: Object.keys(store.state.plugins).length,
+    clips: Object.keys(store.state.clips).length,
+    notes: Object.keys(store.state.notes).length
+  }
   try {
-    results.generation = await generateStressProject(store, { quiet, ...options.generate })
+    const generation = await generateStressProject(store, genConfig)
+    results.generation = generation
+    const midiTracks = Math.ceil(genConfig.trackCount / 3) // every 3rd generated track
+    const expected = {
+      tracks: genConfig.trackCount,
+      plugins: genConfig.trackCount * genConfig.effectsPerTrack,
+      clips: genConfig.trackCount * genConfig.clipsPerTrack,
+      notes: midiTracks * genConfig.clipsPerTrack * genConfig.notesPerClip
+    }
+    const grew = {
+      tracks: generation.verified.tracksInState - before.tracks,
+      plugins: generation.verified.pluginsInState - before.plugins,
+      clips: generation.verified.clipsInState - before.clips,
+      notes: generation.verified.notesInState - before.notes
+    }
+    for (const key of ['tracks', 'plugins', 'clips', 'notes'] as const) {
+      if (grew[key] !== expected[key]) {
+        failures.push(`generation: ${key} grew by ${grew[key]}, requested ${expected[key]}`)
+      }
+    }
   } catch (e) {
     failures.push(`generation: threw ${e instanceof Error ? e.message : String(e)}`)
   }
@@ -1826,15 +1911,24 @@ export async function runAllStressTests(
   const browser = typeof requestAnimationFrame === 'function'
   if (browser) {
     try {
-      results.framePerf = await measureFramePerformance(3000)
+      const framePerf = await measureFramePerformance(3000)
+      results.framePerf = framePerf
+      if (framePerf.aborted) skippedScenarios.push(`framePerf: aborted (tab ${framePerf.aborted})`)
     } catch (e) {
       failures.push(`framePerf: threw ${e instanceof Error ? e.message : String(e)}`)
     }
     try {
-      results.playback = await stressTestPlayback(store, 3)
+      const playback = await stressTestPlayback(store, 3)
+      results.playback = playback
+      if (playback.aborted) skippedScenarios.push(`playback: aborted (tab ${playback.aborted})`)
     } catch (e) {
-      results.playback = { skipped: String(e instanceof Error ? e.message : e) }
+      const reason = String(e instanceof Error ? e.message : e)
+      results.playback = { skipped: reason }
+      skippedScenarios.push(`playback: ${reason}`)
     }
+  } else {
+    skippedScenarios.push('framePerf: headless (no requestAnimationFrame)')
+    skippedScenarios.push('playback: headless (no requestAnimationFrame)')
   }
 
   await guard('undoRedo', () => stressTestUndoRedo(store, { quiet }))
@@ -1854,14 +1948,17 @@ export async function runAllStressTests(
     totalMs,
     passed: failures.length === 0,
     failures,
+    skippedScenarios,
     results
   }
   if (!quiet) {
+    const skips = skippedScenarios.length > 0 ? ` (${skippedScenarios.length} skipped)` : ''
     console.log(
       failures.length === 0
-        ? `STRESS SUITE PASSED in ${totalMs}ms`
-        : `STRESS SUITE FAILURES (${failures.length}):\n${failures.join('\n')}`
+        ? `STRESS SUITE PASSED in ${totalMs}ms${skips}`
+        : `STRESS SUITE FAILURES (${failures.length})${skips}:\n${failures.join('\n')}`
     )
+    for (const s of skippedScenarios) console.log(`  skipped ${s}`)
   }
   return suite
 }
