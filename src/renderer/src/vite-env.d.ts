@@ -128,6 +128,7 @@ interface Window {
         paramId?: number
         value?: number
         stateBlob?: string
+        params?: Record<string, number>
       }) => void
     ): () => void
     vst3ProcessInstance(args: {

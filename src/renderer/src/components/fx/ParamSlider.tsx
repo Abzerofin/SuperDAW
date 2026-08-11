@@ -1,7 +1,7 @@
 import { useRef, useState } from 'react'
 import type { ParamDef } from '@core/model/effects'
 import { capturePointer } from '@/lib/pointer'
-import { parseNumberIn } from '@/lib/valueParse'
+import { parseNumberIn, parsePercent } from '@/lib/valueParse'
 import { EditableValue } from '../controls/EditableValue'
 
 const SLIDER_W = 116
@@ -18,11 +18,18 @@ const FINE = 0.15
 export function ParamSlider({
   def,
   value,
+  percent = false,
   onPreview,
   onCommit
 }: {
   def: ParamDef
   value: number
+  /**
+   * The stored value is a plugin-owned normalized 0..1 (see
+   * isNormalizedParam), so show it as a percentage. The VALUE is untouched
+   * — only its presentation — because 0..1 is the plugin's contract.
+   */
+  percent?: boolean
   onPreview?: (value: number) => void
   onCommit: (value: number) => void
 }): React.JSX.Element {
@@ -77,8 +84,8 @@ export function ParamSlider({
       </div>
       <EditableValue
         className="fx-param-value"
-        text={`${shown.toFixed(def.digits)}${def.unit}`}
-        parse={parseNumberIn(def.min, def.max)}
+        text={percent ? `${(shown * 100).toFixed(0)}%` : `${shown.toFixed(def.digits)}${def.unit}`}
+        parse={percent ? parsePercent : parseNumberIn(def.min, def.max)}
         onCommit={onCommit}
       />
     </div>

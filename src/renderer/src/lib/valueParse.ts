@@ -26,6 +26,19 @@ export function parseDb(raw: string): number | null {
   return Math.min(MAX_GAIN, Math.max(0, Math.pow(10, n / 20)))
 }
 
+/**
+ * "50" / "50%" → normalized 0..1. For plugin-owned parameters, which are
+ * normalized on the wire but shown as a percentage (see isNormalizedParam):
+ * what the user types is the percentage they are reading.
+ */
+export function parsePercent(raw: string): number | null {
+  const m = raw.trim().match(/^[-+]?\d*\.?\d+/)
+  if (!m) return null
+  const n = Number(m[0])
+  if (!Number.isFinite(n)) return null
+  return Math.min(1, Math.max(0, n / 100))
+}
+
 /** Plain number with an optional unit suffix, clamped to min..max. */
 export function parseNumberIn(min: number, max: number): (raw: string) => number | null {
   return (raw) => {

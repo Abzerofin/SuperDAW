@@ -62,4 +62,37 @@ suite('pickLanAddress', () => {
     const { pickLanAddress } = await import('../lanAddress')
     expect(pickLanAddress()).toBe('127.0.0.1')
   })
+
+  test('an INSTALLED BUT DISCONNECTED Tailscale must not hijack the real LAN', async () => {
+    // The adapter exists and carries the name, but holds only a
+    // self-assigned 169.254 address because Tailscale is not logged in.
+    // Matching on the name alone handed this dead address to every peer
+    // while the working Wi-Fi address went unused, so LAN sessions failed
+    // with a join code that looked completely valid.
+    mockInterfaces.value = {
+      'Tailscale': iface('169.254.83.107'),
+      'Wi-Fi': iface('10.0.0.136')
+    }
+    const { pickLanAddress } = await import('../lanAddress')
+    expect(pickLanAddress()).toBe('10.0.0.136')
+  })
+
+  test('a link-local address is never advertised, even as the only candidate', async () => {
+    // Loopback is useless to a peer, but it is at least honest about being
+    // local; a self-assigned address just fails mysteriously.
+    mockInterfaces.value = { 'Ethernet': iface('169.254.1.1') }
+    const { pickLanAddress } = await import('../lanAddress')
+    expect(pickLanAddress()).toBe('127.0.0.1')
+  })
+
+  test('a CONNECTED Tailscale still wins over the local LAN', async () => {
+    // The disconnected-VPN fix must not cost the cross-network case the
+    // name preference exists for: peers who share only the VPN.
+    mockInterfaces.value = {
+      'Tailscale': iface('100.101.102.103'),
+      'Wi-Fi': iface('10.0.0.136')
+    }
+    const { pickLanAddress } = await import('../lanAddress')
+    expect(pickLanAddress()).toBe('100.101.102.103')
+  })
 })

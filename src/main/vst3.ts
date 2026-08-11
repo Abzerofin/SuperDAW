@@ -95,6 +95,8 @@ interface Vst3Addon {
     }
   ): { error?: string }
   setEditorParam(editor: number, paramId: number, value: number): { error?: string }
+  /** A live editor's CURRENT normalized values, keyed by stringified param id. */
+  getEditorParams(editor: number): { error?: string; params?: Record<string, number> }
 }
 
 /** A docked overlay's placement, in the renderer's CSS viewport coords. */
@@ -245,6 +247,45 @@ function watchWindow(host: Vst3Addon, win: BrowserWindow): void {
 }
 
 /** Capture the final chunk and tear the editor down. Idempotent. */
+/**
+ * A live editor's current values, or undefined if they can't be read. A
+ * plugin that misbehaves here must not cost us the state chunk — the
+ * snapshot is an improvement to what collaborators see, never a
+ * precondition for capturing state.
+ */
+function safeEditorParams(
+  host: Vst3Addon,
+  editorHandle: number
+): Record<string, number> | undefined {
+  try {
+    const read = host.getEditorParams(editorHandle)
+    return read.error ? undefined : read.params
+  } catch {
+    return undefined
+  }
+}
+
+/**
+ * Publish a just-opened editor's values so the document matches the plugin
+ * that is actually loaded. Sent as its own event rather than folded into
+ * the open result because the docked and windowed paths both need it.
+ *
+ * Safe to repeat: the renderer turns this into a `plugin/setParams`, whose
+ * reducer returns the state unchanged when nothing differs — so a snapshot
+ * that already agrees costs no op, no undo entry and no sync traffic. Only
+ * the first, correcting one does anything.
+ */
+function announceEditorParams(
+  host: Vst3Addon,
+  instanceId: string,
+  editorHandle: number,
+  sender: WebContents
+): void {
+  const params = safeEditorParams(host, editorHandle)
+  if (!params || sender.isDestroyed()) return
+  sender.send('vst3:editor-event', { instanceId, kind: 'params', params })
+}
+
 function finalizeEditor(host: Vst3Addon, instanceId: string, sender: WebContents): void {
   const editorHandle = editors.get(instanceId)
   if (editorHandle === undefined) return
@@ -254,6 +295,11 @@ function finalizeEditor(host: Vst3Addon, instanceId: string, sender: WebContents
   const wasDocked = dockedEditors.delete(instanceId)
   lastDockRects.delete(instanceId)
   try {
+    // BEFORE teardown: the plugin's true values, which the document may
+    // never have seen (a preset load changes many params without one
+    // performEdit each). Captured at the same instant as the chunk, so the
+    // two always describe the same state.
+    const snapshot = safeEditorParams(host, editorHandle)
     const final = host.closeEditor(editorHandle)
     if (!wasDocked && uid && typeof final.x === 'number' && typeof final.y === 'number') {
       void savePosition(uid, final.x, final.y)
@@ -264,7 +310,8 @@ function finalizeEditor(host: Vst3Addon, instanceId: string, sender: WebContents
       sender.send('vst3:editor-event', {
         instanceId,
         kind: 'state',
-        stateBlob: blobFromChunk(final.component)
+        stateBlob: blobFromChunk(final.component),
+        params: snapshot
       })
     }
   } catch {
@@ -315,6 +362,7 @@ export function registerVst3Ipc(): void {
         }
         editors.set(args.instanceId, opened.editor)
         editorUids.set(args.instanceId, plugin.uid)
+        announceEditorParams(host, args.instanceId, opened.editor, sender)
         return { opened: true }
       } catch (error) {
         return { error: error instanceof Error ? error.message : String(error) }
@@ -411,6 +459,7 @@ export function registerVst3Ipc(): void {
           editors.set(args.instanceId, editorHandle)
           editorUids.set(args.instanceId, plugin.uid)
           dockedEditors.add(args.instanceId)
+          announceEditorParams(host, args.instanceId, editorHandle, sender)
         } catch (error) {
           return { error: error instanceof Error ? error.message : String(error) }
         }

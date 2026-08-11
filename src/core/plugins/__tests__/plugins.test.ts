@@ -7,7 +7,12 @@ import type { ParamDef } from '../../model/effects'
 import { clampParam } from '../../model/effects'
 import type { PluginDescriptor } from '../descriptor'
 import { descriptorKey, isPluginDescriptor, matchDescriptor, pluginSearchUrl } from '../descriptor'
-import { builtinEffectDescriptor, paramDefsOf, pluginDefaults } from '../builtin'
+import {
+  builtinEffectDescriptor,
+  isNormalizedParam,
+  paramDefsOf,
+  pluginDefaults
+} from '../builtin'
 import { pluginManifest } from '../manifest'
 
 function track(id: string): Track {
@@ -240,6 +245,101 @@ suite('builtin defs', () => {
     expect(paramDefsOf(builtinEffectDescriptor('delay'))?.time).toBeDefined()
     expect(paramDefsOf(VST)?.gain.max).toBe(30)
     expect(paramDefsOf({ ...VST, paramDefs: undefined })).toBeNull()
+  })
+})
+
+suite('editor param snapshots', () => {
+  // A plugin's own GUI can change many parameters without emitting a
+  // gesture event for each (loading a preset), so the document would
+  // otherwise keep showing factory defaults — and collaborators WITHOUT
+  // the plugin, who can only read the document, would see those defaults
+  // as if they were real. The editor publishes its true values as a
+  // plugin/setParams; these are the properties that makes that safe to
+  // send on every editor open.
+  const snapshot = (state: ProjectState, params: Record<string, number>): ProjectState =>
+    apply(state, { type: 'plugin/setParams', instanceId: 'fx', params })
+
+  function withPlugin(): ProjectState {
+    return apply(stateWithTracks(), { type: 'plugin/add', instance: instance('fx', 't1', VST) })
+  }
+
+  test('a snapshot that agrees with the document is a no-op', () => {
+    const state = withPlugin()
+    // Identity, not just equality: the store drops ops whose reducer
+    // returns the same state before they reach the undo stack or the wire,
+    // which is what makes announcing on every open free.
+    expect(snapshot(state, { gain: state.plugins.fx.params.gain })).toBe(state)
+  })
+
+  test('a snapshot correcting a stale default lands', () => {
+    const state = withPlugin()
+    expect(state.plugins.fx.params.gain).toBe(0) // never touched: the default
+    const corrected = snapshot(state, { gain: -12 })
+    expect(corrected.plugins.fx.params.gain).toBe(-12)
+    // ...and re-announcing the same truth is then free again.
+    expect(snapshot(corrected, { gain: -12 })).toBe(corrected)
+  })
+
+  test('keys the descriptor does not know are dropped, not stored', () => {
+    // The native read-back walks the live plugin, whose parameter list can
+    // outrun the paramDefs snapshot taken when the plugin was added (a
+    // plugin update, or a build exposing more params). Unknown keys must
+    // not enter the document: peers without the plugin have no defs to
+    // clamp them with.
+    const state = snapshot(withPlugin(), { gain: 3, mysteryParam: 0.5 })
+    expect(state.plugins.fx.params.gain).toBe(3)
+    expect(state.plugins.fx.params.mysteryParam).toBeUndefined()
+  })
+
+  test('a snapshot is clamped by the descriptor, like any other param op', () => {
+    const state = snapshot(withPlugin(), { gain: 999 })
+    expect(state.plugins.fx.params.gain).toBe(30)
+  })
+
+  test('a snapshot inverts back to the values it replaced', () => {
+    const before = snapshot(withPlugin(), { gain: -12 })
+    const op = { type: 'plugin/setParams' as const, instanceId: 'fx', params: { gain: 6 } }
+    const after = apply(before, op)
+    const inverse = invert(before, op)
+    expect(inverse).not.toBeNull()
+    expect(apply(after, inverse!).plugins.fx.params.gain).toBe(-12)
+  })
+})
+
+suite('isNormalizedParam', () => {
+  const normalized: ParamDef = {
+    label: 'Threshold (dB)', // units live in the LABEL; the value is a fraction
+    min: 0,
+    max: 1,
+    default: 0.5,
+    unit: '',
+    digits: 2
+  }
+
+  test('an external 0..1 param is normalized', () => {
+    expect(isNormalizedParam(VST, normalized)).toBe(true)
+  })
+
+  test('builtins are never normalized — their params carry real units', () => {
+    const gate = builtinEffectDescriptor('eq3')
+    for (const def of Object.values(paramDefsOf(gate) ?? {})) {
+      expect(isNormalizedParam(gate, def)).toBe(false)
+    }
+  })
+
+  test('a builtin param that happens to span 0..1 is still not normalized', () => {
+    // Guards the discriminator against keying on range alone: a real
+    // 0..1 unitless builtin control (a mix amount) must keep its own
+    // readout rather than being relabelled as a percentage.
+    expect(isNormalizedParam(builtinEffectDescriptor('eq3'), normalized)).toBe(false)
+  })
+
+  test('an external param carrying genuine units is left alone', () => {
+    // VST.paramDefs.gain is -30..30 dB — not the shape externalParamDefs
+    // produces, so it must not be reinterpreted as a fraction.
+    expect(isNormalizedParam(VST, paramDefsOf(VST)!.gain)).toBe(false)
+    expect(isNormalizedParam(VST, { ...normalized, unit: 'dB' })).toBe(false)
+    expect(isNormalizedParam(VST, { ...normalized, max: 2 })).toBe(false)
   })
 })
 

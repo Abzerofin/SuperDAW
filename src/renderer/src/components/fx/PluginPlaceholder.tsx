@@ -1,7 +1,7 @@
 import type { PluginInstance } from '@core/model/types'
 import type { PluginRuntimeStatus } from '@core/plugins/descriptor'
 import { pluginSearchUrl } from '@core/plugins/descriptor'
-import { paramDefsOf } from '@core/plugins/builtin'
+import { isNormalizedParam, paramDefsOf } from '@core/plugins/builtin'
 import { projectStore } from '@/state/projectStore'
 import { useFxUi } from '@/state/fxUi'
 import { collab, useCollab } from '@/state/collab'
@@ -105,6 +105,7 @@ export function PluginPlaceholder({
               key={key}
               def={paramDef}
               value={instance.params[key] ?? paramDef.default}
+              percent={isNormalizedParam(d, paramDef)}
               onCommit={(v) =>
                 projectStore.dispatch({
                   type: 'plugin/setParam',

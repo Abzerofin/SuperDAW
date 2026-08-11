@@ -190,6 +190,34 @@ plugin's parameters (see "Parameter editing without the plugin" below).
   one-gesture-one-op edit. Read-only in three cases: no `paramDefs` snapshot
   (nothing trustworthy to draw), `proxy` (a rendered stand-in cannot answer
   to param changes), and when a peer has declined (below).
+- **Normalized params read as percentages.** External formats report every
+  parameter as a normalized 0..1 and own the mapping to real units, so
+  `externalParamDefs` keeps the units in the LABEL. Rendering the raw value
+  under that label gives "Threshold (dB)" above "0.50" — a number that looks
+  wrong rather than normalized, and a machine without the plugin cannot ask
+  it to format one. `isNormalizedParam` therefore drives a percentage
+  readout (and percentage typed entry) while the STORED value stays 0..1,
+  which is the plugin's contract. Decided at display time, not capture time,
+  so projects saved earlier read correctly too, and narrowed to the exact
+  shape `externalParamDefs` emits so a def with genuine units is untouched.
+- **Editor param snapshots — why the document knows the truth.** A plugin's
+  own GUI can change many parameters without emitting a `performEdit` for
+  each; loading a preset is the everyday case. Those edits reach the opaque
+  `stateBlob` and nothing else, so `instance.params` would keep reporting
+  factory defaults — and a collaborator without the plugin, who can ONLY
+  read the document, would see those defaults as if they were real. The
+  addon's `getEditorParams` (native/vst3host, beside `setEditorParam`) reads
+  the live `IEditController`, and main publishes it as a `plugin/setParams`
+  when an editor opens and again beside the chunk when it closes — captured
+  before teardown, so the two always describe the same instant. Announcing
+  is free when it changes nothing: the reducer returns the identical state
+  and `dispatch` drops the op before the undo stack or the wire. This is
+  also what makes a complete snapshot safe against the blob: the offline
+  host restores `stateBlob` and then applies `params` over it, so an
+  accurate snapshot is a no-op rather than a preset-clobbering overwrite —
+  which is precisely why params must never be eagerly filled with defaults.
+  KNOWN GAP: a preset loaded while a docked editor stays open is not seen
+  until that editor closes.
 - **Declining, scoped to non-owners.** Settings ▸ Collaboration →
   `acceptCollaboratorParamEdits` (default on) announces `acceptsParamEdits`
   through `PresenceData`; `collab.paramEditsPermitted()` reports it and the

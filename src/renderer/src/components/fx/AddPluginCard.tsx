@@ -6,7 +6,6 @@ import type { PluginDescriptor } from '@core/plugins/descriptor'
 import { BUILTIN_EFFECT_DESCRIPTORS, pluginDefaults } from '@core/plugins/builtin'
 import { newId } from '@core/model/ids'
 import { projectStore } from '@/state/projectStore'
-import { fxUi } from '@/state/fxUi'
 import {
   externalHostAvailable,
   externalParamDefs,
@@ -106,9 +105,10 @@ export function AddPluginCard({
       },
       ...wiring
     })
-    // New inserts start collapsed: no visualization canvas (or native VST3
-    // editor) spins up until the user opens the card.
-    fxUi.collapse(instanceId)
+    // A new insert opens EXPANDED — you added it to work on it, so its
+    // controls (and, for a VST3, its own editor) should be in front of you
+    // without a second click. Collapsing remains available per card; it
+    // just isn't the state you land in.
     setAnchor(null)
     setQuery('')
     // The new card lands at the END of the chain — bring it into view, or

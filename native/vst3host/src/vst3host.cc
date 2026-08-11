@@ -1087,6 +1087,43 @@ Napi::Object MoveEditor(const Napi::CallbackInfo& info) {
   return result;
 }
 
+// getEditorParams(editor) -> { error?, params: { "<id>": normalized } }
+//
+// The plugin's CURRENT values, read straight off the live controller —
+// the counterpart to setEditorParam. Needed because a plugin's own GUI can
+// change many parameters without emitting a performEdit for each (loading
+// a preset is the common case), so the document's param map would
+// otherwise never learn the true values. The renderer publishes this as a
+// plugin/setParams snapshot so collaborators WITHOUT the plugin see what
+// it is actually set to instead of factory defaults.
+//
+// Same filter as Parameters(): read-only meters are not user settings, and
+// bypass is excluded there too (the insert chain owns bypass), so the keys
+// here line up with the descriptor's paramDefs.
+Napi::Object GetEditorParams(const Napi::CallbackInfo& info) {
+  Napi::Env env = info.Env();
+  if (info.Length() < 1 || !info[0].IsNumber()) return Fail(env, "expected (editor)");
+  auto found = gEditors.find(info[0].As<Napi::Number>().Int32Value());
+  if (found == gEditors.end()) return Fail(env, "unknown editor");
+  IEditController* controller = found->second->controller;
+  if (!controller) return Fail(env, "editor has no controller");
+
+  Napi::Object params = Napi::Object::New(env);
+  const int32 count = controller->getParameterCount();
+  for (int32 i = 0; i < count; ++i) {
+    ParameterInfo pinfo{};
+    if (controller->getParameterInfo(i, pinfo) != kResultOk) continue;
+    if (pinfo.flags & ParameterInfo::kIsReadOnly) continue;
+    if (pinfo.flags & ParameterInfo::kIsBypass) continue;
+    params.Set(std::to_string(pinfo.id),
+               Napi::Number::New(env, controller->getParamNormalized(pinfo.id)));
+  }
+
+  Napi::Object result = Napi::Object::New(env);
+  result.Set("params", params);
+  return result;
+}
+
 // setEditorParam(editor, paramId, normalized) — our sliders → the GUI.
 Napi::Object SetEditorParam(const Napi::CallbackInfo& info) {
   Napi::Env env = info.Env();
@@ -1145,6 +1182,7 @@ Napi::Object Init(Napi::Env env, Napi::Object exports) {
   exports.Set("editorResized", Napi::Function::New(env, EditorResized));
   exports.Set("moveEditor", Napi::Function::New(env, MoveEditor));
   exports.Set("setEditorParam", Napi::Function::New(env, SetEditorParam));
+  exports.Set("getEditorParams", Napi::Function::New(env, GetEditorParams));
   exports.Set("processInstance", Napi::Function::New(env, ProcessInstance));
   exports.Set("closeInstance", Napi::Function::New(env, CloseInstance));
   return exports;

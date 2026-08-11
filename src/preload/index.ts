@@ -248,6 +248,13 @@ const api = {
    * Events from open plugin editors: knob gestures
    * (kind begin/edit/end, paramId+value normalized 0..1) and the final
    * state chunk when an editor window closes (kind 'state').
+   *
+   * `params` is the plugin's full set of current normalized values,
+   * captured when an editor opens (kind 'params') and again beside the
+   * chunk on close. It exists because a plugin's own GUI can change many
+   * parameters without one gesture event each — loading a preset being the
+   * everyday case — which would otherwise leave the document, and every
+   * collaborator reading it, showing factory defaults.
    */
   onVst3EditorEvent: (
     handler: (event: {
@@ -256,6 +263,7 @@ const api = {
       paramId?: number
       value?: number
       stateBlob?: string
+      params?: Record<string, number>
     }) => void
   ): (() => void) => {
     const listener = (_e: unknown, payload: Parameters<typeof handler>[0]): void =>

@@ -50,6 +50,21 @@ export function wireEditorEvents(): void {
   }
 
   api.onVst3EditorEvent((event) => {
+    // The plugin's own account of where its knobs are. Idempotent by
+    // construction: plugin/setParams leaves state untouched when nothing
+    // differs, and dispatch drops no-ops before they reach the undo stack
+    // or the wire — so a snapshot that already agrees is free, and only a
+    // correcting one becomes an operation.
+    if (event.params) {
+      projectStore.dispatch({
+        type: 'plugin/setParams',
+        instanceId: event.instanceId,
+        params: event.params
+      })
+    }
+
+    if (event.kind === 'params') return
+
     if (event.kind === 'state') {
       if (typeof event.stateBlob === 'string') {
         projectStore.dispatch({

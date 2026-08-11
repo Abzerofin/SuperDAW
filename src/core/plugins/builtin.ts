@@ -55,6 +55,25 @@ export function paramDefsOf(
   return descriptor.paramDefs ?? null
 }
 
+/**
+ * Is this param a plugin-owned NORMALIZED 0..1 value rather than a real
+ * unit? External formats report every parameter normalized — the plugin
+ * owns the mapping to dB/Hz/ms and is the only thing that can format it —
+ * so `externalParamDefs` keeps the units in the LABEL while the number
+ * itself is a fraction. Rendering that raw gives "Threshold (dB)" above
+ * "0.50", which reads as a wrong value rather than a normalized one. A
+ * machine without the plugin cannot ask it to format, so a percentage is
+ * the only honest presentation.
+ *
+ * Derived at display time rather than stored, so projects saved before
+ * this existed read correctly too. Guarded on the exact shape
+ * `externalParamDefs` produces, so a def carrying genuine units is left
+ * alone.
+ */
+export function isNormalizedParam(descriptor: PluginDescriptor, def: ParamDef): boolean {
+  return descriptor.format !== 'builtin' && def.min === 0 && def.max === 1 && def.unit === ''
+}
+
 export function pluginDefaults(descriptor: PluginDescriptor): Record<string, number> {
   const defs = paramDefsOf(descriptor)
   if (!defs) return {}

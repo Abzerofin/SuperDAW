@@ -2,7 +2,7 @@ import { useEffect, useRef, useState } from 'react'
 import type { PluginInstance, PluginInstanceId, Track } from '@core/model/types'
 import { pluginsOfTrack, routesOfTrack } from '@core/model/types'
 import { synthDefaults } from '@core/model/effects'
-import { builtinTypeOf, paramDefsOf, pluginDefaults } from '@core/plugins/builtin'
+import { builtinTypeOf, isNormalizedParam, paramDefsOf, pluginDefaults } from '@core/plugins/builtin'
 import { pluginRegistry } from '@audio/pluginRegistry'
 import { projectStore } from '@/state/projectStore'
 import { useProjectState } from '@/state/hooks'
@@ -52,6 +52,31 @@ function TrackEffects({ track }: { track: Track }): React.JSX.Element {
   const dock = useVst3Dock()
   const fxCollapse = useFxUi()
   const fxFloat = useFxFloatUi()
+
+  // The rack only scrolls horizontally, but a plain mouse wheel reports
+  // vertical delta — whether the browser remaps that to horizontal scroll
+  // on its own is inconsistent once cards vary the row's height, so this
+  // does it explicitly. Skipped while the pointer is over something with
+  // its OWN vertical scroll room left (e.g. a placeholder's long param
+  // list) so that still scrolls normally instead of being hijacked.
+  useEffect(() => {
+    const el = chainRef.current
+    if (!el) return
+    const onWheel = (e: WheelEvent): void => {
+      if (e.ctrlKey || e.metaKey || e.deltaY === 0) return
+      const ownScroll = (e.target as HTMLElement).closest('.fx-placeholder-params')
+      if (ownScroll) {
+        const atTop = ownScroll.scrollTop <= 0
+        const atBottom = ownScroll.scrollTop + ownScroll.clientHeight >= ownScroll.scrollHeight
+        if ((e.deltaY < 0 && !atTop) || (e.deltaY > 0 && !atBottom)) return
+      }
+      if (el.scrollWidth <= el.clientWidth) return
+      e.preventDefault()
+      el.scrollLeft += e.deltaY
+    }
+    el.addEventListener('wheel', onWheel, { passive: false })
+    return () => el.removeEventListener('wheel', onWheel)
+  }, [])
   // Rack = the classic ordered chain; Graph = node routing. Tracks that
   // already have routing edges open on their graph.
   const [view, setView] = useState<'rack' | 'graph'>(() =>
@@ -391,6 +416,7 @@ export function PluginSection({
           key={key}
           def={paramDef}
           value={instance.params[key] ?? paramDef.default}
+          percent={isNormalizedParam(instance.descriptor, paramDef)}
           // No live preview for out-of-process plugins: there are no nodes
           // in the graph to push a value into.
           onPreview={
