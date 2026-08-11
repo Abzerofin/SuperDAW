@@ -95,7 +95,8 @@ export function useGlobalShortcuts(): void {
           return
         case 'transport.record':
           e.preventDefault()
-          void recording.toggle()
+          // Key auto-repeat must not toggle a take on and off.
+          if (!e.repeat) void recording.toggle()
           return
         case 'project.save':
           e.preventDefault()

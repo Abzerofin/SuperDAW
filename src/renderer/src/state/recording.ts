@@ -6,6 +6,7 @@ import { Recorder } from '@audio/recorder'
 import { buildInputTap, type InputTap } from '@audio/input'
 import { encodeWavPcm16Async } from '@audio/wav'
 import { ticksPerSecond } from '@audio/scheduling'
+import { applyMidiCaptureEvent, midiEventSec, type MidiNoteSink } from '@audio/midiCapture'
 import { projectStore } from './projectStore'
 import { transport } from './transport'
 import { audioEngine, assetStore } from './audioInstance'
@@ -38,20 +39,9 @@ interface TrackCapture {
   deviceKey: string
 }
 
-/** One captured note; times on the AudioContext clock, endSec null = held. */
-interface CapturedNote {
-  pitch: number
-  velocity: number
-  startSec: number
-  endSec: number | null
-}
-
-/** One armed MIDI track's growing take. */
-interface MidiCapture {
+/** One armed MIDI track's growing take (note math in audio/midiCapture). */
+interface MidiCapture extends MidiNoteSink {
   trackId: TrackId
-  /** Held keys → their open note (retrigger closes and replaces). */
-  active: Map<number, CapturedNote>
-  closed: CapturedNote[]
 }
 
 class RecordingStore {
@@ -59,6 +49,9 @@ class RecordingStore {
   recording = false
   /** The count-in is clicking; capture starts when it ends. */
   countingIn = false
+  /** start() is between its guard and its outcome (awaiting resume /
+   *  permission prompts / getUserMedia) — blocks re-entry synchronously. */
+  private starting = false
   recordStartTicks = 0
   /** Context time paired with recordStartTicks — the roll's clock anchor. */
   private rollAnchorSec = 0
@@ -112,7 +105,10 @@ class RecordingStore {
 
   /** Start capture. `streamOverride` lets tests inject a synthetic stream. */
   async start(streamOverride?: MediaStream): Promise<void> {
-    if (this.recording || this.countingIn) return
+    // `starting` closes the window the awaits below leave open: a held or
+    // double-pressed record key must not interleave a second run (which
+    // would tear down the shared captures or duplicate every take).
+    if (this.starting || this.recording || this.countingIn) return
     const state = projectStore.state
     const armed = this.armedIds().filter((id) => {
       const track = state.tracks[id]
@@ -127,6 +123,7 @@ class RecordingStore {
       this.fail('Arm a track first (● on the track header)')
       return
     }
+    this.starting = true
     try {
       const ctx = audioEngine.ensureContext()
       if (ctx.state === 'suspended') await ctx.resume()
@@ -174,6 +171,8 @@ class RecordingStore {
           ? 'Microphone access was denied'
           : `Could not start recording: ${error instanceof Error ? error.message : String(error)}`
       )
+    } finally {
+      this.starting = false
     }
   }
 
@@ -209,10 +208,9 @@ class RecordingStore {
 
   /**
    * One routed note event from state/midiInputs (hardware or inject()).
-   * Ignored unless the roll is on and the track is armed for MIDI. A
-   * note-on over a held pitch closes it (retrigger); a note-off with no
-   * open note is an orphan (key was already down at record start) and is
-   * dropped. `timeStampMs` is on the performance timeline, like
+   * Ignored unless the roll is on and the track is armed for MIDI; note
+   * bookkeeping (retrigger-close, orphan-drop, end clamping) lives in
+   * audio/midiCapture. `timeStampMs` is on the performance timeline, like
    * MIDIMessageEvent.timeStamp.
    */
   captureMidiEvent(
@@ -223,22 +221,24 @@ class RecordingStore {
     timeStampMs: number
   ): void {
     if (!this.recording) return
-    const capture = this.midiCaptures.get(trackId)
-    if (!capture) return
-    const eventSec = timeStampMs / 1000 + this.midiClockOffsetSec
-    const open = capture.active.get(pitch)
-    if (kind === 'on') {
-      if (open) {
-        open.endSec = Math.max(open.startSec, eventSec)
-        capture.closed.push(open)
-      }
-      capture.active.set(pitch, { pitch, velocity, startSec: eventSec, endSec: null })
-    } else {
-      if (!open) return
-      open.endSec = Math.max(open.startSec, eventSec)
-      capture.closed.push(open)
-      capture.active.delete(pitch)
+    let capture = this.midiCaptures.get(trackId)
+    if (!capture) {
+      // Punch-in: a MIDI track armed after the roll began gets its sink on
+      // its first event — the clock anchor already stands, so late sinks
+      // land on the same timeline as the ones built at beginRoll.
+      const track = projectStore.state.tracks[trackId]
+      if (!this.armedTracks.has(trackId) || track?.kind !== 'midi' || track.frozenAssetId !== null)
+        return
+      capture = { trackId, active: new Map(), closed: [] }
+      this.midiCaptures.set(trackId, capture)
     }
+    applyMidiCaptureEvent(
+      capture,
+      kind,
+      pitch,
+      velocity,
+      midiEventSec(timeStampMs, this.midiClockOffsetSec)
+    )
   }
 
   /** Release every capture rig (taps + pooled streams); keeps no takes. */
@@ -288,17 +288,18 @@ class RecordingStore {
    * Commit captured MIDI: ONE clip/create per take, ONE clip/createMany
    * when several tracks stopped together, nothing for empty takes — the
    * op itself is built by the pure core helper (see core/ops/midiTake).
-   * Events land with the SAME latency compensation as audio takes: the
-   * performer played along with what they HEARD, which ran late by the
-   * output path.
+   * Compensation is the OUTPUT path only: the performer played along with
+   * what they heard, which ran late by that much. The manual record trim
+   * does NOT apply here — it calibrates the audio INPUT path (mic → OS
+   * buffers → worklet), while Web MIDI timestamps are driver-stamped and
+   * carry no such lag.
    */
   private finishMidiTakes(ctx: AudioContext, anchorTicks: number, anchorSec: number): void {
     const captures = [...this.midiCaptures.values()]
     this.midiCaptures.clear()
     if (captures.length === 0) return
     const stopSec = ctx.currentTime
-    const compensationSec =
-      audioEngine.outputLatencySec() + preferences.recordLatencyTrimMs / 1000
+    const compensationSec = audioEngine.outputLatencySec()
     const tps = ticksPerSecond(projectStore.state.tempo)
     const toTicks = (sec: number): number =>
       Math.round(anchorTicks + (sec - anchorSec - compensationSec) * tps)

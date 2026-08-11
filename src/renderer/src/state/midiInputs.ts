@@ -1,5 +1,6 @@
 import { useSyncExternalStore } from 'react'
 import type { TrackId } from '@core/model/types'
+import { parseMidiNoteMessage } from '@audio/midiCapture'
 import { audioEngine } from './audioInstance'
 import { projectStore } from './projectStore'
 import { recording } from './recording'
@@ -63,6 +64,11 @@ class MidiInputStore {
 
   private access: WebMidiAccess | null = null
   private ensurePromise: Promise<void> | null = null
+  /** Tracks that received each open note-on, keyed input:channel:pitch —
+   *  the matching note-off must land on exactly these even if arming or
+   *  selection moved while the key was held (a rerouted off would strand
+   *  the old track's live voice, and its capture, open forever). */
+  private openNoteRoutes = new Map<string, TrackId[]>()
 
   private version = 0
   private listeners = new Set<() => void>()
@@ -76,6 +82,9 @@ class MidiInputStore {
     const stored = await appStorageGet<{ selectedInputId?: string | null }>(STORAGE_KEY)
     if (stored && typeof stored.selectedInputId === 'string') {
       this.selectedInputId = stored.selectedInputId
+      // Access may already be open (storage can resolve after the first
+      // enumeration) — validate now instead of waiting for a hot-plug.
+      if (this.access) this.dropSelectionIfMissing()
       this.emit()
     }
   }
@@ -99,8 +108,8 @@ class MidiInputStore {
       .then((access) => {
         this.access = access
         this.status = 'ready'
-        access.onstatechange = () => this.refreshPorts(true)
-        this.refreshPorts(false)
+        access.onstatechange = () => this.refreshPorts()
+        this.refreshPorts()
       })
       .catch(() => {
         this.status = 'denied'
@@ -113,7 +122,7 @@ class MidiInputStore {
   }
 
   /** Re-wire message handlers and rebuild the device list. */
-  private refreshPorts(handleLoss: boolean): void {
+  private refreshPorts(): void {
     const access = this.access
     if (!access) return
     const inputs: MidiInputInfo[] = []
@@ -126,16 +135,21 @@ class MidiInputStore {
       }
     }
     this.inputs = inputs
-    if (
-      handleLoss &&
-      this.selectedInputId !== null &&
-      !inputs.some((d) => d.id === this.selectedInputId)
-    ) {
-      this.selectedInputId = null
-      this.persist()
-      statusNotice.show('Selected MIDI input was disconnected — listening to all devices.')
-    }
+    // Loss handling runs on EVERY enumeration, first included: a selection
+    // persisted from another session may simply not be plugged in today,
+    // and keeping it would silently filter ALL input while the Settings
+    // select falls back to showing "All devices".
+    this.dropSelectionIfMissing()
     this.emit()
+  }
+
+  /** Selected device absent → revert to omni (the audioDevices precedent). */
+  private dropSelectionIfMissing(): void {
+    if (this.selectedInputId === null) return
+    if (this.inputs.some((d) => d.id === this.selectedInputId)) return
+    this.selectedInputId = null
+    this.persist()
+    statusNotice.show('Selected MIDI input is not connected — listening to all devices.')
   }
 
   setSelected(id: string | null): void {
@@ -155,23 +169,28 @@ class MidiInputStore {
   }
 
   /**
-   * Parse + route one message. Note-on (0x9n, velocity > 0) and note-off
-   * (0x8n, or 0x9n with velocity 0) only; clock/active-sensing (1-byte
-   * realtime), CC, aftertouch and pitch-bend are ignored for now.
+   * Route one parsed message (note-on/note-off only — the parser in
+   * audio/midiCapture drops everything else). A note-on remembers which
+   * tracks it reached; the matching note-off replays to exactly that set,
+   * so a voice opened on one track always gets its off there — legato
+   * survives switching the armed/selected target mid-hold.
    */
   private handleMessage(inputId: string, data: Uint8Array, timeStampMs: number): void {
-    if (data.length < 3) return
-    const kind = data[0] & 0xf0
-    const channel = (data[0] & 0x0f) + 1
-    const pitch = data[1] & 0x7f
-    const velocity = data[2] & 0x7f
-    const isOn = kind === 0x90 && velocity > 0
-    const isOff = kind === 0x80 || (kind === 0x90 && velocity === 0)
-    if (!isOn && !isOff) return
+    const message = parseMidiNoteMessage(data)
+    if (!message) return
+    const { kind, channel, pitch, velocity } = message
+    const routeKey = `${inputId}:${channel}:${pitch}`
+    const remembered = kind === 'off' ? this.openNoteRoutes.get(routeKey) : undefined
+    // No memory for an off = the key was down before we listened; current
+    // targets shrug off an unmatched off (engine and capture tolerate it).
+    const targets =
+      remembered ??
+      this.targetTracks().filter((id) => this.trackAccepts(id, inputId, channel))
+    if (kind === 'on') this.openNoteRoutes.set(routeKey, targets)
+    else this.openNoteRoutes.delete(routeKey)
 
-    for (const trackId of this.targetTracks()) {
-      if (!this.trackAccepts(trackId, inputId, channel)) continue
-      if (isOn) {
+    for (const trackId of targets) {
+      if (kind === 'on') {
         audioEngine.liveNoteOn(trackId, pitch, velocity / 127)
         recording.captureMidiEvent(trackId, 'on', pitch, velocity, timeStampMs)
       } else {
