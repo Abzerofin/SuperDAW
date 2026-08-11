@@ -117,6 +117,30 @@ and asset store through narrow structural interfaces.
   lookahead loop because it is unbounded.
 - **Mute/solo are gain-level**, not schedule-level, so toggling mid-playback
   is seamless (smoothed with `setTargetAtTime` to avoid clicks).
+- **Live instrument path (MIDI).** `liveNoteOn/liveNoteOff/liveAllNotesOff`
+  route OPEN-ENDED synth voices (same tone as scheduled playback — the
+  voice builders in `synth.ts` are shared; the live variant holds its
+  sustain until note-off releases it) into the track's chain, so inserts,
+  fader, pan and bus routing all apply. Live voices are independent of the
+  transport, capped at 32 with oldest-voice stealing, and die with their
+  track or when its synth is switched off. Web MIDI enters through
+  `renderer/state/midiInputs.ts` — feature-detected and lazy (plain
+  browsers without the API boot untouched), omni-input default, per-track
+  device/channel filters riding `trackInputs`, and an `inject()` method
+  that runs the exact hardware code path so everything is testable without
+  a keyboard. Events go to armed MIDI tracks, else the selected MIDI
+  track. Electron grants the `midi` permission in `main/index.ts` (sysex
+  denied); the browser build relies on Chrome's own prompt.
+- **MIDI recording.** Armed MIDI tracks (the same ● as audio) capture note
+  events during the roll — Web MIDI timestamps mapped onto the audio
+  clock, placed against what the performer HEARD via output-latency
+  compensation — and commit on stop as ONE `clip/create` per take
+  (`clip/createMany` when several tracks stop together), built by the pure
+  helper `core/ops/midiTake.buildMidiTakeOp`. No new op type, no asset:
+  MIDI notes ARE document data (`assetId: null`). Held notes close at the
+  take end, clips round up to whole bars (the .mid-import rule), empty
+  takes dispatch nothing, and one undo removes the whole take. Record has
+  a rebindable shortcut (`transport.record`, default R).
 - **Assets** (`assets.ts`) live outside project state; the document
   references them by id only. This split is what later allows instant state
   sync while binaries transfer in the background. Waveform peaks are
@@ -144,8 +168,9 @@ descriptors against its own local `PluginRegistry`, so the same project can
 be fully editable on one collaborator's machine while showing placeholders
 on another's — with zero document divergence.
 
-- **Runtime status** (`local | remote | proxy | missing`) is computed per
-  client, never stored. A missing plugin bypasses cleanly (engine and
+- **Runtime status** (`local | offline | remote | proxy | missing`) is
+  computed per client, never stored (`offline` = installed VST3 the main
+  process can host out-of-process). A missing plugin bypasses cleanly (engine and
   offline render both skip unresolved inserts) and its instance stays fully
   intact — params, rank, opaque `stateBlob` — so it comes alive the moment
   a matching provider registers (the registry is observable; the engine
@@ -153,7 +178,7 @@ on another's — with zero document divergence.
   (collaborator streams the processed audio) and `proxy` (rendered stand-in
   plays) are reserved states for the collaboration-streaming milestone; the
   state machine, UI and document model already accommodate them.
-- **Builtins are plugins.** The five insert effects register as providers
+- **Builtins are plugins.** The eleven insert effects register as providers
   (`format: 'builtin'`, uid `superdaw.<type>`) and flow through the same
   descriptor → registry → provider pipeline external formats (VST2/VST3/
   CLAP/AU) will use. Their param defs stay in `core/model/effects.ts`;
@@ -213,6 +238,26 @@ identical audio** through normal asset transfer. Until a track is frozen,
 an external insert shows the same placeholder any unavailable plugin does.
 The renderer never learns a plugin's filesystem path — it sends a
 descriptor uid and main resolves it against its own scan.
+
+**Exports never lie about it.** The mixdown path renders through Web Audio
+only, so unfrozen external inserts are bypassed in a bounce — and the
+export's one-shot status notice now says so, naming the affected tracks
+(with freeze advice where freeze genuinely bakes them). No popup, no
+silent dishonest bounce.
+
+**Scanning is crash-safe by presumption of guilt.** Bundle inspection runs
+in a sacrificial `utilityProcess` (hang timeout + respawn), results are
+cached against an mtime+size stamp of the bundle's binary, and each bundle
+is marked under-inspection IN PERSISTED STATE before its DLL loads — so a
+plugin that takes the app down mid-scan is already quarantined at the next
+launch instead of re-crashing the scanner forever. Quarantine clears via
+Refresh Plugins. Plugin GUI state travels as an opaque `stateBlob`
+envelope whose single writer/reader is `src/main/vst3State.ts`
+(unit-tested against each other; malformed blobs from a hostile document
+are ignored, never trusted). And loaded documents get the same hygiene as
+routes: `format.ts` sanitizes every plugin instance field-by-field
+(descriptor shape, params, blob, rank, track existence) so a doctored
+`.sdaw` cannot smuggle malformed plugin state past the reducer.
 
 ## File Bay & persistence
 
@@ -436,6 +481,20 @@ npm run build      # production build to out/
 Node is a portable install at
 `%LOCALAPPDATA%\nodejs-portable\node-v24.19.0-win-x64` (not on PATH by
 default).
+
+Dev builds expose `window.__superdaw` (stores, engine, transport, a
+synthetic-MIDI `midi.inject`, and the stress suite). The stress surface
+(`__superdaw.stressTest`) covers generation, frame/playback probes,
+undo/redo, dispatch throughput, routing graphs, folder nesting, automation
+density, dense piano-roll, structural storms, remote at-least-once
+double-delivery convergence, op-log folding, and persistence round-trips;
+`runAll()` returns a machine-readable aggregate, and results live in
+STRESS_TEST_RESULTS.md. A reduced-scale, store-only smoke of the same
+scenarios runs headless in CI (`src/core/__tests__/stressSmoke.test.ts`)
+so the convergence/fold/undo invariants are pinned forever. Known scaling
+guidance from the 400-track run: per-op engine-rewire cost grows
+super-linearly, so bulk import/template paths should batch rewires before
+anyone raises the comfortable ~100-200-track ceiling.
 
 ## Milestone history / roadmap
 
@@ -669,12 +728,49 @@ default).
     recovery docs, newest-parseable wins) and `.sdaw.bak` on overwrite.
     UI scale preference (75–150 %).
 
-Roadmap beyond: VST3 hosting (native module; first consumer of the
-provider/`stateBlob` contracts), collaborator audio streaming + proxy
-renders for remote/missing plugins, autotune/pitch correction (dedicated AudioWorklet DSP
-milestone: pitch detection + PSOLA resynthesis),
-per-strip metering, packaging polish
-(icon, signing, auto-update), multi-clip/multi-note selection, loop/cycle
-region, master-bus effects, track height adjustment, count-in/punch
-recording, input monitoring, relay deployment (TLS, public host) + relay
-accounts/persistence per docs/NETWORKING.md §15.
+23. ✅ **MIDI input** — live play + record. Web MIDI seam
+    (`state/midiInputs.ts`: lazy, feature-detected, omni default,
+    per-track device/channel filters, `inject()` test seam), Electron
+    `midi` permission handlers, open-ended live synth voices through the
+    engine's `liveNoteOn/liveNoteOff` API (32-voice cap, oldest-steal),
+    MIDI track arming + punch-in, takes committed as ONE `clip/create`
+    per track via the pure `core/ops/midiTake.buildMidiTakeOp` (no new op
+    type, no asset), rebindable record shortcut (R), MIDI input selector
+    in Settings ▸ Audio. Verified end-to-end hardware-free via synthetic
+    injection.
+
+24. ✅ **Plugin hardening** — load-time plugin sanitization in `format.ts`
+    (descriptor shape via shared `isPluginDescriptor`, reducer-identical
+    param clamping, blob/rank/track hygiene — routes-grade validation for
+    plugins), `stateBlob` envelope contract extracted to
+    `main/vst3State.ts` with writer↔reader tests, crash-safe presume-
+    guilty scan quarantine (persisted before each bundle loads), honest
+    export notices naming tracks whose VST3 inserts were bypassed, docked-
+    editor retry.
+
+25. ✅ **Stress coverage** — scenarios for routing DAGs, folder nesting,
+    automation density, dense piano-roll, structural storms, remote
+    at-least-once double-delivery convergence, op-log folding, and
+    persistence at scale; real measurements in STRESS_TEST_RESULTS.md
+    (2026-08) including a 401-track run; headless CI smoke
+    (`stressSmoke.test.ts`) pinning the correctness invariants; fabricated
+    metrics removed.
+
+26. 📐 **Native low-latency backend — designed, not built**:
+    docs/NATIVE_AUDIO_BACKEND.md (IAudioBackend seam, miniaudio/WASAPI
+    route with ASIO rejected on GPL grounds, utilityProcess placement,
+    five shippable phases starting with zero-native seam extraction and a
+    loopback latency-calibration feature that ships on Web Audio first).
+
+Roadmap beyond: loopback latency calibration then the native backend
+phases (docs/NATIVE_AUDIO_BACKEND.md), collaborator audio streaming +
+proxy renders for remote/missing plugins, live VST3-in-callback + PDC
+(door opened by the backend design), autotune/pitch correction (dedicated
+AudioWorklet DSP milestone: pitch detection + PSOLA resynthesis),
+per-strip metering + live LUFS on the master, sustain-pedal (CC64) and
+MIDI activity indicators, engine rewire batching for bulk import/template
+paths (the 400-track ceiling, STRESS_TEST_RESULTS.md), mid-take tempo-
+change/loop-wrap capture mapping, packaging polish (icon, signing,
+auto-update), master-bus effects, track height adjustment, relay
+deployment (TLS, public host) + relay accounts/persistence per
+docs/NETWORKING.md §15.
