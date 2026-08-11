@@ -165,8 +165,9 @@ ticks, so a tempo change rescales where trimmed audio starts in its source.
 a `PluginInstance` whose `PluginDescriptor` (format/uid/vendor/name/version
 — never a filesystem path) identifies the plugin. Each client resolves
 descriptors against its own local `PluginRegistry`, so the same project can
-be fully editable on one collaborator's machine while showing placeholders
-on another's — with zero document divergence.
+run a plugin on one collaborator's machine while showing a placeholder on
+another's — with zero document divergence. Placeholders still expose the
+plugin's parameters (see "Parameter editing without the plugin" below).
 
 - **Runtime status** (`local | offline | remote | proxy | missing`) is
   computed per client, never stored (`offline` = installed VST3 the main
@@ -178,6 +179,28 @@ on another's — with zero document divergence.
   (collaborator streams the processed audio) and `proxy` (rendered stand-in
   plays) are reserved states for the collaboration-streaming milestone; the
   state machine, UI and document model already accommodate them.
+- **Parameter editing without the plugin.** Because the reducer clamps
+  `plugin/setParam` against the descriptor's `paramDefs` alone — never
+  against local availability — a client WITHOUT the plugin computes exactly
+  the state a client with it computes. `PluginPlaceholder` therefore renders
+  real param sliders from those defs; the op syncs like any other, and the
+  engines that can run the plugin push the value into their live nodes (and
+  into an open VST3 editor via `vst3:set-editor-param`). No local preview —
+  there are no nodes here — so a drag commits on release like any other
+  one-gesture-one-op edit. Read-only in three cases: no `paramDefs` snapshot
+  (nothing trustworthy to draw), `proxy` (a rendered stand-in cannot answer
+  to param changes), and when a peer has declined (below).
+- **Declining, scoped to non-owners.** Settings ▸ Collaboration →
+  `acceptCollaboratorParamEdits` (default on) announces `acceptsParamEdits`
+  through `PresenceData`; `collab.paramEditsPermitted()` reports it and the
+  placeholder withdraws its controls. This can only ever affect people who
+  do NOT have the plugin, because anyone who does gets `PluginSection` and
+  never reaches the placeholder — their own copy, their own licence, their
+  own full controls. Advisory by construction: the field is additive
+  (silence reads as accepting, so mixed-version sessions keep working) and
+  nothing is enforced in the reducer, which would break convergence. Plugin
+  EULAs vary on whether a non-owner may drive a plugin at all; the launch
+  acknowledgement and PLUGIN_LICENSE_TERMS.md put that on the user.
 - **Builtins are plugins.** The eleven insert effects register as providers
   (`format: 'builtin'`, uid `superdaw.<type>`) and flow through the same
   descriptor → registry → provider pipeline external formats (VST2/VST3/

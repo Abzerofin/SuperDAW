@@ -92,3 +92,7 @@ GNU General Public License v3.0 or later — see [LICENSE](LICENSE).
 
 Music you make with SuperDAW is yours. Copyleft covers this program's own
 source code, not the projects, presets or recordings you create with it.
+
+### Plugin Licensing
+
+When using third-party plugins (especially in collaborative sessions), you are responsible for ensuring compliance with each plugin's license terms. See [PLUGIN_LICENSE_TERMS.md](PLUGIN_LICENSE_TERMS.md) for details.

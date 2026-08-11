@@ -1,3 +1,5 @@
+import { LegalGate } from './components/LegalGate'
+import { useLegalGate } from './state/legalGate'
 import { TransportBar } from './components/TransportBar'
 import { TimelineView } from './components/timeline/TimelineView'
 import { Dock } from './components/Dock'
@@ -18,6 +20,7 @@ import { panels } from './state/panels'
 
 export default function App(): React.JSX.Element {
   const shell = useAppShell()
+  const legal = useLegalGate()
   useGlobalShortcuts()
   // Middle button: hold-drag pans any [data-pan] panel, plain click pings.
   useEffect(() => installMiddleMouse(), [])
@@ -29,6 +32,10 @@ export default function App(): React.JSX.Element {
       panels.closePanel('activity')
     }
   }, [shell.view])
+
+  if (!legal.accepted) {
+    return <LegalGate />
+  }
 
   if (shell.view === 'home') {
     return (

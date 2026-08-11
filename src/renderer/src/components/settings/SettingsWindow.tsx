@@ -117,6 +117,32 @@ function CollaborationPane(): React.JSX.Element {
         </p>
       </div>
       <div className="settings-field">
+        <label htmlFor="settings-collab-param-edits">Your plugins&apos; parameters</label>
+        <select
+          id="settings-collab-param-edits"
+          value={preferences.acceptCollaboratorParamEdits ? 'accept' : 'decline'}
+          onChange={(e) => {
+            preferences.set('acceptCollaboratorParamEdits', e.target.value === 'accept')
+            // Presence is how the session learns; peers withdraw the
+            // controls as soon as this lands.
+            collab.announceParamPolicy()
+          }}
+        >
+          <option value="accept">
+            Collaborators without the plugin can adjust its parameters
+          </option>
+          <option value="decline">Only people who have the plugin can adjust it</option>
+        </select>
+        <p className="settings-dim">
+          Parameter values are ordinary project data, so a collaborator who does not have a
+          plugin installed can still move its controls — the sound changes on the machines that
+          run it. Set this to the second option if your plugin licences do not permit that.
+          Anyone who <em>has</em> the plugin is never restricted by this: they run their own copy
+          under their own licence and get its full controls either way.
+          {inSession && ' Takes effect for everyone in this session immediately.'}
+        </p>
+      </div>
+      <div className="settings-field">
         <label htmlFor="settings-relay-url">Relay server</label>
         <input
           id="settings-relay-url"

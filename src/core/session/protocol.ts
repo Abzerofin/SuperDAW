@@ -67,6 +67,20 @@ export interface PresenceData {
     readonly action: 'down' | 'up'
     readonly velocity: number
   }
+  /**
+   * Whether this peer accepts parameter values for plugins it has
+   * installed from collaborators who do NOT have that plugin (see
+   * Settings ▸ Collaboration). Advisory: it withdraws the placeholder's
+   * controls on peers that lack the plugin, so nobody is offered a knob
+   * whose owner has declined it. Collaborators who DO have the plugin are
+   * untouched — they drive their own copy through the ordinary insert
+   * controls and never see the placeholder this governs.
+   *
+   * Additive like `yFrac` and `padHit`: absent from older peers, and a
+   * peer that never announces one is read as accepting (today's
+   * behaviour), so a mixed-version session keeps working.
+   */
+  readonly acceptsParamEdits?: boolean
 }
 
 export type ClientToHost =

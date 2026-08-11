@@ -24,6 +24,13 @@ interface Preferences {
   middleClickPing: boolean
   /** Fetch collaborators' assets automatically; off = ask first. */
   autoDownloadAssets: boolean
+  /**
+   * Let collaborators who do NOT have a plugin installed adjust its
+   * parameters. Collaborators who DO have it are never affected — they
+   * hold their own licence and drive their own copy through the ordinary
+   * insert controls, not the placeholder this gates.
+   */
+  acceptCollaboratorParamEdits: boolean
   /** Stretch audio clips to follow BPM changes: ask / always / never. */
   tempoConform: TempoConformChoice
   /** Metronome bars clicked before recording starts rolling (0 = off). */
@@ -56,6 +63,7 @@ const UI_SCALE_MAX = 1.5
 const DEFAULTS: Preferences = {
   middleClickPing: true,
   autoDownloadAssets: false,
+  acceptCollaboratorParamEdits: true,
   tempoConform: 'ask',
   countInBars: 1,
   recordLatencyTrimMs: 0,
@@ -87,6 +95,10 @@ class PreferencesStore {
         typeof stored.autoDownloadAssets === 'boolean'
           ? stored.autoDownloadAssets
           : DEFAULTS.autoDownloadAssets,
+      acceptCollaboratorParamEdits:
+        typeof stored.acceptCollaboratorParamEdits === 'boolean'
+          ? stored.acceptCollaboratorParamEdits
+          : DEFAULTS.acceptCollaboratorParamEdits,
       tempoConform: ['ask', 'always', 'never'].includes(stored.tempoConform as string)
         ? (stored.tempoConform as TempoConformChoice)
         : DEFAULTS.tempoConform,
@@ -139,6 +151,10 @@ class PreferencesStore {
 
   get autoDownloadAssets(): boolean {
     return this.prefs.autoDownloadAssets
+  }
+
+  get acceptCollaboratorParamEdits(): boolean {
+    return this.prefs.acceptCollaboratorParamEdits
   }
 
   get tempoConform(): TempoConformChoice {

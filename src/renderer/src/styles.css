@@ -2100,6 +2100,14 @@ body.middle-panning * {
   font-style: italic;
 }
 
+/* A plugin missing here still gets its knobs: the values are ordinary
+   synced document data, applied by whichever machines run the plugin. */
+.fx-placeholder-params {
+  margin-top: 4px;
+  max-height: 180px;
+  overflow-y: auto;
+}
+
 /* A card whose plugin GUI is docked: sized by the native view. */
 .fx-card-expanded {
   width: auto;
@@ -3477,6 +3485,65 @@ body.middle-panning * {
   color: var(--text-dim);
   margin: 0;
   line-height: 1.5;
+}
+
+.legal-gate-backdrop {
+  position: fixed;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.75);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 100;
+}
+
+.legal-gate-window {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  width: 480px;
+  max-width: calc(100vw - 48px);
+  max-height: calc(100vh - 48px);
+  overflow-y: auto;
+  background: var(--bg-1);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  box-shadow: 0 16px 48px rgba(0, 0, 0, 0.5);
+  padding: 22px;
+}
+
+.legal-gate-window h2 {
+  font-size: 15px;
+  font-weight: 600;
+  margin: 0;
+}
+
+.legal-gate-list {
+  margin: 0;
+  padding-left: 18px;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.legal-gate-checkbox {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 12px;
+  color: var(--text);
+  cursor: pointer;
+  margin-top: 4px;
+}
+
+.legal-gate-continue {
+  align-self: flex-end;
+  padding: 6px 16px;
+}
+
+.legal-gate-continue:disabled {
+  opacity: 0.4;
+  cursor: not-allowed;
 }
 
 .settings-info {

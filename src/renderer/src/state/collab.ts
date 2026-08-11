@@ -250,21 +250,27 @@ class CollabStore {
           this.users = users
           this.rememberIdentities(users)
           this.requestMissingAssets(snapshot)
+          this.announceParamPolicy()
           this.emit()
         },
         onRosterChange: (users) => {
           this.users = users
           this.rememberIdentities(users)
+          this.announceParamPolicy()
           this.emit()
         },
         onUserJoined: (user) => {
           this.users = [...this.users.filter((u) => u.userId !== user.userId), user]
           this.rememberIdentities([user])
+          // Presence is transient: re-state the policy so the newcomer
+          // learns it instead of defaulting to "accepting".
+          this.announceParamPolicy()
           this.emit()
         },
         onUserLeft: (userId) => {
           this.users = this.users.filter((u) => u.userId !== userId)
           this.cursors.delete(userId)
+          this.paramEditsDeclinedBy.delete(userId)
           this.emit()
         },
         onPresence: (userId, data) => this.applyRemotePresence(userId, data),
@@ -382,6 +388,7 @@ class CollabStore {
     this.joinCode = null
     this.users = []
     this.cursors.clear()
+    this.paramEditsDeclinedBy.clear()
     this.assetProgress.clear()
     this.pendingDownloads.clear()
     this.clearDownloadState()
@@ -443,6 +450,40 @@ class CollabStore {
     this.padHitListener = listener
   }
 
+  /**
+   * Peers who have declined parameter values for plugins they own, from
+   * collaborators who do not own them (Settings ▸ Collaboration). Only
+   * peers that explicitly announce `false` land here; silence means
+   * accepting, so older builds behave exactly as they always have.
+   */
+  private paramEditsDeclinedBy = new Set<string>()
+
+  /**
+   * Tell the session whether this machine accepts such values. Sent on
+   * every roster change as well as on the setting itself, because
+   * presence is transient: someone who joins later has not seen the
+   * announcements that went out before they arrived.
+   */
+  announceParamPolicy(): void {
+    if (this.mode === 'off') return
+    this.sendPresence({ acceptsParamEdits: preferences.acceptCollaboratorParamEdits })
+  }
+
+  /**
+   * May this client offer parameter controls for a plugin it cannot run?
+   *
+   * Alone, yes — there is no one else's plugin to drive, and the values
+   * are ordinary document data. In a session, one participant declining
+   * withdraws the controls: a knob whose owner has said no should not be
+   * offered to someone who cannot run the plugin themselves. Anyone who
+   * HAS the plugin is unaffected — they get the real insert controls and
+   * never reach this path.
+   */
+  paramEditsPermitted(): boolean {
+    if (this.mode === 'off') return true
+    return this.paramEditsDeclinedBy.size === 0
+  }
+
   private sendPresence(data: PresenceData): void {
     this.active?.sendPresence(data)
   }
@@ -460,6 +501,10 @@ class CollabStore {
       if (this.seenPadHits.size > 1024) this.seenPadHits.clear()
       this.seenPadHits.add(data.padHit.hitId)
       this.padHitListener?.(userId, data.padHit)
+    }
+    if (data.acceptsParamEdits !== undefined) {
+      if (data.acceptsParamEdits) this.paramEditsDeclinedBy.delete(userId)
+      else this.paramEditsDeclinedBy.add(userId)
     }
     this.emit()
   }
