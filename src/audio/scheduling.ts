@@ -245,6 +245,29 @@ export function trackLoopRepeatState(
   }
 }
 
+/**
+ * One repeat of a pad-launched clip loop: a state holding ONLY that clip,
+ * moved so its material starts `atTicks`. Notes ride along (clip-relative),
+ * every other clip and track drops out, and automation stays on the real
+ * timeline (cleared here). Same trick as trackLoopRepeatState: feeding this
+ * through the ordinary schedule functions keeps pad launches mathematically
+ * identical to normal playback — inserts, fades, per-clip looping included.
+ */
+export function padClipRepeatState(
+  state: ProjectState,
+  clipId: string,
+  atTicks: number
+): ProjectState {
+  const clip = state.clips[clipId]
+  const track = clip ? state.tracks[clip.trackId] : undefined
+  return {
+    ...state,
+    tracks: track ? { [track.id]: track } : {},
+    clips: clip ? { [clipId]: { ...clip, start: atTicks } } : {},
+    automation: {}
+  }
+}
+
 export interface NoteSchedule {
   readonly trackId: string
   /** Owning clip — lets the engine route the voice through its fade envelope. */

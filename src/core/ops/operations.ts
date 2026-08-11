@@ -12,6 +12,8 @@ import type {
   FileNodeId,
   Note,
   NoteId,
+  PadId,
+  PerformancePad,
   PluginInstance,
   PluginInstanceId,
   Route,
@@ -163,6 +165,27 @@ export type Operation =
    * restores presence, bypass and its sound in one undoable step.
    */
   | { type: 'track/setSynthParams'; trackId: TrackId; params: Record<string, number> }
+  /**
+   * Load (or clear, with null) the sample the track's SAMPLER instrument
+   * plays. `params` carries synth params set in the same gesture —
+   * dropping a sample onto a track also switches it to the sampler, and
+   * one gesture must stay one op. Absolute values; invert restores the
+   * previous asset and the previous values of exactly the touched keys.
+   */
+  | {
+      type: 'track/setSampler'
+      trackId: TrackId
+      assetId: string | null
+      params?: Record<string, number>
+    }
+  /**
+   * Assign a performance pad — the whole pad, absolute, so re-delivery is
+   * idempotent and concurrent assigns of one cell converge last-write-wins
+   * (the pad's id IS its grid cell). Invert restores the previous
+   * assignment, or clears a previously empty cell.
+   */
+  | { type: 'pad/set'; pad: PerformancePad }
+  | { type: 'pad/clear'; padId: PadId }
   /** `parentId` present = also re-parent in the same gesture (drag into a folder). */
   | { type: 'track/reorder'; trackId: TrackId; index: number; parentId?: TrackId | null }
   /**

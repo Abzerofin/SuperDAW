@@ -1,6 +1,7 @@
 import type { Clip, ProjectState } from '@core/model/types'
 import { clipRate } from '@core/model/types'
 import { ticksPerSecond } from '@audio/scheduling'
+import { onsetsForPeaks } from '@audio/onsets'
 import { assetStore } from '@/state/audioInstance'
 
 /**
@@ -13,52 +14,23 @@ import { assetStore } from '@/state/audioInstance'
  * or extra DSP on the drag path.
  */
 
-/** Rising-edge threshold: this bucket vs. the local floor before it. */
-const RISE_FACTOR = 1.8
-/** Ignore anything quieter than this (absolute peak, 0..1). */
-const MIN_LEVEL = 0.12
-/** Two onsets closer than this are one hit (seconds). */
-const MIN_SPACING_SEC = 0.05
 /** How many of the dragged clip's onsets take part in matching. */
 const MAX_DRAG_ONSETS = 8
 
-const onsetCache = new Map<string, number[]>()
-
-/** Transient onset times (buffer seconds) of an asset, cached. */
+/** Transient onset times (buffer seconds) of an asset, cached per peaks array. */
 export function assetOnsets(assetId: string): number[] {
-  const cached = onsetCache.get(assetId)
-  if (cached) return cached
   const asset = assetStore.get(assetId)
   if (!asset?.peaks) return []
-  const peaks = asset.peaks
-  const pps = asset.peaksPerSecond
-  const buckets = peaks.length / 2
-  const env = (i: number): number => Math.max(Math.abs(peaks[i * 2]), Math.abs(peaks[i * 2 + 1]))
-  const out: number[] = []
-  const spacing = Math.max(1, Math.round(MIN_SPACING_SEC * pps))
-  let floor = 0
-  for (let i = 0; i < buckets; i++) {
-    const level = env(i)
-    if (
-      level >= MIN_LEVEL &&
-      level > floor * RISE_FACTOR &&
-      (out.length === 0 || i - out[out.length - 1] * pps >= spacing)
-    ) {
-      out.push(i / pps)
-    }
-    // The floor trails the envelope so a sustained note only fires once.
-    floor = Math.max(level, floor * 0.82)
-  }
-  if (onsetCache.size > 256) onsetCache.clear()
-  onsetCache.set(assetId, out)
-  return out
+  return onsetsForPeaks(asset.peaks, asset.peaksPerSecond)
 }
 
 /**
  * A clip's onsets as TICKS from its start, honoring trim, rate and
  * reverse; only onsets inside the clip's (first loop period's) window.
+ * Exported for the slicer ("Slice at transients" cuts exactly where the
+ * drag-snap guides point).
  */
-function clipOnsetTicks(clip: Clip, tps: number): number[] {
+export function clipOnsetTicks(clip: Clip, tps: number): number[] {
   if (clip.assetId === null) return []
   const asset = assetStore.get(clip.assetId)
   if (asset?.seconds == null) return []

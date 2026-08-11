@@ -211,8 +211,8 @@ function SongLoopButton(): React.JSX.Element {
       className={`tbtn ${on ? 'tbtn-active' : ''}`}
       title={
         on
-          ? 'Song loop ON — playback wraps to the start at the end of the song'
-          : 'Loop the whole song: wrap to the start when the end is reached'
+          ? 'Song loop ON — playback wraps to the start at the end of the song (muted and un-soloed material does not count)'
+          : 'Loop the whole song: wrap to the start when the end is reached — solo a section to cycle just that'
       }
       onClick={() => transport.setSongLoop(!on)}
     >
@@ -422,16 +422,88 @@ function GridSelect(): React.JSX.Element {
   )
 }
 
+/** Tempos worth one click. Typing and dragging still reach everything else. */
+const COMMON_TEMPOS = [60, 70, 80, 85, 90, 100, 110, 120, 124, 128, 130, 140, 150, 160, 170, 174]
+
+/** The signatures a session actually asks for, in the order they come up. */
+const COMMON_SIGNATURES: TimeSignature[] = [
+  [4, 4],
+  [3, 4],
+  [2, 4],
+  [5, 4],
+  [6, 4],
+  [6, 8],
+  [7, 8],
+  [9, 8],
+  [12, 8],
+  [2, 2]
+]
+
+/**
+ * The ▾ beside a value field: the handful of values that account for most
+ * uses, one click away. Purely a shortcut — every one of them can still be
+ * typed (or, for tempo, dragged) in the field itself, and picking one runs
+ * the exact same code path the field does.
+ */
+function QuickPick({
+  title,
+  options,
+  columns
+}: {
+  title: string
+  options: ReadonlyArray<{ label: string; active: boolean; pick: () => void }>
+  columns: number
+}): React.JSX.Element {
+  const [open, setOpen] = useState(false)
+  const ref = useRef<HTMLDivElement>(null)
+
+  useEffect(() => {
+    if (!open) return
+    const onPointerDown = (e: PointerEvent): void => {
+      if (!ref.current?.contains(e.target as Node)) setOpen(false)
+    }
+    window.addEventListener('pointerdown', onPointerDown)
+    return () => window.removeEventListener('pointerdown', onPointerDown)
+  }, [open])
+
+  return (
+    <div className="collab-anchor" ref={ref}>
+      <button
+        className={`quick-pick-btn ${open ? 'tbtn-active' : ''}`}
+        title={title}
+        onClick={() => setOpen((v) => !v)}
+      >
+        ▾
+      </button>
+      {open && (
+        <div
+          className="menu-panel quick-pick"
+          style={{ gridTemplateColumns: `repeat(${columns}, 1fr)` }}
+        >
+          {options.map((option) => (
+            <button
+              key={option.label}
+              className={`quick-pick-item mono ${option.active ? 'quick-pick-item-on' : ''}`}
+              onClick={() => {
+                setOpen(false)
+                option.pick()
+              }}
+            >
+              {option.label}
+            </button>
+          ))}
+        </div>
+      )}
+    </div>
+  )
+}
+
 function TimeSignatureField({ signature }: { signature: TimeSignature }): React.JSX.Element {
   const [editing, setEditing] = useState(false)
   const [value, setValue] = useState('')
 
-  const commit = (): void => {
-    setEditing(false)
-    const match = value.trim().match(/^(\d{1,2})\s*\/\s*(\d{1,2})$/)
-    if (!match) return
-    const beats = Number(match[1])
-    const unit = Number(match[2])
+  /** The one entry point for a signature change — typed or picked. */
+  const setSignature = (beats: number, unit: number): void => {
     if (beats === signature[0] && unit === signature[1]) return
     // The reducer validates (drops unknown denominators, clamps beats).
     projectStore.dispatch({
@@ -440,32 +512,49 @@ function TimeSignatureField({ signature }: { signature: TimeSignature }): React.
     })
   }
 
-  if (editing) {
-    return (
-      <input
-        className="transport-tempo-input mono"
-        autoFocus
-        value={value}
-        onChange={(e) => setValue(e.target.value)}
-        onBlur={commit}
-        onKeyDown={(e) => {
-          if (e.key === 'Enter') commit()
-          if (e.key === 'Escape') setEditing(false)
-        }}
-      />
-    )
+  const commit = (): void => {
+    setEditing(false)
+    const match = value.trim().match(/^(\d{1,2})\s*\/\s*(\d{1,2})$/)
+    if (!match) return
+    setSignature(Number(match[1]), Number(match[2]))
   }
+
   return (
-    <button
-      className="transport-sig mono"
-      title="Click to edit the time signature"
-      onClick={() => {
-        setValue(`${signature[0]}/${signature[1]}`)
-        setEditing(true)
-      }}
-    >
-      {signature[0]}/{signature[1]}
-    </button>
+    <div className="transport-field">
+      {editing ? (
+        <input
+          className="transport-tempo-input mono"
+          autoFocus
+          value={value}
+          onChange={(e) => setValue(e.target.value)}
+          onBlur={commit}
+          onKeyDown={(e) => {
+            if (e.key === 'Enter') commit()
+            if (e.key === 'Escape') setEditing(false)
+          }}
+        />
+      ) : (
+        <button
+          className="transport-sig mono"
+          title="Click to type the time signature · ▾ for the common ones"
+          onClick={() => {
+            setValue(`${signature[0]}/${signature[1]}`)
+            setEditing(true)
+          }}
+        >
+          {signature[0]}/{signature[1]}
+        </button>
+      )}
+      <QuickPick
+        title="Common time signatures"
+        columns={2}
+        options={COMMON_SIGNATURES.map(([beats, unit]) => ({
+          label: `${beats}/${unit}`,
+          active: beats === signature[0] && unit === signature[1],
+          pick: () => setSignature(beats, unit)
+        }))}
+      />
+    </div>
   )
 }
 
@@ -679,36 +768,44 @@ function TempoField({ tempo }: { tempo: number }): React.JSX.Element {
     }
   }
 
-  if (editing) {
-    return (
-      <input
-        className="transport-tempo-input mono"
-        autoFocus
-        value={value}
-        onChange={(e) => setValue(e.target.value)}
-        onBlur={commit}
-        onKeyDown={(e) => {
-          if (e.key === 'Enter') commit()
-          if (e.key === 'Escape') setEditing(false)
-        }}
-      />
-    )
-  }
   return (
-    <div className="collab-anchor">
-      <button
-        className="transport-tempo mono"
-        title="Drag to change the tempo · click to type it"
-        onPointerDown={beginDrag}
-        onPointerMove={moveDrag}
-        onPointerUp={endDrag}
-        onPointerCancel={() => {
-          dragRef.current = null
-          setDragValue(null)
-        }}
-      >
-        {dragValue ?? tempo} BPM
-      </button>
+    <div className="collab-anchor transport-field">
+      {editing ? (
+        <input
+          className="transport-tempo-input mono"
+          autoFocus
+          value={value}
+          onChange={(e) => setValue(e.target.value)}
+          onBlur={commit}
+          onKeyDown={(e) => {
+            if (e.key === 'Enter') commit()
+            if (e.key === 'Escape') setEditing(false)
+          }}
+        />
+      ) : (
+        <button
+          className="transport-tempo mono"
+          title="Drag to change the tempo · click to type it · ▾ for common tempos"
+          onPointerDown={beginDrag}
+          onPointerMove={moveDrag}
+          onPointerUp={endDrag}
+          onPointerCancel={() => {
+            dragRef.current = null
+            setDragValue(null)
+          }}
+        >
+          {dragValue ?? tempo} BPM
+        </button>
+      )}
+      <QuickPick
+        title="Common tempos"
+        columns={4}
+        options={COMMON_TEMPOS.map((bpm) => ({
+          label: String(bpm),
+          active: bpm === tempo,
+          pick: () => requestTempo(bpm)
+        }))}
+      />
       {pending !== null && (
         <div className="menu-panel tempo-ask">
           <div className="tempo-ask-title">

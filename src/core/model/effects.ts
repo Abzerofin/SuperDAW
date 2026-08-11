@@ -186,16 +186,102 @@ export const WAVE_TYPES = ['sawtooth', 'square', 'triangle', 'sine'] as const
  */
 export const SYNTH_STATE_PARAMS = ['present', 'on'] as const
 
+/**
+ * Which built-in instrument a MIDI track's `synth` record drives, selected
+ * by the `instrument` param (an index into this list — a plain number so
+ * switching instruments flows through the existing synth-param ops).
+ * Every instrument's params coexist in the one flat record; only the
+ * active instrument's are audible, so switching back and forth never
+ * loses a knob position.
+ */
+export const INSTRUMENT_KINDS = ['analog', 'sampler', 'drums'] as const
+export type InstrumentKind = (typeof INSTRUMENT_KINDS)[number]
+
+export function instrumentKindOf(synth: Readonly<Record<string, number>>): InstrumentKind {
+  return INSTRUMENT_KINDS[Math.round(synth.instrument ?? 0)] ?? 'analog'
+}
+
+/**
+ * Sliced-sampler keyboard mapping: slice 0 plays on this MIDI pitch,
+ * slice N on SLICE_BASE_PITCH + N (capped at MAX_SLICES). Shared by the
+ * audio voice builders, the slice-to-sampler op builder and the UI so a
+ * chopped break triggers identically everywhere.
+ */
+export const SLICE_BASE_PITCH = 36
+export const MAX_SLICES = 64
+
+/**
+ * The drum synth's pad roster: eight synthesized voices on the standard
+ * GM drum pitches (aliases catch the neighbouring GM assignments so
+ * imported grooves land on the right pads). Each pad owns four params in
+ * the synth record — `<key>Tune`/`<key>Decay`/`<key>Tone`/`<key>Level` —
+ * generated below so the reducer clamps them like any synth param.
+ */
+export interface DrumPadDef {
+  /** Param prefix in the synth record, e.g. 'kick' → kickTune. */
+  readonly key: string
+  readonly label: string
+  /** Canonical MIDI pitch (GM drum map). */
+  readonly pitch: number
+  readonly aliases: readonly number[]
+}
+
+export const DRUM_PADS: readonly DrumPadDef[] = [
+  { key: 'kick', label: 'Kick', pitch: 36, aliases: [35] },
+  { key: 'snare', label: 'Snare', pitch: 38, aliases: [40] },
+  { key: 'clap', label: 'Clap', pitch: 39, aliases: [] },
+  { key: 'hatc', label: 'Hat', pitch: 42, aliases: [44] },
+  { key: 'hato', label: 'Open Hat', pitch: 46, aliases: [] },
+  { key: 'toml', label: 'Lo Tom', pitch: 43, aliases: [41, 45] },
+  { key: 'tomh', label: 'Hi Tom', pitch: 50, aliases: [47, 48] },
+  { key: 'ride', label: 'Ride', pitch: 51, aliases: [49, 53, 57] }
+] as const
+
+/** The pad a MIDI pitch triggers on the drum synth; null = unmapped (silent). */
+export function drumPadForPitch(pitch: number): DrumPadDef | null {
+  const rounded = Math.round(pitch)
+  for (const pad of DRUM_PADS) {
+    if (pad.pitch === rounded || pad.aliases.includes(rounded)) return pad
+  }
+  return null
+}
+
+function drumParams(): Record<string, ParamDef> {
+  const params: Record<string, ParamDef> = {}
+  for (const pad of DRUM_PADS) {
+    params[`${pad.key}Tune`] = p(`${pad.label} Tune`, -12, 12, 0, 'st', 0)
+    params[`${pad.key}Decay`] = p(`${pad.label} Decay`, 0.25, 4, 1, '×', 2)
+    params[`${pad.key}Tone`] = p(`${pad.label} Tone`, 0, 1, 0.5, '', 2)
+    params[`${pad.key}Level`] = p(`${pad.label} Level`, 0, 1.5, 1, '', 2)
+  }
+  return params
+}
+
 export const SYNTH_DEFS: Readonly<Record<string, ParamDef>> = {
   present: p('Present', 0, 1, 1, '', 0),
   on: p('On', 0, 1, 1, '', 0),
+  instrument: p('Instrument', 0, INSTRUMENT_KINDS.length - 1, 0, '', 0),
   wave: p('Wave', 0, WAVE_TYPES.length - 1, 0, '', 0),
   cutoff: p('Cutoff', 0.5, 16, 7, '×', 1),
   attack: p('Attack', 0.001, 1, 0.006, 's', 3),
   decay: p('Decay', 0.01, 1.5, 0.09, 's', 2),
   sustain: p('Sustain', 0, 1, 0.65, '', 2),
   release: p('Release', 0.01, 2, 0.07, 's', 2),
-  detune: p('Detune', 0, 30, 4, 'ct', 0)
+  detune: p('Detune', 0, 30, 4, 'ct', 0),
+  // Sampler (the asset it plays lives on Track.samplerAssetId).
+  smpRoot: p('Root Note', 0, 127, 60, '', 0),
+  /** 0 = keys (chromatic from the root), 1 = slices (transient chops). */
+  smpMode: p('Mode', 0, 1, 0, '', 0),
+  smpStart: p('Start', 0, 1, 0, '', 2),
+  smpEnd: p('End', 0, 1, 1, '', 2),
+  smpLoop: p('Loop', 0, 1, 0, '', 0),
+  smpAttack: p('Attack', 0.001, 1, 0.003, 's', 3),
+  smpDecay: p('Decay', 0.01, 2, 0.2, 's', 2),
+  smpSustain: p('Sustain', 0, 1, 1, '', 2),
+  smpRelease: p('Release', 0.005, 3, 0.08, 's', 2),
+  smpGain: p('Gain', 0, 2, 1, '', 2),
+  // Drum synth: four params per pad, generated from DRUM_PADS.
+  ...drumParams()
 }
 
 /**

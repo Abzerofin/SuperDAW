@@ -11,6 +11,13 @@ import { keymap } from '@/state/keymap'
 import { capturePointer } from '@/lib/pointer'
 import { humanizeNotes, quantizeNotes } from '@/lib/noteActions'
 import { parseNumberIn } from '@/lib/valueParse'
+import {
+  CHORD_TYPES,
+  NOTE_NAMES,
+  chordLabel,
+  chordPitchClasses,
+  type ChordType
+} from '@/lib/chords'
 import { EditableValue } from '../controls/EditableValue'
 
 const ROW_H = 12
@@ -95,6 +102,8 @@ export function PianoRoll({ clipId }: { clipId: string }): React.JSX.Element | n
     endPreviewRef.current = value
     setEndPreviewState(value)
   }
+  /** The chord guide, if one is up: root pitch class + shape. Ephemeral. */
+  const [chord, setChord] = useState<{ root: number; type: ChordType } | null>(null)
   const rootRef = useRef<HTMLDivElement>(null)
   const scrollRef = useRef<HTMLDivElement>(null)
   const laneRef = useRef<HTMLDivElement>(null)
@@ -164,6 +173,16 @@ export function PianoRoll({ clipId }: { clipId: string }): React.JSX.Element | n
   const pxPerTick = pxPerBeat / PPQ
   const gridTicks = pxPerBeat >= 36 ? PPQ / 4 : PPQ / 2
   const barTicks = ticksPerBar(state.timeSignature)
+
+  // The chord guide marks every key belonging to the chord, in every
+  // octave — horizontal bands across the roll and lit keys on the keyboard.
+  const chordClasses = chord ? chordPitchClasses(chord.root, chord.type.intervals) : null
+  const chordRows: number[] = []
+  if (chordClasses) {
+    for (let pitch = PITCH_MIN; pitch <= PITCH_MAX; pitch++) {
+      if (chordClasses.has(pitch % 12)) chordRows.push(pitch)
+    }
+  }
 
   // Each clip with a possible end-drag preview applied.
   const shownDuration = (c: Clip): number =>
@@ -510,6 +529,7 @@ export function PianoRoll({ clipId }: { clipId: string }): React.JSX.Element | n
             <span className="statusbar-dim"> · {trackClips.length} clips</span>
           )}
         </span>
+        <ChordPicker chord={chord} onPick={setChord} />
         {selectedNote && <VelocityControl key={selectedNote.id} note={selectedNote} />}
         {selected.size > 1 && <span className="proll-hint">{selected.size} notes selected</span>}
         <span className="proll-hint">
@@ -540,7 +560,9 @@ export function PianoRoll({ clipId }: { clipId: string }): React.JSX.Element | n
               return (
                 <div
                   key={pitch}
-                  className={`proll-key ${isBlackKey(pitch) ? 'proll-key-black' : ''}`}
+                  className={`proll-key ${isBlackKey(pitch) ? 'proll-key-black' : ''} ${
+                    chordClasses?.has(pitch % 12) ? 'proll-key-chord' : ''
+                  } ${chord && pitch % 12 === chord.root ? 'proll-key-chord-root' : ''}`}
                 >
                   {pitch % 12 === 0 && (
                     <span className="proll-key-label mono">
@@ -558,6 +580,16 @@ export function PianoRoll({ clipId }: { clipId: string }): React.JSX.Element | n
             onDoubleClick={addNote}
             onPointerDown={beginMarquee}
           >
+            {/* Chord guide: the rows that belong to the chosen chord. */}
+            {chordRows.map((pitch) => (
+              <div
+                key={`chord:${pitch}`}
+                className={`proll-chord-row ${
+                  chord && pitch % 12 === chord.root ? 'proll-chord-row-root' : ''
+                }`}
+                style={{ top: pitchToY(pitch), height: ROW_H }}
+              />
+            ))}
             {/* Timeline not covered by any clip: notes cannot live there. */}
             {deadRegions.map((region) => (
               <div
@@ -764,6 +796,92 @@ function RollRuler({
           <div className="proll-ruler-marker" style={{ left: marker * pxPerTick }} />
         )}
       </div>
+    </div>
+  )
+}
+
+/**
+ * The chord menu: pick a root and a shape and the roll lights up every key
+ * that belongs to the chord, in every octave. A GUIDE, not a generator —
+ * it changes nothing in the document (so it is neither an op nor synced),
+ * it just makes the right rows obvious while you draw.
+ */
+function ChordPicker({
+  chord,
+  onPick
+}: {
+  chord: { root: number; type: ChordType } | null
+  onPick: (chord: { root: number; type: ChordType } | null) => void
+}): React.JSX.Element {
+  const [open, setOpen] = useState(false)
+  const [root, setRoot] = useState(0)
+  const ref = useRef<HTMLDivElement>(null)
+
+  useEffect(() => {
+    if (!open) return
+    const onPointerDown = (e: PointerEvent): void => {
+      if (!ref.current?.contains(e.target as Node)) setOpen(false)
+    }
+    window.addEventListener('pointerdown', onPointerDown)
+    return () => window.removeEventListener('pointerdown', onPointerDown)
+  }, [open])
+
+  return (
+    <div className="collab-anchor" ref={ref}>
+      <button
+        className={`proll-chord-btn ${chord ? 'proll-chord-btn-on' : ''}`}
+        title={
+          chord
+            ? `Chord guide: ${chordLabel(chord.root, chord.type)} — click to change or clear`
+            : 'Highlight the keys of a chord across the roll'
+        }
+        onClick={() => setOpen((v) => !v)}
+      >
+        {chord ? chordLabel(chord.root, chord.type) : 'Chords'}
+      </button>
+      {open && (
+        <div className="menu-panel proll-chord-menu">
+          <div className="proll-chord-roots">
+            {NOTE_NAMES.map((name, pitchClass) => (
+              <button
+                key={name}
+                className={`proll-chord-root mono ${
+                  pitchClass === (chord?.root ?? root) ? 'proll-chord-root-on' : ''
+                }`}
+                onClick={() => {
+                  setRoot(pitchClass)
+                  // Re-root the chord already up, so hunting for the right
+                  // root is one click per try instead of two.
+                  if (chord) onPick({ root: pitchClass, type: chord.type })
+                }}
+              >
+                {name}
+              </button>
+            ))}
+          </div>
+          <div className="proll-chord-list">
+            {CHORD_TYPES.map((type) => (
+              <button
+                key={type.name}
+                className={`proll-chord-item ${chord?.type === type ? 'proll-chord-item-on' : ''}`}
+                onClick={() => onPick({ root: chord?.root ?? root, type })}
+              >
+                {type.name}
+              </button>
+            ))}
+          </div>
+          <button
+            className="proll-chord-clear"
+            disabled={!chord}
+            onClick={() => {
+              onPick(null)
+              setOpen(false)
+            }}
+          >
+            Clear guide
+          </button>
+        </div>
+      )}
     </div>
   )
 }

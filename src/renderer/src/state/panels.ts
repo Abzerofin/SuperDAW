@@ -12,7 +12,16 @@ import { projectStore } from './projectStore'
  * the chat panel is hidden accumulate; opening it clears them.
  */
 
-export type PanelId = 'files' | 'mixer' | 'effects' | 'pianoroll' | 'activity' | 'chat' | 'lyrics'
+export type PanelId =
+  | 'files'
+  | 'mixer'
+  | 'effects'
+  | 'pianoroll'
+  | 'steps'
+  | 'pads'
+  | 'activity'
+  | 'chat'
+  | 'lyrics'
 export type DockSide = 'bottom' | 'right'
 
 export const PANEL_LABELS: Record<PanelId, string> = {
@@ -20,12 +29,24 @@ export const PANEL_LABELS: Record<PanelId, string> = {
   mixer: 'Mixer',
   effects: 'Effects',
   pianoroll: 'Piano',
+  steps: 'Steps',
+  pads: 'Pads',
   activity: 'Activity',
   chat: 'Chat',
   lyrics: 'Lyrics'
 }
 
-const ALL_PANELS: readonly PanelId[] = ['files', 'mixer', 'effects', 'pianoroll', 'activity', 'chat', 'lyrics']
+const ALL_PANELS: readonly PanelId[] = [
+  'files',
+  'mixer',
+  'effects',
+  'pianoroll',
+  'steps',
+  'pads',
+  'activity',
+  'chat',
+  'lyrics'
+]
 
 interface DockLayout {
   docks: Record<DockSide, PanelId[]>
@@ -36,7 +57,7 @@ interface DockLayout {
 
 const DEFAULT_LAYOUT: DockLayout = {
   docks: {
-    bottom: ['files', 'mixer', 'effects', 'pianoroll'],
+    bottom: ['files', 'mixer', 'effects', 'pianoroll', 'steps', 'pads'],
     right: ['activity', 'chat', 'lyrics']
   },
   active: { bottom: 'files', right: 'activity' },
@@ -55,12 +76,20 @@ function loadLayout(): DockLayout {
     const raw = typeof localStorage !== 'undefined' ? localStorage.getItem(STORAGE_KEY) : null
     if (!raw) return structuredClone(DEFAULT_LAYOUT)
     const parsed = JSON.parse(raw) as DockLayout
-    // Every known panel must appear in exactly one dock, or the layout is
-    // from another era — fall back rather than losing panels.
+    // Panels from removed eras drop out; panels ADDED since the layout was
+    // saved adopt their default dock — an app update must neither lose the
+    // user's arrangement nor hide new tabs.
+    for (const side of ['bottom', 'right'] as const) {
+      parsed.docks[side] = parsed.docks[side].filter((id) => ALL_PANELS.includes(id))
+    }
+    const present = [...parsed.docks.bottom, ...parsed.docks.right]
+    for (const id of ALL_PANELS) {
+      if (present.includes(id)) continue
+      parsed.docks[DEFAULT_LAYOUT.docks.right.includes(id) ? 'right' : 'bottom'].push(id)
+    }
     const all = [...parsed.docks.bottom, ...parsed.docks.right]
     const valid =
       all.length === ALL_PANELS.length &&
-      ALL_PANELS.every((id) => all.includes(id)) &&
       typeof parsed.bottomHeight === 'number' &&
       typeof parsed.rightWidth === 'number'
     if (!valid) return structuredClone(DEFAULT_LAYOUT)

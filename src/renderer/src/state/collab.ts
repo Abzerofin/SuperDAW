@@ -417,6 +417,32 @@ class CollabStore {
     this.sendPresence({ ping })
   }
 
+  /**
+   * Broadcast a performance-pad hit (the collaborative-DJ channel). The
+   * sender has ALREADY played it locally (zero-latency local echo, like
+   * pings); peers reproduce the sound through their own engine.
+   */
+  sendPadHit(padId: string, action: 'down' | 'up', velocity: number): void {
+    this.sendPresence({ padHit: { hitId: newId('hit'), padId, action, velocity } })
+  }
+
+  /**
+   * The pad-performance store registers here (a callback, not the pull-
+   * from-store model pings use — audio must fire exactly once, on arrival,
+   * never per React render). Registered from padPerform to avoid an import
+   * cycle.
+   */
+  private padHitListener:
+    | ((userId: string, hit: NonNullable<PresenceData['padHit']>) => void)
+    | null = null
+  private seenPadHits = new Set<string>()
+
+  setPadHitListener(
+    listener: ((userId: string, hit: NonNullable<PresenceData['padHit']>) => void) | null
+  ): void {
+    this.padHitListener = listener
+  }
+
   private sendPresence(data: PresenceData): void {
     this.active?.sendPresence(data)
   }
@@ -429,6 +455,11 @@ class CollabStore {
     if (data.ping) {
       this.pingList.push({ ...data.ping, userId, at: Date.now() })
       this.schedulePingSweep()
+    }
+    if (data.padHit && !this.seenPadHits.has(data.padHit.hitId)) {
+      if (this.seenPadHits.size > 1024) this.seenPadHits.clear()
+      this.seenPadHits.add(data.padHit.hitId)
+      this.padHitListener?.(userId, data.padHit)
     }
     this.emit()
   }

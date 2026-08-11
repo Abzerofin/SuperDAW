@@ -62,6 +62,22 @@ function sampleState() {
       { id: 'n1', parentId: 'f1', kind: 'audio', name: 'Kick', assetId: 'ast_2' }
     ]
   })
+  s = apply(s, {
+    type: 'pad/set',
+    pad: {
+      id: 'pad-r1c2',
+      row: 1,
+      col: 2,
+      kind: 'sample',
+      assetId: 'ast_pad',
+      trackId: null,
+      pitch: 60,
+      clipId: null,
+      name: 'Air horn',
+      color: '#e06c75',
+      gate: false
+    }
+  })
   return s
 }
 
@@ -181,8 +197,48 @@ suite('project file format', () => {
     expect('extraKey' in cleaned.state.settings).toBe(false)
   })
 
-  test('referencedAssetIds collects clip and bay references', () => {
-    expect([...referencedAssetIds(sampleState())].sort()).toEqual(['ast_1', 'ast_2'])
+  test('referencedAssetIds collects clip, bay, sampler and pad references', () => {
+    let s = sampleState()
+    s = apply(s, {
+      type: 'track/create',
+      track: {
+        id: 'tm',
+        kind: 'midi',
+        name: 'S',
+        color: '#fff',
+        muted: false,
+        soloed: false,
+        parentId: null,
+        frozenAssetId: null,
+        volume: 1,
+        pan: 0,
+        synth: {}
+      },
+      index: 1,
+      clips: [],
+      automation: [],
+      notes: [],
+      plugins: []
+    })
+    s = apply(s, { type: 'track/setSampler', trackId: 'tm', assetId: 'ast_smp' })
+    expect([...referencedAssetIds(s)].sort()).toEqual(['ast_1', 'ast_2', 'ast_pad', 'ast_smp'])
+  })
+
+  test('malformed pads in a doctored file are dropped on load', () => {
+    const state = sampleState()
+    const doctored = {
+      ...state,
+      pads: {
+        ...state.pads,
+        'pad-r9c9': { id: 'pad-r9c9', row: 9, col: 9, kind: 'sample', assetId: 'x' },
+        evil: { id: 'evil', row: 0, col: 0, kind: 'sample', assetId: 'x' },
+        'pad-r0c1': { id: 'pad-r0c1', row: 0, col: 1, kind: 'nope' }
+      }
+    }
+    const cleaned = parseProjectJson(
+      JSON.stringify({ formatVersion: 3, state: doctored, assets: [] })
+    )
+    expect(Object.keys(cleaned.state.pads)).toEqual(['pad-r1c2'])
   })
 
   test('rejects corrupted and future-version files', () => {

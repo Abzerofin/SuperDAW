@@ -1,4 +1,4 @@
-import type { Clip, PluginInstance, PluginInstanceId, ProjectState, Route, TrackId } from '@core/model/types'
+import type { Clip, ClipId, PluginInstance, PluginInstanceId, ProjectState, Route, Track, TrackId } from '@core/model/types'
 import {
   automationValueAt,
   isTrackAudible,
@@ -6,18 +6,21 @@ import {
   routesOfTrack
 } from '@core/model/types'
 import type { AutomationPoint } from '@core/model/types'
-import { ticksPerBeat } from '@core/model/timebase'
+import { ticksPerBar, ticksPerBeat } from '@core/model/timebase'
 import { denormalizeParam, synthIsAudible } from '@core/model/effects'
 import { paramDefsOf } from '@core/plugins/builtin'
 import type { AssetEvent, AssetStore } from './assets'
 import { applyClipFades } from './fades'
+import { buildInstrumentVoice, buildLiveInstrumentVoice, type InstrumentSample } from './instruments'
 import { LivePreview } from './livePreview'
+import { onsetsForPeaks } from './onsets'
 import { pluginRegistry, type PluginAnalysis, type PluginNodes } from './pluginRegistry'
 import type { ExternalPluginHost } from './render'
-import { buildLiveSynthVoice, buildSynthVoice, type LiveVoiceHandle } from './synth'
+import type { LiveVoiceHandle } from './synth'
 import {
   beatIndexAt,
   metronomeClicks,
+  padClipRepeatState,
   scheduleClips,
   scheduleNotes,
   ticksPerSecond,
@@ -456,12 +459,13 @@ export class AudioEngine {
     this.stealOldestLiveVoiceIfFull()
 
     const seq = ++this.liveVoiceSeq
-    const handle = buildLiveSynthVoice(
+    const handle = buildLiveInstrumentVoice(
       ctx,
       this.chain(trackId).input,
       key,
       Math.min(1, Math.max(0, velocity)),
       track.synth,
+      this.samplerSampleFor(track),
       () => {
         // Belt and braces: released/stolen voices are already deregistered.
         const current = this.liveVoices.get(trackId)
@@ -506,6 +510,189 @@ export class AudioEngine {
     if (total < LIVE_VOICE_CAP || oldest === null) return
     oldest.voices.get(oldest.key)?.handle.stop()
     oldest.voices.delete(oldest.key)
+  }
+
+  // ---------- Performance pads ----------
+  //
+  // TRIGGERING pads is ephemeral per-user performance (like the playhead),
+  // never document state. Sample pads fire straight into the master bus —
+  // a pad is not tied to any track. Note pads go through liveNoteOn (the
+  // MIDI-keyboard path). Clip pads queue bar-quantized repeats of one clip
+  // through the ordinary schedule math over a derived state, exactly the
+  // track-loop trick, so launches carry inserts, fades and routing.
+
+  private padSampleVoices = new Map<string, { source: AudioBufferSourceNode; gain: GainNode }>()
+  private padClipLoops = new Map<
+    ClipId,
+    { startTicks: number; nextRepeat: number; sources: Set<AudioScheduledSourceNode> }
+  >()
+  private padTimer: ReturnType<typeof setInterval> | null = null
+  private padListeners = new Set<() => void>()
+  private padVersion = 0
+
+  /** Fire a sample pad. Retriggering cuts the previous hit (natural pad feel). */
+  playPadSample(padId: string, assetId: string): void {
+    const ctx = this.ensureContext()
+    if (ctx.state === 'suspended') void ctx.resume()
+    this.stopPadSample(padId, true)
+    const asset = this.assets.get(assetId)
+    if (!asset?.buffer || !this.master) return
+    const gain = ctx.createGain()
+    gain.gain.value = 0.9
+    gain.connect(this.master)
+    const source = ctx.createBufferSource()
+    source.buffer = asset.buffer
+    source.connect(gain)
+    source.onended = () => {
+      source.disconnect()
+      gain.disconnect()
+      if (this.padSampleVoices.get(padId)?.source === source) {
+        this.padSampleVoices.delete(padId)
+        this.emitPads()
+      }
+    }
+    source.start()
+    this.padSampleVoices.set(padId, { source, gain })
+    this.emitPads()
+  }
+
+  /** Release a gated sample pad (or cut it before a retrigger). */
+  stopPadSample(padId: string, hard = false): void {
+    const voice = this.padSampleVoices.get(padId)
+    if (!voice || !this.ctx) return
+    const now = this.ctx.currentTime
+    voice.gain.gain.setTargetAtTime(0.0001, now, hard ? 0.005 : 0.02)
+    try {
+      voice.source.stop(now + 0.08)
+    } catch {
+      // already ended
+    }
+    this.padSampleVoices.delete(padId)
+    this.emitPads()
+  }
+
+  padSampleActive(padId: string): boolean {
+    return this.padSampleVoices.has(padId)
+  }
+
+  /**
+   * Launch a clip pad: the clip's material repeats every clip-length from
+   * the NEXT BAR boundary until stopped — the launchpad gesture. Requires
+   * a rolling transport (the caller starts it); inactive while the cycle
+   * region runs, the same rule track loops follow.
+   */
+  launchClipLoop(clipId: ClipId): boolean {
+    const state = this.store.state
+    const clip = state.clips[clipId]
+    if (!clip || clip.duration <= 0) return false
+    if (this.padClipLoops.has(clipId)) return true
+    if (!this.transport.isPlaying || this.transport.activeLoop()) return false
+    const ctx = this.ensureContext()
+    if (ctx.state === 'suspended') void ctx.resume()
+    const bar = ticksPerBar(state.timeSignature)
+    const startTicks = Math.ceil(this.transport.positionTicks() / bar) * bar
+    this.padClipLoops.set(clipId, { startTicks, nextRepeat: 0, sources: new Set() })
+    this.startPadScheduler()
+    this.topUpPadLoops()
+    this.emitPads()
+    return true
+  }
+
+  stopClipLoop(clipId: ClipId): void {
+    const loop = this.padClipLoops.get(clipId)
+    if (!loop) return
+    this.padClipLoops.delete(clipId)
+    const now = this.ctx?.currentTime ?? 0
+    for (const source of [...loop.sources]) {
+      try {
+        source.stop(now + 0.02)
+      } catch {
+        // never started / already stopped
+      }
+    }
+    if (this.padClipLoops.size === 0) this.stopPadScheduler()
+    this.emitPads()
+  }
+
+  stopAllClipLoops(): void {
+    for (const clipId of [...this.padClipLoops.keys()]) this.stopClipLoop(clipId)
+  }
+
+  clipLoopActive(clipId: ClipId): boolean {
+    return this.padClipLoops.has(clipId)
+  }
+
+  /** Pad activity (sample voices, clip loops) for the pad grid's lights. */
+  subscribePads = (listener: () => void): (() => void) => {
+    this.padListeners.add(listener)
+    return () => this.padListeners.delete(listener)
+  }
+
+  padsVersion = (): number => this.padVersion
+
+  private emitPads(): void {
+    this.padVersion++
+    for (const listener of this.padListeners) listener()
+  }
+
+  private startPadScheduler(): void {
+    if (this.padTimer !== null) return
+    this.padTimer = setInterval(() => {
+      if (this.transport.isPlaying) this.topUpPadLoops()
+    }, SCHEDULE_INTERVAL_MS)
+  }
+
+  private stopPadScheduler(): void {
+    if (this.padTimer !== null) clearInterval(this.padTimer)
+    this.padTimer = null
+  }
+
+  /** Queue upcoming repeats of each launched clip up to the lookahead. */
+  private topUpPadLoops(): void {
+    const ctx = this.ctx
+    if (!ctx || this.padClipLoops.size === 0 || this.transport.activeLoop()) return
+    const state = this.store.state
+    const tps = ticksPerSecond(state.tempo)
+    const horizonTicks =
+      this.anchorTicks + (ctx.currentTime + SCHEDULE_LOOKAHEAD_SEC - this.anchorSec) * tps
+    for (const [clipId, loop] of this.padClipLoops) {
+      const clip = state.clips[clipId]
+      const track = clip ? state.tracks[clip.trackId] : undefined
+      // The clip or its track vanished (or froze) mid-set: the pad goes dark.
+      if (!clip || !track || track.frozenAssetId !== null) {
+        this.stopClipLoop(clipId)
+        continue
+      }
+      const period = Math.max(1, clip.duration)
+      let repeat = loop.nextRepeat
+      let guard = 0
+      while (loop.startTicks + repeat * period < horizonTicks && guard++ < 64) {
+        const repeatState = padClipRepeatState(state, clipId, loop.startTicks + repeat * period)
+        const fadeGains = new Map<string, GainNode>()
+        this.scheduleClipsPass(
+          this.anchorTicks,
+          this.anchorSec,
+          Number.POSITIVE_INFINITY,
+          fadeGains,
+          repeatState,
+          undefined,
+          undefined,
+          loop.sources
+        )
+        this.scheduleNotesPass(
+          this.anchorTicks,
+          this.anchorSec,
+          Number.POSITIVE_INFINITY,
+          fadeGains,
+          repeatState,
+          undefined,
+          undefined,
+          loop.sources
+        )
+        repeat++
+      }
+      loop.nextRepeat = repeat
+    }
   }
 
   /** Live-preview a plugin knob while dragging (no op until release). */
@@ -644,6 +831,9 @@ export class AudioEngine {
   // ---------- Transport / state reactions ----------
 
   private onTransportEvent = (event: 'play' | 'stop' | 'seek'): void => {
+    // Launched clip loops are anchored to the roll they were launched in;
+    // a stop ends the set and a seek invalidates their scheduled repeats.
+    if (event === 'stop' || event === 'seek') this.stopAllClipLoops()
     if (event === 'stop') {
       this.stopAllSources()
       this.teardownPreview()
@@ -1061,7 +1251,11 @@ export class AudioEngine {
     if (state.tracks !== this.prevTracks) {
       for (const [id, track] of Object.entries(state.tracks)) {
         const prev = this.prevTracks[id]
-        if (prev && prev.synth !== track.synth) {
+        if (
+          prev &&
+          (prev.synth !== track.synth ||
+            (prev.samplerAssetId ?? null) !== (track.samplerAssetId ?? null))
+        ) {
           synthEdited.add(id)
           // Removing/bypassing the instrument silences live voices too —
           // a keyboard must never keep sounding through a synth that is off.
@@ -1219,6 +1413,8 @@ export class AudioEngine {
     }
     for (const track of Object.values(state.tracks)) {
       if (track.frozenAssetId === event.asset.id) affected.add(track.id)
+      // A sampler whose sample just landed starts sounding its notes.
+      if (track.samplerAssetId === event.asset.id) affected.add(track.id)
     }
     if (affected.size > 0) this.queueRestart(affected)
   }
@@ -1266,6 +1462,16 @@ export class AudioEngine {
     if (!this.ctx) return
     this.anchorSec = this.ctx.currentTime
     this.anchorTicks = this.transport.positionTicks()
+    // A restart tore down every scheduled source, launched pad repeats
+    // included. Rewind each loop's counter to the repeat sounding at the
+    // new anchor — the schedule math picks it up mid-material — so a
+    // document edit mid-set never silences a running launch.
+    for (const [clipId, loop] of this.padClipLoops) {
+      loop.sources.clear()
+      const clip = this.store.state.clips[clipId]
+      const period = Math.max(1, clip?.duration ?? 1)
+      loop.nextRepeat = Math.max(0, Math.floor((this.anchorTicks - loop.startTicks) / period))
+    }
   }
 
   /**
@@ -1378,6 +1584,9 @@ export class AudioEngine {
         startBeforeTicks: horizon
       })
       this.topUpTrackLoops()
+      // Launched pad loops re-queue immediately too — a restart mid-set
+      // must not leave a scheduler-tick of silence in a running launch.
+      this.topUpPadLoops()
       return
     }
     this.windowUntilTicks = null
@@ -1440,7 +1649,9 @@ export class AudioEngine {
     fadeGains: Map<string, GainNode>,
     state: ProjectState = this.store.state,
     window?: ScheduleWindow,
-    only?: ReadonlySet<TrackId>
+    only?: ReadonlySet<TrackId>,
+    /** Also registers created sources here — pad clip-loops stop via this. */
+    collect?: Set<AudioScheduledSourceNode>
   ): void {
     const ctx = this.ctx
     if (!ctx) return
@@ -1480,10 +1691,12 @@ export class AudioEngine {
       source.onended = () => {
         this.sources.delete(source)
         byTrack.delete(source)
+        collect?.delete(source)
       }
       source.start(s.when, s.offsetSec, s.durationSec)
       this.sources.add(source)
       byTrack.add(source)
+      collect?.add(source)
     }
   }
 
@@ -1500,7 +1713,9 @@ export class AudioEngine {
     fadeGains: Map<string, GainNode>,
     state: ProjectState = this.store.state,
     window?: ScheduleWindow,
-    only?: ReadonlySet<TrackId>
+    only?: ReadonlySet<TrackId>,
+    /** Also registers created sources here — pad clip-loops stop via this. */
+    collect?: Set<AudioScheduledSourceNode>
   ): void {
     const ctx = this.ctx
     if (!ctx) return
@@ -1519,14 +1734,41 @@ export class AudioEngine {
         state
       )
       const byTrack = this.trackSources(s.trackId)
-      const voices = buildSynthVoice(ctx, dest, s, state.tracks[s.trackId]?.synth ?? {}, (osc) => {
-        this.sources.delete(osc)
-        byTrack.delete(osc)
-      })
-      for (const osc of voices) {
-        this.sources.add(osc)
-        byTrack.add(osc)
+      const track = state.tracks[s.trackId]
+      const voices = buildInstrumentVoice(
+        ctx,
+        dest,
+        s,
+        track?.synth ?? {},
+        this.samplerSampleFor(track),
+        (source) => {
+          this.sources.delete(source)
+          byTrack.delete(source)
+          collect?.delete(source)
+        }
+      )
+      for (const source of voices) {
+        this.sources.add(source)
+        byTrack.add(source)
+        collect?.add(source)
       }
+    }
+  }
+
+  /**
+   * What the track's sampler instrument plays: decoded buffer + slice
+   * onsets. Null until the asset lands/decodes — the voice is then silent,
+   * exactly like a clip whose asset is still transferring, and
+   * onAssetsChanged re-queues the track the moment it arrives.
+   */
+  private samplerSampleFor(track: Track | undefined): InstrumentSample | null {
+    const assetId = track?.samplerAssetId ?? null
+    if (!assetId) return null
+    const asset = this.assets.get(assetId)
+    if (!asset?.buffer) return null
+    return {
+      buffer: asset.buffer,
+      onsets: onsetsForPeaks(asset.peaks, asset.peaksPerSecond)
     }
   }
 

@@ -362,6 +362,38 @@ export function invert(state: ProjectState, op: Operation): Operation | null {
       }
     }
 
+    case 'track/setSampler': {
+      const track = state.tracks[op.trackId]
+      if (!track) return null
+      const params = op.params
+        ? Object.fromEntries(
+            Object.keys(op.params).map((param) => [
+              param,
+              track.synth[param] ?? SYNTH_DEFS[param]?.default ?? 0
+            ])
+          )
+        : undefined
+      return {
+        type: 'track/setSampler',
+        trackId: op.trackId,
+        assetId: track.samplerAssetId ?? null,
+        ...(params ? { params } : {})
+      }
+    }
+
+    case 'pad/set': {
+      const existing = state.pads[op.pad.id]
+      return existing
+        ? { type: 'pad/set', pad: existing }
+        : { type: 'pad/clear', padId: op.pad.id }
+    }
+
+    case 'pad/clear': {
+      const existing = state.pads[op.padId]
+      if (!existing) return null
+      return { type: 'pad/set', pad: existing }
+    }
+
     case 'track/rename': {
       const track = state.tracks[op.trackId]
       if (!track) return null

@@ -201,9 +201,16 @@ export const TrackHeader = memo(function TrackHeader({
           </span>
         )}
         {frozen && (
-          <span className="track-frozen-badge" title="Frozen — see the ⋯ menu to unfreeze">
+          <button
+            className="track-frozen-badge"
+            title="Frozen (playing a pre-rendered bounce) — click to unfreeze and edit again"
+            onClick={(e) => {
+              e.stopPropagation()
+              unfreezeTrack(track.id)
+            }}
+          >
             ❄
-          </span>
+          </button>
         )}
         {commentCount > 0 && (
           <button

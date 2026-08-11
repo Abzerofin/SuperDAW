@@ -4,13 +4,16 @@ import { useProjectState } from '@/state/hooks'
 import { useSelectedClipId, useSelectedTrackId } from '@/state/selection'
 import { panels, usePanels, PANEL_LABELS, type DockSide, type PanelId } from '@/state/panels'
 import { pianoRollUi, usePianoRollUi } from '@/state/pianoRollUi'
+import { stepSeqUi, useStepSeqUi } from '@/state/stepSeqUi'
 import { bayUi, type BayIntent } from '@/state/bayUi'
 import { capturePointer } from '@/lib/pointer'
 import { contextMenuStyle } from '@/lib/contextMenu'
 import { FileBay } from './bay/FileBay'
 import { EffectsDock } from './fx/EffectsDock'
 import { MixerPanel } from './mixer/MixerPanel'
+import { PadGrid } from './pads/PadGrid'
 import { PianoRoll } from './pianoroll/PianoRoll'
+import { StepSequencer } from './steps/StepSequencer'
 import { ActivityFeed } from './ActivityFeed'
 import { ChatPanel } from './ChatPanel'
 import { LyricsPanel } from './LyricsPanel'
@@ -76,6 +79,10 @@ function PanelBody({ id, clipId }: { id: PanelId; clipId: string | null }): Reac
       return <EffectsDock />
     case 'pianoroll':
       return clipId ? <PianoRoll clipId={clipId} /> : null
+    case 'steps':
+      return <StepSequencer />
+    case 'pads':
+      return <PadGrid />
     case 'activity':
       return <ActivityFeed />
     case 'chat':
@@ -126,6 +133,7 @@ interface TabDrag {
 function DockTab({ id, vertical = false }: { id: PanelId; vertical?: boolean }): React.JSX.Element {
   const panelState = usePanels()
   const rollState = usePianoRollUi()
+  const stepsState = useStepSeqUi()
   const state = useProjectState()
   const selectedTrackId = useSelectedTrackId()
   const selectedClipId = useSelectedClipId()
@@ -153,12 +161,15 @@ function DockTab({ id, vertical = false }: { id: PanelId; vertical?: boolean }):
   }
 
   // A MIDI clip is "editable" when it's already open in the roll, or the
-  // current selection can be opened.
+  // current selection can be opened. The step sequencer follows the same
+  // rule with its own target clip.
   const selectedClip = selectedClipId ? state.clips[selectedClipId] : undefined
   const selectedMidiClipId =
     selectedClip && state.tracks[selectedClip.trackId]?.kind === 'midi' ? selectedClip.id : null
   const openable = rollState.clipId ?? selectedMidiClipId
-  const disabled = id === 'pianoroll' && openable === null
+  const stepsOpenable = stepsState.clipId ?? selectedMidiClipId
+  const disabled =
+    (id === 'pianoroll' && openable === null) || (id === 'steps' && stepsOpenable === null)
 
   const effectsTrack =
     id === 'effects' && selectedTrackId ? state.tracks[selectedTrackId] : undefined
@@ -167,31 +178,46 @@ function DockTab({ id, vertical = false }: { id: PanelId; vertical?: boolean }):
       ? disabled
         ? 'Piano roll — select or double-click a MIDI clip to edit its notes'
         : 'Toggle piano roll'
-      : id === 'effects'
-        ? effectsTrack
-          ? `Effects — ${effectsTrack.name}'s insert chain`
-          : 'Effects — select a track to edit its insert chain'
-        : {
-            files: 'File Bay — imported audio and MIDI · right-click to import',
-            mixer: 'Mixer — faders, pans and inserts for every track',
-            activity: 'Activity — who changed what, when',
-            chat: 'Chat — saved with the project',
-            lyrics: 'Lyrics — saved with the project'
-          }[id as Exclude<PanelId, 'pianoroll' | 'effects'>]
+      : id === 'steps'
+        ? disabled
+          ? 'Step sequencer — select a MIDI clip to program a beat'
+          : 'Toggle step sequencer'
+        : id === 'effects'
+          ? effectsTrack
+            ? `Effects — ${effectsTrack.name}'s insert chain`
+            : 'Effects — select a track to edit its insert chain'
+          : {
+              files: 'File Bay — imported audio and MIDI · right-click to import',
+              mixer: 'Mixer — faders, pans and inserts for every track',
+              pads: 'Performance pads — samples, notes and clip launches on an 8×8 grid',
+              activity: 'Activity — who changed what, when',
+              chat: 'Chat — saved with the project',
+              lyrics: 'Lyrics — saved with the project'
+            }[id as Exclude<PanelId, 'pianoroll' | 'effects' | 'steps'>]
 
   const onClick = (): void => {
     if (dragRef.current) return // a drop, not a click
-    if (id !== 'pianoroll') {
-      panels.togglePanel(id)
+    if (id === 'pianoroll') {
+      if (panelState.isOpen('pianoroll')) {
+        panels.closePanel('pianoroll')
+      } else if (selectedMidiClipId && selectedMidiClipId !== rollState.clipId) {
+        pianoRollUi.open(selectedMidiClipId)
+      } else if (rollState.clipId !== null) {
+        panels.openPanel('pianoroll')
+      }
       return
     }
-    if (panelState.isOpen('pianoroll')) {
-      panels.closePanel('pianoroll')
-    } else if (selectedMidiClipId && selectedMidiClipId !== rollState.clipId) {
-      pianoRollUi.open(selectedMidiClipId)
-    } else if (rollState.clipId !== null) {
-      panels.openPanel('pianoroll')
+    if (id === 'steps') {
+      if (panelState.isOpen('steps')) {
+        panels.closePanel('steps')
+      } else if (selectedMidiClipId && selectedMidiClipId !== stepsState.clipId) {
+        stepSeqUi.open(selectedMidiClipId)
+      } else if (stepsState.clipId !== null) {
+        panels.openPanel('steps')
+      }
+      return
     }
+    panels.togglePanel(id)
   }
 
   const drop = (x: number, y: number): void => {

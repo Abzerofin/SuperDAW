@@ -54,6 +54,19 @@ export interface PresenceData {
      */
     readonly uiTarget?: string | null
   }
+  /**
+   * A performance-pad trigger — the collaborative-DJ channel. Pad
+   * ASSIGNMENTS are document state every peer already shares; a hit only
+   * says "play/stop pad X now", so receivers reproduce the sound locally
+   * through their own engine. `hitId` dedupes (receivers consume each hit
+   * once); additive like `yFrac` — older builds simply ignore it.
+   */
+  readonly padHit?: {
+    readonly hitId: string
+    readonly padId: string
+    readonly action: 'down' | 'up'
+    readonly velocity: number
+  }
 }
 
 export type ClientToHost =

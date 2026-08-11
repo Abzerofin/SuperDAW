@@ -187,6 +187,53 @@ input {
   color: var(--text-dim);
 }
 
+/* A value field and its ▾ read as one control. */
+.transport-field {
+  display: inline-flex;
+  align-items: center;
+  gap: 1px;
+}
+
+.quick-pick-btn {
+  color: var(--text-dim);
+  font-size: 9px;
+  line-height: 1;
+  padding: 5px 3px;
+  border-radius: 3px;
+  border: 1px solid transparent;
+}
+
+.quick-pick-btn:hover {
+  color: var(--text);
+  border-color: var(--border);
+  background: var(--bg-2);
+}
+
+.quick-pick {
+  display: grid;
+  gap: 2px;
+  min-width: 0;
+}
+
+.quick-pick-item {
+  padding: 4px 8px;
+  border-radius: 3px;
+  font-size: 11px;
+  color: var(--text-dim);
+  text-align: center;
+  white-space: nowrap;
+}
+
+.quick-pick-item:hover {
+  background: var(--bg-3, var(--bg-1));
+  color: var(--text);
+}
+
+.quick-pick-item-on {
+  color: var(--accent);
+  background: color-mix(in srgb, var(--accent) 14%, transparent);
+}
+
 .meter {
   border-radius: 2px;
   align-self: center;
@@ -2281,6 +2328,116 @@ body.middle-panning * {
   border-radius: 50%;
 }
 
+/* ---------- Piano roll: chord guide ---------- */
+.proll-chord-btn {
+  font-size: 11px;
+  color: var(--text-dim);
+  padding: 2px 7px;
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  white-space: nowrap;
+}
+
+.proll-chord-btn:hover {
+  color: var(--text);
+  background: var(--bg-2);
+}
+
+.proll-chord-btn-on {
+  color: var(--accent);
+  border-color: var(--accent);
+}
+
+.proll-chord-menu {
+  min-width: 232px;
+  max-width: 232px;
+}
+
+.proll-chord-roots {
+  display: grid;
+  grid-template-columns: repeat(6, 1fr);
+  gap: 2px;
+  padding-bottom: 4px;
+  border-bottom: 1px solid var(--border);
+}
+
+.proll-chord-root {
+  font-size: 11px;
+  color: var(--text-dim);
+  padding: 3px 0;
+  border-radius: 3px;
+  text-align: center;
+}
+
+.proll-chord-root:hover {
+  color: var(--text);
+  background: var(--bg-1);
+}
+
+.proll-chord-root-on {
+  color: var(--accent);
+  background: color-mix(in srgb, var(--accent) 16%, transparent);
+}
+
+.proll-chord-list {
+  display: grid;
+  grid-template-columns: repeat(2, 1fr);
+  gap: 2px;
+  max-height: 244px;
+  overflow-y: auto;
+  padding: 4px 0;
+}
+
+.proll-chord-item {
+  font-size: 11px;
+  color: var(--text-dim);
+  padding: 3px 6px;
+  border-radius: 3px;
+  text-align: left;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.proll-chord-item:hover {
+  color: var(--text);
+  background: var(--bg-1);
+}
+
+.proll-chord-item-on {
+  color: var(--accent);
+  background: color-mix(in srgb, var(--accent) 16%, transparent);
+}
+
+.proll-chord-clear {
+  width: 100%;
+  font-size: 11px;
+  color: var(--text-dim);
+  padding: 4px 0;
+  border-top: 1px solid var(--border);
+}
+
+.proll-chord-clear:disabled {
+  opacity: 0.4;
+  cursor: default;
+}
+
+/* The lit rows themselves: a band per chord tone, the root brighter. They
+   sit under the notes, so a drawn note always reads on top of its guide. */
+.proll-chord-row {
+  position: absolute;
+  left: 0;
+  right: 0;
+  pointer-events: none;
+  background: color-mix(in srgb, var(--accent) 13%, transparent);
+  border-top: 1px solid color-mix(in srgb, var(--accent) 26%, transparent);
+  border-bottom: 1px solid color-mix(in srgb, var(--accent) 26%, transparent);
+}
+
+.proll-chord-row-root {
+  background: color-mix(in srgb, var(--accent) 26%, transparent);
+}
+
 .proll-hint {
   flex: 1;
   font-size: 10px;
@@ -2393,6 +2550,16 @@ body.middle-panning * {
 
 .proll-key-black {
   background: #26282d;
+}
+
+/* Chord-guide keys keep their black/white identity — the mark is a bar
+   down the left edge, wider on the root. */
+.proll-key-chord {
+  box-shadow: inset 4px 0 0 color-mix(in srgb, var(--accent) 75%, transparent);
+}
+
+.proll-key-chord-root {
+  box-shadow: inset 8px 0 0 var(--accent);
 }
 
 .proll-key-label {
@@ -3697,6 +3864,16 @@ body.middle-panning * {
   color: #7fc7e8;
   font-size: 11px;
   flex-shrink: 0;
+  padding: 0 3px;
+  border-radius: 3px;
+  border: 1px solid transparent;
+}
+
+/* It unfreezes, so it looks pressable — a state badge that is also the
+   way out of that state. */
+.track-frozen-badge:hover {
+  border-color: #7fc7e8;
+  background: color-mix(in srgb, #7fc7e8 18%, transparent);
 }
 
 .track-header-frozen {
@@ -4875,4 +5052,341 @@ body.middle-panning * {
 
 .rg-port-out {
   right: -6px;
+}
+
+/* ---------- Instruments (sampler / drum kit cards) ---------- */
+
+.fx-inst-kind {
+  width: auto;
+  padding: 0 5px;
+  font-size: 9px;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+}
+
+.fx-inst-row {
+  margin: 3px 0 5px;
+}
+
+.smp-drop {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-height: 30px;
+  padding: 3px 6px;
+  margin-bottom: 4px;
+  border: 1px dashed var(--border);
+  border-radius: 4px;
+  font-size: 11px;
+}
+
+.smp-drop-loaded {
+  border-style: solid;
+  background: var(--bg-2);
+}
+
+.smp-name {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-weight: 600;
+}
+
+.smp-audition {
+  width: 20px;
+  height: 20px;
+  border: 1px solid var(--border);
+  border-radius: 3px;
+  background: var(--bg-1);
+  color: var(--text);
+  font-size: 9px;
+}
+
+.smp-audition:active {
+  background: var(--accent);
+  border-color: var(--accent);
+}
+
+.drum-pads {
+  display: grid;
+  grid-template-columns: repeat(4, 1fr);
+  gap: 4px;
+  margin: 2px 0 6px;
+}
+
+.drum-pad {
+  height: 30px;
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  background: var(--bg-2);
+  color: var(--text-dim);
+  font-size: 10px;
+  font-weight: 600;
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+
+.drum-pad:active {
+  background: var(--accent);
+  border-color: var(--accent);
+  color: #fff;
+}
+
+.drum-pad-selected {
+  border-color: var(--accent);
+  color: var(--text);
+}
+
+/* ---------- Step sequencer ---------- */
+
+.steps-panel {
+  height: 100%;
+  display: flex;
+  flex-direction: column;
+  background: var(--bg-1);
+}
+
+.steps-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 4px 10px;
+  border-bottom: 1px solid var(--border);
+}
+
+.steps-scroll {
+  flex: 1;
+  overflow: auto;
+  position: relative;
+}
+
+.steps-grid {
+  position: relative;
+  display: grid;
+  grid-template-columns: 64px repeat(var(--step-cols), 22px);
+  align-content: start;
+  gap: 0;
+  padding-bottom: 4px;
+  width: max-content;
+}
+
+.steps-corner {
+  position: sticky;
+  left: 0;
+  z-index: 3;
+  background: var(--bg-1);
+  height: 18px;
+}
+
+.steps-ruler {
+  display: contents;
+}
+
+.steps-ruler-cell {
+  height: 18px;
+  font-size: 9px;
+  color: var(--text-dim);
+  padding-left: 3px;
+  line-height: 18px;
+  user-select: none;
+}
+
+.steps-label {
+  position: sticky;
+  left: 0;
+  z-index: 2;
+  height: 22px;
+  padding: 0 8px 0 10px;
+  border: none;
+  border-top: 1px solid var(--grid-beat);
+  background: var(--bg-1);
+  color: var(--text-dim);
+  font-size: 10px;
+  font-weight: 600;
+  text-align: left;
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+
+.steps-label:hover {
+  color: var(--text);
+}
+
+.steps-cell {
+  height: 22px;
+  border: none;
+  border-top: 1px solid var(--grid-beat);
+  border-left: 1px solid var(--grid-beat);
+  background: var(--bg-2);
+  padding: 0;
+}
+
+.steps-cell.steps-beat-start {
+  border-left-color: var(--grid-bar);
+}
+
+.steps-cell.steps-bar-start,
+.steps-ruler-cell.steps-bar-start {
+  border-left: 1px solid color-mix(in srgb, var(--text-dim) 50%, transparent);
+}
+
+.steps-cell:hover {
+  background: color-mix(in srgb, var(--accent) 25%, var(--bg-2));
+}
+
+.steps-cell-on {
+  background: color-mix(in srgb, var(--accent) calc(var(--step-vel, 1) * 100%), var(--bg-2));
+  box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--accent) 60%, transparent);
+}
+
+.steps-playhead {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  left: 0;
+  width: 1px;
+  background: var(--accent);
+  opacity: 0.8;
+  pointer-events: none;
+  z-index: 4;
+}
+
+/* ---------- Performance pads ---------- */
+
+.pads-panel {
+  height: 100%;
+  display: flex;
+  gap: 8px;
+  padding: 8px;
+  background: var(--bg-1);
+  overflow: hidden;
+}
+
+.pads-side {
+  width: 210px;
+  min-width: 210px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  overflow-y: auto;
+}
+
+.pads-toolbar {
+  display: flex;
+  gap: 6px;
+}
+
+.pads-hint {
+  font-size: 10px;
+  line-height: 1.5;
+}
+
+.pads-grid {
+  flex: 1;
+  display: grid;
+  grid-template-columns: repeat(8, minmax(24px, 1fr));
+  grid-template-rows: repeat(8, minmax(0, 1fr));
+  gap: 4px;
+  min-width: 0;
+}
+
+.pad-cell {
+  position: relative;
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  background: var(--bg-2);
+  color: var(--text-dim);
+  font-size: 9px;
+  padding: 1px 3px;
+  overflow: hidden;
+  min-height: 0;
+}
+
+.pad-cell-assigned {
+  border-color: color-mix(in srgb, var(--pad-tint, var(--accent)) 55%, var(--border));
+  background: color-mix(in srgb, var(--pad-tint, var(--accent)) 16%, var(--bg-2));
+  color: var(--text);
+}
+
+.pad-cell-lit {
+  background: var(--pad-tint, var(--accent));
+  color: #fff;
+  box-shadow: 0 0 8px color-mix(in srgb, var(--pad-tint, var(--accent)) 70%, transparent);
+}
+
+.pad-cell-selected {
+  outline: 1px solid var(--accent);
+}
+
+.pad-cell-label {
+  display: block;
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+
+.pad-cell-kind {
+  position: absolute;
+  right: 2px;
+  bottom: 1px;
+  font-size: 8px;
+  opacity: 0.8;
+}
+
+.pads-editor {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 6px;
+  border: 1px solid var(--border);
+  border-radius: 5px;
+  background: var(--bg-2);
+}
+
+.pads-editor-head {
+  display: flex;
+  align-items: center;
+}
+
+.pads-field {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 11px;
+}
+
+.pads-select,
+.pads-name,
+.pads-num {
+  background: var(--bg-0);
+  border: 1px solid var(--border);
+  border-radius: 3px;
+  color: var(--text);
+  font-size: 11px;
+  padding: 3px 5px;
+  width: 100%;
+}
+
+.pads-num {
+  width: 58px;
+}
+
+.pads-swatches {
+  display: flex;
+  gap: 4px;
+}
+
+.pads-swatch {
+  width: 16px;
+  height: 16px;
+  border-radius: 3px;
+  border: 1px solid transparent;
+}
+
+.pads-swatch-active {
+  outline: 2px solid var(--text);
 }

@@ -11,8 +11,9 @@ import {
 import { denormalizeParam } from '@core/model/effects'
 import { paramDefsOf } from '@core/plugins/builtin'
 import { applyClipFades } from './fades'
+import { buildInstrumentVoice, type InstrumentSample } from './instruments'
+import { onsetsForPeaks } from './onsets'
 import { pluginRegistry } from './pluginRegistry'
-import { buildSynthVoice } from './synth'
 import { scheduleClips, scheduleNotes, ticksPerSecond } from './scheduling'
 import { encodeWavPcm16 } from './wav'
 
@@ -29,13 +30,33 @@ import { encodeWavPcm16 } from './wav'
  */
 
 interface AssetSourceLike {
-  get(id: string): { buffer: AudioBuffer | null } | undefined
+  get(id: string): {
+    buffer: AudioBuffer | null
+    /** Peak envelope — the sampler's slice boundaries derive from it. */
+    peaks?: Float32Array | null
+    peaksPerSecond?: number
+  } | undefined
   getSeconds(id: string): number | null
   /** Mirrored copy for reversed clips (cached per asset by the store). */
   reversedBuffer?(
     id: string,
     create: (channels: Float32Array[], sampleRate: number) => AudioBuffer
   ): AudioBuffer | null
+}
+
+/** Resolve a track's sampler sample, mirroring the live engine exactly. */
+function samplerSampleFor(
+  assets: AssetSourceLike,
+  track: { samplerAssetId?: string | null } | undefined
+): InstrumentSample | null {
+  const assetId = track?.samplerAssetId ?? null
+  if (!assetId) return null
+  const asset = assets.get(assetId)
+  if (!asset?.buffer) return null
+  return {
+    buffer: asset.buffer,
+    onsets: onsetsForPeaks(asset.peaks ?? null, asset.peaksPerSecond ?? 0)
+  }
 }
 
 /**
@@ -261,7 +282,8 @@ function scheduleSources(
   for (const s of scheduleNotes(state, fromTicks, atSec, untilTicks)) {
     const dest = destinationFor(s.clipId, s.trackId)
     if (!dest) continue
-    buildSynthVoice(ctx, dest, s, state.tracks[s.trackId]?.synth ?? {})
+    const track = state.tracks[s.trackId]
+    buildInstrumentVoice(ctx, dest, s, track?.synth ?? {}, samplerSampleFor(assets, track))
   }
 }
 

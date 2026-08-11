@@ -14,6 +14,7 @@ import {
   type BayDragPayload
 } from '@/lib/importAudio'
 import { contextMenuStyle } from '@/lib/contextMenu'
+import { sliceAssetToSampler } from '@/lib/sliceActions'
 import { useTheme } from '@/state/theme'
 
 /** Internal drag type for reorganizing nodes inside the bay. */
@@ -270,6 +271,9 @@ export function FileBay(): React.JSX.Element {
                   {node.kind === 'folder' && menuItem('Open', () => setFolderId(node.id))}
                   {node.kind === 'folder' &&
                     menuItem('Import into this folder…', () => browseForBayFiles(node.id))}
+                  {node.kind === 'audio' &&
+                    node.assetId !== null &&
+                    menuItem('Slice to sampler track', () => sliceAssetToSampler(node.assetId!))}
                   {menuItem('Rename', () => setRenamingId(node.id))}
                   {menuItem('Delete', () => deleteNode(node.id))}
                 </>

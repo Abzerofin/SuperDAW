@@ -24,7 +24,9 @@ import {
   MIN_STRETCH,
   isClipLooped,
   normalizeLoop,
-  pluginsOfTrack
+  padsEqual,
+  pluginsOfTrack,
+  sanitizePad
 } from '../model/types'
 import { SYNTH_DEFS, clampParam, type ParamDef } from '../model/effects'
 import { mergeSettings, sanitizeSettingsPatch } from '../model/projectSettings'
@@ -591,6 +593,45 @@ export function apply(state: ProjectState, op: Operation): ProjectState {
       }
       if (!changed) return state
       return { ...state, tracks: { ...state.tracks, [op.trackId]: { ...track, synth } } }
+    }
+
+    case 'track/setSampler': {
+      const track = state.tracks[op.trackId]
+      if (!track || track.kind !== 'midi') return state
+      const assetId = typeof op.assetId === 'string' ? op.assetId : null
+      let changed = (track.samplerAssetId ?? null) !== assetId
+      const synth = { ...track.synth }
+      for (const [param, raw] of Object.entries(op.params ?? {})) {
+        const def = SYNTH_DEFS[param]
+        if (!def) continue
+        const value = clampParam(def, raw)
+        if (synth[param] === value) continue
+        synth[param] = value
+        changed = true
+      }
+      if (!changed) return state
+      return {
+        ...state,
+        tracks: {
+          ...state.tracks,
+          [op.trackId]: { ...track, samplerAssetId: assetId, synth }
+        }
+      }
+    }
+
+    case 'pad/set': {
+      const pad = sanitizePad(op.pad)
+      if (!pad) return state
+      const existing = state.pads[pad.id]
+      if (existing && padsEqual(existing, pad)) return state
+      return { ...state, pads: { ...state.pads, [pad.id]: pad } }
+    }
+
+    case 'pad/clear': {
+      if (!state.pads[op.padId]) return state
+      const pads = { ...state.pads }
+      delete pads[op.padId]
+      return { ...state, pads }
     }
 
     case 'track/rename':

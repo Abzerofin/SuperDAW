@@ -82,6 +82,7 @@ export function createDemoProject(): ProjectState {
     notes: {},
     plugins: {},
     routes: {},
+    pads: {},
     settings: DEFAULT_PROJECT_SETTINGS
   }
 }

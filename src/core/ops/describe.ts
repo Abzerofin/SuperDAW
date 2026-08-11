@@ -198,6 +198,20 @@ export function describe(state: ProjectState, op: Operation): string | null {
       }
       return `Adjusted the synth on "${name}"`
     }
+    case 'track/setSampler': {
+      const name = trackName(state, op.trackId)
+      return op.assetId !== null
+        ? `Loaded a sample into the sampler on "${name}"`
+        : `Cleared the sampler on "${name}"`
+    }
+    case 'pad/set':
+      return op.pad.name !== ''
+        ? `Assigned pad ${op.pad.row + 1}·${op.pad.col + 1} to "${op.pad.name}"`
+        : `Assigned pad ${op.pad.row + 1}·${op.pad.col + 1}`
+    case 'pad/clear': {
+      const pad = state.pads[op.padId]
+      return pad ? `Cleared pad ${pad.row + 1}·${pad.col + 1}` : null
+    }
     case 'clip/create':
       return `Added clip "${op.clip.name}" to "${trackName(state, op.clip.trackId)}"`
     case 'clip/delete':

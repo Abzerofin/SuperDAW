@@ -1,5 +1,5 @@
-import type { Clip, PluginInstance, ProjectState, Track } from '../model/types'
-import { createEmptyProject } from '../model/types'
+import type { Clip, PerformancePad, PluginInstance, ProjectState, Track } from '../model/types'
+import { createEmptyProject, sanitizePad } from '../model/types'
 import { routeIsValid } from '../model/routing'
 import { clampParam, synthDefaults, EFFECT_DEFS, type EffectType } from '../model/effects'
 import { normalizeProjectSettings } from '../model/projectSettings'
@@ -52,7 +52,10 @@ export function assetPathInArchive(entry: AssetManifestEntry): string {
   return `assets/${entry.id}.${entry.ext}`
 }
 
-/** Asset ids referenced by the document (clips, bay entries, frozen tracks). */
+/**
+ * Asset ids referenced by the document (clips, bay entries, frozen tracks,
+ * sampler instruments, sample pads).
+ */
 export function referencedAssetIds(state: ProjectState): Set<string> {
   const ids = new Set<string>()
   for (const clip of Object.values(state.clips)) {
@@ -63,6 +66,10 @@ export function referencedAssetIds(state: ProjectState): Set<string> {
   }
   for (const track of Object.values(state.tracks)) {
     if (track.frozenAssetId) ids.add(track.frozenAssetId)
+    if (track.samplerAssetId) ids.add(track.samplerAssetId)
+  }
+  for (const pad of Object.values(state.pads ?? {})) {
+    if (pad.assetId) ids.add(pad.assetId)
   }
   return ids
 }
@@ -149,15 +156,24 @@ function normalizeState(state: ProjectState): ProjectState {
   const merged: ProjectState = { ...createEmptyProject(''), ...state }
   const tracks: Record<string, Track> = {}
   for (const [id, track] of Object.entries(merged.tracks)) {
-    const legacy = track as Omit<Track, 'volume' | 'pan' | 'synth'> & Partial<Track>
+    const { samplerAssetId: rawSampler, ...legacyRest } = track as Omit<
+      Track,
+      'volume' | 'pan' | 'synth'
+    > &
+      Partial<Track>
     tracks[id] = {
-      ...legacy,
-      volume: legacy.volume ?? 1,
-      pan: legacy.pan ?? 0,
-      synth: legacy.synth ?? (legacy.kind === 'midi' ? synthDefaults() : {}),
+      ...legacyRest,
+      volume: legacyRest.volume ?? 1,
+      pan: legacyRest.pan ?? 0,
+      synth: legacyRest.synth ?? (legacyRest.kind === 'midi' ? synthDefaults() : {}),
       // Pre-folder/freeze files: root-level, unfrozen.
-      parentId: legacy.parentId ?? null,
-      frozenAssetId: legacy.frozenAssetId ?? null
+      parentId: legacyRest.parentId ?? null,
+      frozenAssetId: legacyRest.frozenAssetId ?? null,
+      // Optional field: preserved exactly when stored (string or explicit
+      // null), dropped when absent or junk — so a round-trip is identity.
+      ...(typeof rawSampler === 'string' || rawSampler === null
+        ? { samplerAssetId: rawSampler }
+        : {})
     }
   }
   // Clips from before fades/playback settings lack those fields. Files from
@@ -181,11 +197,19 @@ function normalizeState(state: ProjectState): ProjectState {
       loopLength: legacyLoopFlag === false ? 0 : (legacy.loopLength ?? 0)
     }
   }
+  // Pads re-earn their place through the reducer's own sanitizer —
+  // routes-grade hygiene (additive since format 3; older files have none).
+  const pads: Record<string, PerformancePad> = {}
+  for (const raw of Object.values(merged.pads ?? {})) {
+    const pad = sanitizePad(raw)
+    if (pad) pads[pad.id] = pad
+  }
   const full: ProjectState = {
     ...merged,
     tracks,
     clips,
     plugins: migratePlugins(merged, tracks),
+    pads,
     // Pre-settings files get defaults; stored values re-earn their place
     // through the same normalizer the reducer uses (never trusted raw).
     settings: normalizeProjectSettings(merged.settings)

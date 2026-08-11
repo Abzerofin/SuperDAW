@@ -1,4 +1,5 @@
 import { PPQ } from '@core/model/timebase'
+import { isTrackEffectivelyAudible } from '@core/model/types'
 import { projectStore } from './projectStore'
 
 /**
@@ -30,22 +31,38 @@ export interface LoopRegion {
 }
 
 /**
- * Timeline end of the current project, in ticks (0 = empty project).
- * Cached on the clips record's identity: positionTicks() calls this on
- * every animation frame from several subscribers, and scanning a
- * thousand clips per frame purely to recompute a constant would waste
- * hundreds of thousands of iterations per second.
+ * Timeline end of the AUDIBLE project, in ticks (0 = nothing to hear).
+ * Muted tracks — and, while any solo is active, everything the solo
+ * silences — are left out, so looping the song wraps at the end of what
+ * is actually being heard rather than at the end of material nobody is
+ * listening to. Soloing a chorus therefore cycles the chorus.
+ *
+ * Cached on the clips AND tracks records' identities: positionTicks()
+ * calls this on every animation frame from several subscribers, and
+ * scanning a thousand clips per frame purely to recompute a constant
+ * would waste hundreds of thousands of iterations per second.
  */
-let songEndFor: unknown = null
+let songEndForClips: unknown = null
+let songEndForTracks: unknown = null
 let songEndValue = 0
 function songEndTicks(): number {
-  const clips = projectStore.state.clips
-  if (songEndFor !== clips) {
+  const state = projectStore.state
+  const { clips, tracks } = state
+  if (songEndForClips !== clips || songEndForTracks !== tracks) {
+    // Audibility is a per-track answer walking the folder chain; resolve
+    // it once per track rather than once per clip.
+    const audible = new Map<string, boolean>()
     let end = 0
     for (const clip of Object.values(clips)) {
-      end = Math.max(end, clip.start + clip.duration)
+      let ok = audible.get(clip.trackId)
+      if (ok === undefined) {
+        ok = isTrackEffectivelyAudible(state, clip.trackId)
+        audible.set(clip.trackId, ok)
+      }
+      if (ok) end = Math.max(end, clip.start + clip.duration)
     }
-    songEndFor = clips
+    songEndForClips = clips
+    songEndForTracks = tracks
     songEndValue = end
   }
   return songEndValue
@@ -81,16 +98,36 @@ export class Transport {
   private eventListeners = new Set<(event: TransportEvent) => void>()
   private rafId: number | null = null
 
+  /** Wrap point the running song loop was last scheduled against. */
+  private songLoopEnd = 0
+
   constructor() {
-    // Re-anchor on tempo changes so elapsed time already played is not
-    // retroactively rescaled (which would make the playhead jump).
     projectStore.subscribe(() => {
+      // Re-anchor on tempo changes so elapsed time already played is not
+      // retroactively rescaled (which would make the playhead jump).
       const tempo = projectStore.state.tempo
-      if (tempo === this.tempo) return
-      this.baseTicks = this.positionTicks()
-      this.startedAt = this.timeSource.now()
-      this.tempo = tempo
+      if (tempo !== this.tempo) {
+        this.baseTicks = this.positionTicks()
+        this.startedAt = this.timeSource.now()
+        this.tempo = tempo
+      }
+      // The song loop's wrap point is the end of the AUDIBLE material, so
+      // muting or soloing moves it. The engine pre-schedules a whole
+      // iteration ahead, so the new region has to be re-queued — otherwise
+      // sources beyond the new end keep sounding after the playhead wraps.
+      if (this.playing && this.songLoopOn && !this.explicitRegionActive()) {
+        const end = songEndTicks()
+        if (end !== this.songLoopEnd) {
+          this.songLoopEnd = end
+          this.reanchorForLoopChange(this.positionTicks())
+        }
+      }
     })
+  }
+
+  /** An explicit cycle region overrides the song loop while it is on. */
+  private explicitRegionActive(): boolean {
+    return this.loopOn && this.loop !== null && this.loop.end > this.loop.start
   }
 
   get isPlaying(): boolean {
@@ -110,7 +147,7 @@ export class Transport {
 
   /** The region ONLY when it should actually cycle playback. */
   activeLoop(): LoopRegion | null {
-    if (this.loopOn && this.loop && this.loop.end > this.loop.start) return this.loop
+    if (this.explicitRegionActive()) return this.loop
     // Song loop: cycle the whole project. Computed fresh each call so
     // edits that lengthen the song extend the cycle without ceremony. An
     // explicit region wins — it is the more deliberate gesture.
@@ -130,6 +167,7 @@ export class Transport {
     if (this.songLoopOn === enabled) return
     const resumeAt = this.positionTicks()
     this.songLoopOn = enabled
+    this.songLoopEnd = songEndTicks()
     this.reanchorForLoopChange(resumeAt)
   }
 

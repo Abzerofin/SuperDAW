@@ -208,8 +208,9 @@ on another's — with zero document divergence.
   and chain members absent from `order` keep their relative place at the
   end — so an insert a peer added concurrently is never dropped.
 
-The built-in synth still lives on MIDI tracks (`Track.synth`); folding it
-into an instrument-plugin instance is a future, separate migration.
+The built-in instruments (analog synth, sampler, drum kit — see their own
+section) still live on MIDI tracks (`Track.synth`); folding them into
+instrument-plugin instances is a future, separate migration.
 
 ### External plugins (VST3) — hosted, but only offline
 
@@ -391,6 +392,13 @@ Two pieces make it exact:
   `positionTicks()`. Nothing polls, and the drawn playhead can never
   disagree with what is heard. Starting before the region plays the run-up
   once, then cycles.
+- **The song loop cycles what is AUDIBLE.** Its wrap point is the end of
+  the material on tracks `isTrackEffectivelyAudible` accepts, so soloing a
+  section loops that section and a muted tail does not make the loop wait
+  on silence. Because the engine pre-schedules a whole iteration, a
+  mute/solo change while it runs re-anchors and re-emits a seek so the new
+  region is re-queued. An explicit cycle region is the more deliberate
+  gesture and still overrides it.
 - **Audio** is pre-scheduled per iteration. `scheduleClips`/`scheduleNotes`
   take an `untilTicks` bound, so the engine queues one pass per iteration
   anchored at that iteration's exact wrap time (`AudioEngine.scheduleAll`
@@ -423,6 +431,80 @@ changes how fast the material is consumed, and time-scaling transposes.
 Formant-preserving independent stretch needs the PSOLA/phase-vocoder
 worklet the roadmap defers to its own DSP milestone; the UI says so rather
 than implying otherwise. Slicing is the existing `clip/split`.
+
+## Built-in instruments (analog · sampler · drum kit)
+
+A MIDI track's instrument is selected by the `instrument` synth param —
+all three instruments' params coexist in the one flat `Track.synth`
+record (`SYNTH_DEFS`), so switching never loses a knob position and every
+control is the existing `track/setSynthParam` op (clamped in the reducer,
+undoable, synced — no new op machinery). `instrumentKindOf(synth)` is the
+single dispatch key; `audio/instruments.ts` holds the voice builders and
+the two dispatch points (`buildInstrumentVoice` for scheduled notes,
+`buildLiveInstrumentVoice` for live input), shared verbatim by the engine
+and the offline renderer so bounces and freezes sound like playback.
+
+- **Sampler.** Plays `Track.samplerAssetId` (a normal document asset
+  reference — counted by `referencedAssetIds`, so save-GC, memory
+  eviction and collab transfer all follow; a sample still transferring is
+  simply silent, like a clip's asset). KEYS mode resamples chromatically
+  from `smpRoot` with start/end region, optional sustain loop and ADSR;
+  SLICES mode maps transient slices across the keys from
+  `SLICE_BASE_PITCH` (C1). The asset lands via `track/setSampler`, whose
+  optional `params` ride along so "drop a sample onto a track" is one op.
+  Slice boundaries derive per client from the asset's peak envelope
+  (`audio/onsets.ts`, the same detector waveform-peak snapping uses;
+  region math in `core/model/slices.ts`) — document data only ever
+  references slices by INDEX, so sub-millisecond decode differences
+  between machines cannot diverge anything.
+- **Drum synth.** Eight synthesized pads on the GM drum pitches
+  (`DRUM_PADS`: kick/snare/clap/hats/toms/ride, with GM aliases), four
+  params each (`<pad>Tune/Decay/Tone/Level`) generated into `SYNTH_DEFS`.
+  Pure Web Audio synthesis (pitch-enveloped sines, filtered noise, the
+  clap's stuttered envelope) — no samples, nothing to transfer. Unmapped
+  pitches are silent; drum hits are one-shots (live release is a no-op).
+- **Step sequencer** (Steps tab): a drum grid over ONE MIDI clip's notes —
+  rows are the kit's pads (or the pitches in play on melodic tracks),
+  columns 16th/8th steps. Cells are ordinary `Note` entities, so the
+  piano roll, clip previews and collaborators see the same edit; a paint
+  stroke commits as ONE `note/addMany`/`note/delete` on release (the
+  one-gesture-one-op rule — painting never floods the sync stream).
+- **Slicer.** "Slice at transients" cuts an audio clip in place (one
+  `clip/slice`); "Slice to sampler" builds a sliced-sampler track plus a
+  clip whose notes replay the original groove via the pure
+  `core/ops/sliceToSampler.buildSliceToSamplerOp` — materialized ids,
+  shipped as one `track/create`, one undo (the duplicate-track rule).
+
+## Performance pads (the collaborative-DJ surface)
+
+The Pads tab is an 8×8 launchpad. Pad ASSIGNMENTS are document state
+(`ProjectState.pads`, `pad/set`/`pad/clear` ops) — a pad's id IS its grid
+cell, so two peers assigning one cell write the same entity and converge
+by last-write-wins. Pads reference clips/tracks/assets by id and tolerate
+targets vanishing (a stale pad is silent, like a bay entry whose asset is
+gone); `sanitizePad` is shared by the reducer and the file loader
+(routes-grade hygiene). Sample-pad assets count as document references.
+
+TRIGGERING is ephemeral performance, never document state
+(`state/padPerform.ts`): sample pads fire one-shots into the master bus,
+note pads play a track's instrument through `liveNoteOn` (inserts, fader,
+bus routing apply), clip pads toggle a clip loop quantized to the NEXT
+BAR — engine-side (`launchClipLoop`), the clip's repeats are queued
+through the ordinary schedule math over a derived one-clip state
+(`padClipRepeatState`, the track-loop trick), so launches carry fades,
+per-clip looping and inserts, survive mid-set document edits (restart
+rewinds each loop's repeat counter), and die on transport stop/seek.
+Pads are playable by mouse, computer keyboard (bottom four grid rows),
+or a MIDI grid controller (notes 36+, claimed from the track-input
+router by `midiInputs.setPadSink`).
+
+Hits ride the presence channel (`PresenceData.padHit` — additive, opaque
+to relay and host; older builds ignore it): the performer hears their
+local echo instantly, peers receive `{hitId, padId, action, velocity}`
+and reproduce the sound through their own engine from the shared
+assignments — collaborative DJing with zero document traffic. Receipt is
+a one-shot callback with an id-keyed dedupe set, never pull-from-render
+(audio must fire exactly once).
 
 ## Time
 
@@ -761,6 +843,41 @@ anyone raises the comfortable ~100-200-track ceiling.
     route with ASIO rejected on GPL grounds, utilityProcess placement,
     five shippable phases starting with zero-native seam extraction and a
     loopback latency-calibration feature that ships on Web Audio first).
+
+27. ✅ **Instruments & performance** (see the built-in instruments and
+    performance pads sections) — the sampler (KEYS/SLICES modes,
+    `Track.samplerAssetId` + `track/setSampler`), the 8-pad drum synth
+    (all params riding the existing synth-param ops via extended
+    `SYNTH_DEFS`), the Steps drum-grid editor over ordinary notes
+    (one-op paint strokes), the transient slicer ("Slice at transients"
+    in place, "Slice to sampler" via `core/ops/sliceToSampler`), and the
+    8×8 performance-pad grid (`ProjectState.pads` + `pad/*` ops,
+    cell-keyed LWW convergence; triggering via `state/padPerform` with
+    engine-side one-shots and bar-quantized clip launches; hits broadcast
+    as `PresenceData.padHit` so collaborators hear the set). Instrument
+    voices dispatch through `audio/instruments.ts`, shared by engine and
+    offline render; onset detection extracted to `audio/onsets.ts`.
+    Dock layouts now ADOPT panels added after the layout was saved
+    instead of resetting.
+
+28. ✅ **Workflow batch VI** — the song loop now wraps at the end of the
+    AUDIBLE material: `songEndTicks()` skips clips on tracks
+    `isTrackEffectivelyAudible` rejects, so soloing a chorus cycles the
+    chorus and muting a long tail stops the loop waiting on silence
+    (cached on the clips AND tracks identities; a mute/solo mid-cycle
+    re-anchors and re-emits a seek so the engine re-queues the new
+    region — an explicit cycle region still wins). The piano roll follows
+    the track selection like the Effects dock does (`pianoRollUi`
+    subscribes to `selection`; only while the roll is open, and only to a
+    track that HAS MIDI — selecting an audio track leaves the editor up
+    rather than blanking it). Chord guide in the roll (`lib/chords.ts`:
+    32 shapes × 12 roots): picking one lights every key of the chord in
+    every octave — bands across the lane, bars down the keyboard — a
+    guide, not a note generator, so it touches no document state. The
+    frozen ❄ badge became the unfreeze button. BPM and time signature
+    grew ▾ quick-picks of the common values, both running the same code
+    path typing or dragging does (tempo picks still go through the
+    stretch-audio conform flow).
 
 Roadmap beyond: loopback latency calibration then the native backend
 phases (docs/NATIVE_AUDIO_BACKEND.md), collaborator audio streaming +

@@ -127,6 +127,14 @@ export interface Track {
    */
   readonly frozenAssetId: string | null
   /**
+   * The asset the track's SAMPLER instrument plays (see the smp* params
+   * in SYNTH_DEFS). Optional so pre-sampler documents and fixtures need
+   * no migration; absent = null = no sample loaded (the sampler is
+   * silent). Set via `track/setSampler`; counted as a document asset
+   * reference (save GC, memory, collab transfer) like frozenAssetId.
+   */
+  readonly samplerAssetId?: string | null
+  /**
    * Graph-editor positions of the In / Mix Out terminal nodes (absent =
    * automatic layout). Document data like PluginInstance.graphX, so a
    * plugin tree keeps its arrangement for every collaborator.
@@ -231,6 +239,100 @@ export interface AutomationPoint {
   readonly value: number
 }
 
+export type PadId = string
+export type PadKind = 'sample' | 'note' | 'clip'
+
+/** Performance-pad grid dimensions (a classic 8×8 launchpad). */
+export const PAD_GRID_ROWS = 8
+export const PAD_GRID_COLS = 8
+
+/**
+ * A pad's id IS its grid cell, so two peers assigning the same cell
+ * concurrently write the same entity and converge by last-write-wins —
+ * exactly the right outcome for "we both grabbed pad 3".
+ */
+export function padIdAt(row: number, col: number): PadId {
+  return `pad-r${row}c${col}`
+}
+
+/**
+ * One cell of the performance-pad grid (the launchpad surface). The
+ * ASSIGNMENT is document state — shared, undoable, synced — because a
+ * collaborative DJ set needs everyone looking at the same bank. TRIGGERING
+ * a pad is a performance, not an edit: it never touches the document (it
+ * rides the presence channel so peers can hear it, like live cursors are
+ * seen). Pads reference clips/tracks/assets by id and tolerate the target
+ * vanishing — a stale pad simply makes no sound, mirroring how bay entries
+ * survive asset deletion.
+ */
+export interface PerformancePad {
+  readonly id: PadId
+  readonly row: number
+  readonly col: number
+  readonly kind: PadKind
+  /** 'sample' pads: the one-shot/gated asset to fire. */
+  readonly assetId: string | null
+  /** 'note' pads: play this track's instrument… */
+  readonly trackId: TrackId | null
+  /** …at this pitch. */
+  readonly pitch: number
+  /** 'clip' pads: loop this clip, quantized to the next bar. */
+  readonly clipId: ClipId | null
+  readonly name: string
+  /** null = the default pad tint (or the target clip's color). */
+  readonly color: string | null
+  /** sample/note pads: stop on release (gate) instead of one-shot. */
+  readonly gate: boolean
+}
+
+/**
+ * Field-by-field pad hygiene, shared by the reducer and the file loader
+ * (routes-grade validation: a doctored .sdaw or a hostile peer cannot
+ * smuggle malformed pads past either door). Null = unusable. The id must
+ * be the cell's canonical id — pad identity IS the grid cell — and fields
+ * irrelevant to the pad's kind are nulled so equality stays meaningful.
+ */
+export function sanitizePad(raw: PerformancePad): PerformancePad | null {
+  if (typeof raw !== 'object' || raw === null) return null
+  const row = Math.round(raw.row)
+  const col = Math.round(raw.col)
+  if (!Number.isInteger(row) || row < 0 || row >= PAD_GRID_ROWS) return null
+  if (!Number.isInteger(col) || col < 0 || col >= PAD_GRID_COLS) return null
+  if (raw.id !== padIdAt(row, col)) return null
+  if (raw.kind !== 'sample' && raw.kind !== 'note' && raw.kind !== 'clip') return null
+  const str = (v: unknown): string | null => (typeof v === 'string' && v !== '' ? v : null)
+  const pitch = Number.isFinite(raw.pitch) ? Math.min(127, Math.max(0, Math.round(raw.pitch))) : 60
+  return {
+    id: raw.id,
+    row,
+    col,
+    kind: raw.kind,
+    assetId: raw.kind === 'sample' ? str(raw.assetId) : null,
+    trackId: raw.kind === 'note' ? str(raw.trackId) : null,
+    pitch: raw.kind === 'note' ? pitch : 60,
+    clipId: raw.kind === 'clip' ? str(raw.clipId) : null,
+    name: typeof raw.name === 'string' ? raw.name : '',
+    color: str(raw.color),
+    gate: raw.gate === true
+  }
+}
+
+export function padsEqual(a: PerformancePad, b: PerformancePad): boolean {
+  return (
+    a.id === b.id &&
+    a.row === b.row &&
+    a.col === b.col &&
+    a.kind === b.kind &&
+    a.assetId === b.assetId &&
+    a.trackId === b.trackId &&
+    a.pitch === b.pitch &&
+    a.clipId === b.clipId &&
+    a.name === b.name &&
+    a.color === b.color &&
+    a.gate === b.gate
+  )
+}
+
 export type CommentId = string
 export type ChatMessageId = string
 
@@ -285,6 +387,8 @@ export interface ProjectState {
   readonly notes: Readonly<Record<NoteId, Note>>
   readonly plugins: Readonly<Record<PluginInstanceId, PluginInstance>>
   readonly routes: Readonly<Record<RouteId, Route>>
+  /** The performance-pad grid (see PerformancePad). Keyed by cell id. */
+  readonly pads: Readonly<Record<PadId, PerformancePad>>
   /** Shared project-scoped settings (loudness target, defaults). See projectSettings.ts. */
   readonly settings: ProjectSettings
 }
@@ -307,6 +411,7 @@ export function createEmptyProject(name: string, createdAt = 0): ProjectState {
     notes: {},
     plugins: {},
     routes: {},
+    pads: {},
     settings: DEFAULT_PROJECT_SETTINGS
   }
 }

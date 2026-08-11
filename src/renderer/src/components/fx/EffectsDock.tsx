@@ -1,12 +1,7 @@
 import { useEffect, useRef, useState } from 'react'
 import type { PluginInstance, PluginInstanceId, Track } from '@core/model/types'
 import { pluginsOfTrack, routesOfTrack } from '@core/model/types'
-import {
-  SYNTH_DEFS,
-  SYNTH_STATE_PARAMS,
-  WAVE_TYPES,
-  synthDefaults
-} from '@core/model/effects'
+import { synthDefaults } from '@core/model/effects'
 import { builtinTypeOf, paramDefsOf, pluginDefaults } from '@core/plugins/builtin'
 import { pluginRegistry } from '@audio/pluginRegistry'
 import { projectStore } from '@/state/projectStore'
@@ -21,6 +16,7 @@ import { useFxUi } from '@/state/fxUi'
 import { fxFloatUi, useFxFloatUi } from '@/state/fxFloatUi'
 import { AddPluginCard } from './AddPluginCard'
 import { historyUi } from '@/state/historyUi'
+import { InstrumentSection } from './InstrumentSection'
 import { PluginPlaceholder } from './PluginPlaceholder'
 import { EffectVisual } from './PluginVisuals'
 import { ParamSlider } from './ParamSlider'
@@ -196,7 +192,7 @@ function TrackEffects({ track }: { track: Track }): React.JSX.Element {
         {track.kind === 'midi' &&
           ((track.synth.present ?? 1) >= 0.5 ? (
             <div className="fx-card">
-              <SynthSection track={track} />
+              <InstrumentSection track={track} />
             </div>
           ) : (
             <AddSynthCard track={track} />
@@ -244,53 +240,6 @@ function TrackEffects({ track }: { track: Track }): React.JSX.Element {
         <AddPluginCard track={track} inserts={inserts} />
       </div>
       )}
-    </div>
-  )
-}
-
-function SynthSection({ track }: { track: Track }): React.JSX.Element {
-  const params = { ...synthDefaults(), ...track.synth }
-  const setParam = (param: string, value: number): void => {
-    projectStore.dispatch({ type: 'track/setSynthParam', trackId: track.id, param, value })
-  }
-  const enabled = params.on >= 0.5
-
-  return (
-    <div className={`fx-section ${enabled ? '' : 'fx-bypassed'}`}>
-      <div className="fx-section-head">
-        <button
-          className={`fx-power ${enabled ? 'fx-power-on' : ''}`}
-          title={enabled ? 'Bypass the instrument' : 'Enable the instrument'}
-          onClick={() => setParam('on', enabled ? 0 : 1)}
-        >
-          ⏻
-        </button>
-        <span className="fx-section-title">Synth</span>
-        <div className="fx-waves">
-          {WAVE_TYPES.map((wave, index) => (
-            <button
-              key={wave}
-              className={`fx-wave ${Math.round(params.wave) === index ? 'fx-wave-active' : ''}`}
-              title={wave}
-              onClick={() => setParam('wave', index)}
-            >
-              {['◺', '⊓', '△', '∿'][index]}
-            </button>
-          ))}
-        </div>
-        <button
-          className="fx-remove"
-          title="Remove the instrument from this track (its notes are kept)"
-          onClick={() => setParam('present', 0)}
-        >
-          ×
-        </button>
-      </div>
-      {Object.entries(SYNTH_DEFS)
-        .filter(([key]) => key !== 'wave' && !SYNTH_STATE_PARAMS.includes(key as 'on' | 'present'))
-        .map(([key, def]) => (
-          <ParamSlider key={key} def={def} value={params[key]} onCommit={(v) => setParam(key, v)} />
-        ))}
     </div>
   )
 }

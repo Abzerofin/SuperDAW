@@ -1,5 +1,7 @@
-import { describe as suite, expect, test } from 'vitest'
+import { afterEach, beforeEach, describe as suite, expect, test } from 'vitest'
 import { PPQ } from '@core/model/timebase'
+import type { Clip, Track } from '@core/model/types'
+import { projectStore } from '../projectStore'
 import { Transport } from '../transport'
 
 // The transport drives its display updates from animation frames (browser
@@ -124,6 +126,131 @@ suite('transport loop region', () => {
     transport.setLoopRegion(0, BEAT)
     transport.setPosition(BEAT * 10)
     expect(transport.positionTicks()).toBe(BEAT * 10)
+  })
+})
+
+/**
+ * The song loop wraps at the end of what is AUDIBLE, so soloing a section
+ * cycles that section and muting a long tail stops the loop waiting for
+ * silence. These drive the real store, since the answer comes from
+ * mute/solo/folder state rather than from the transport alone.
+ */
+suite('song loop over audible material', () => {
+  function track(id: string, patch: Partial<Track> = {}): Track {
+    return {
+      id,
+      kind: 'audio',
+      name: id,
+      color: '#5b8def',
+      muted: false,
+      soloed: false,
+      parentId: null,
+      frozenAssetId: null,
+      volume: 1,
+      pan: 0,
+      synth: {},
+      ...patch
+    }
+  }
+  function clip(id: string, trackId: string, start: number, duration: number): Clip {
+    return {
+      id,
+      trackId,
+      name: id,
+      start,
+      duration,
+      assetId: null,
+      offset: 0,
+      color: null,
+      fadeIn: 0,
+      fadeOut: 0,
+      reverse: false,
+      pitch: 0,
+      stretch: 1,
+      loopLength: 0
+    }
+  }
+
+  /** Short track A (2 beats) and long track B (8 beats). */
+  function twoTracks(): void {
+    for (const id of ['a', 'b']) {
+      projectStore.dispatch({
+        type: 'track/create',
+        track: track(id),
+        index: 0,
+        clips: [],
+        automation: [],
+        notes: [],
+        plugins: []
+      })
+    }
+    projectStore.dispatch({ type: 'clip/create', clip: clip('ca', 'a', 0, BEAT * 2), notes: [] })
+    projectStore.dispatch({ type: 'clip/create', clip: clip('cb', 'b', 0, BEAT * 8), notes: [] })
+  }
+
+  // The store singleton boots with the demo project; each test wants only
+  // the two tracks it builds.
+  const clearTracks = (): void => {
+    for (const id of Object.keys(projectStore.state.tracks)) {
+      projectStore.dispatch({ type: 'track/delete', trackId: id })
+    }
+  }
+  beforeEach(clearTracks)
+  afterEach(clearTracks)
+
+  test('the whole song loops when nothing is muted or soloed', () => {
+    twoTracks()
+    const { transport } = transportAt()
+    transport.setSongLoop(true)
+    expect(transport.activeLoop()).toEqual({ start: 0, end: BEAT * 8 })
+  })
+
+  test('muting the long track shortens the loop to what is left', () => {
+    twoTracks()
+    const { transport } = transportAt()
+    transport.setSongLoop(true)
+    projectStore.dispatch({ type: 'track/setMute', trackId: 'b', muted: true })
+    expect(transport.activeLoop()).toEqual({ start: 0, end: BEAT * 2 })
+  })
+
+  test('soloing the short track loops just that track', () => {
+    twoTracks()
+    const { transport } = transportAt()
+    transport.setSongLoop(true)
+    projectStore.dispatch({ type: 'track/setSolo', trackId: 'a', soloed: true })
+    expect(transport.activeLoop()).toEqual({ start: 0, end: BEAT * 2 })
+    // Un-soloing hands the rest of the song back.
+    projectStore.dispatch({ type: 'track/setSolo', trackId: 'a', soloed: false })
+    expect(transport.activeLoop()).toEqual({ start: 0, end: BEAT * 8 })
+  })
+
+  test('an explicit cycle region still wins over the song loop', () => {
+    twoTracks()
+    const { transport } = transportAt()
+    transport.setSongLoop(true)
+    transport.setLoopRegion(BEAT, BEAT * 3)
+    projectStore.dispatch({ type: 'track/setMute', trackId: 'b', muted: true })
+    expect(transport.activeLoop()).toEqual({ start: BEAT, end: BEAT * 3 })
+  })
+
+  test('playback wraps at the soloed material’s end, not the song’s', () => {
+    twoTracks()
+    const { transport, advance } = transportAt()
+    transport.setSongLoop(true)
+    projectStore.dispatch({ type: 'track/setSolo', trackId: 'a', soloed: true })
+    transport.play()
+    advance(1.5) // 3 beats of linear time through a 2-beat loop
+    expect(transport.positionTicks()).toBeCloseTo(BEAT)
+  })
+
+  test('muting everything leaves nothing to cycle', () => {
+    twoTracks()
+    const { transport } = transportAt()
+    transport.setSongLoop(true)
+    for (const id of ['a', 'b']) {
+      projectStore.dispatch({ type: 'track/setMute', trackId: id, muted: true })
+    }
+    expect(transport.activeLoop()).toBeNull()
   })
 })
 

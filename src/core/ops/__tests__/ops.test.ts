@@ -1,6 +1,6 @@
 ﻿import { describe as suite, expect, test } from 'vitest'
 import type { Clip, Comment, FileNode, PluginInstance, ProjectState, Track } from '../../model/types'
-import { createEmptyProject, pluginsOfTrack } from '../../model/types'
+import { createEmptyProject, padIdAt, pluginsOfTrack } from '../../model/types'
 import { synthDefaults, type EffectType } from '../../model/effects'
 import { builtinEffectDescriptor } from '../../plugins/builtin'
 import { describe as describeOp } from '../describe'
@@ -116,7 +116,32 @@ function baseState(): ProjectState {
   })
   // t2 is frozen (its render asset is referenced by id only)
   s = apply(s, { type: 'track/freeze', trackId: 't2', assetId: 'ast_frozen' })
+  // A performance pad on cell 0·0 (pad/clear and reassignment round-trips)
+  s = apply(s, { type: 'pad/set', pad: pad(0, 0, { kind: 'sample', assetId: 'ast_pad' }) })
+  // tm's sampler holds a sample (clearing it must round-trip exactly)
+  s = apply(s, { type: 'track/setSampler', trackId: 'tm', assetId: 'ast_base' })
   return s
+}
+
+function pad(
+  row: number,
+  col: number,
+  overrides: Partial<import('../../model/types').PerformancePad> = {}
+): import('../../model/types').PerformancePad {
+  return {
+    id: padIdAt(row, col),
+    row,
+    col,
+    kind: 'sample',
+    assetId: null,
+    trackId: null,
+    pitch: 60,
+    clipId: null,
+    name: '',
+    color: null,
+    gate: false,
+    ...overrides
+  }
 }
 
 /** baseState plus a folder containing t1 (and its clips/notes/automation/plugin). */
@@ -164,7 +189,39 @@ suite('apply', () => {
     expect(JSON.stringify(s)).toBe(frozen)
   })
 
+  test('malformed pads are dropped whole, not partially applied', () => {
+    const s = baseState()
+    // Off-grid cell
+    expect(apply(s, { type: 'pad/set', pad: pad(0, 0, { row: 99, col: 0 }) })).toBe(s)
+    // Id not matching its cell (identity IS the cell)
+    expect(
+      apply(s, { type: 'pad/set', pad: { ...pad(1, 1), id: padIdAt(2, 2) } })
+    ).toBe(s)
+  })
 
+  test('pad fields irrelevant to the kind are nulled', () => {
+    const s = apply(baseState(), {
+      type: 'pad/set',
+      pad: pad(4, 4, { kind: 'clip', clipId: 'c1', assetId: 'smuggled', trackId: 'tm' })
+    })
+    const stored = s.pads[padIdAt(4, 4)]
+    expect(stored.clipId).toBe('c1')
+    expect(stored.assetId).toBeNull()
+    expect(stored.trackId).toBeNull()
+  })
+
+  test('track/setSampler only applies to MIDI tracks', () => {
+    const s = baseState()
+    expect(apply(s, { type: 'track/setSampler', trackId: 't1', assetId: 'ast_x' })).toBe(s)
+    const applied = apply(s, {
+      type: 'track/setSampler',
+      trackId: 'tm',
+      assetId: 'ast_x',
+      params: { smpRoot: 999 } // clamped to the def's max
+    })
+    expect(applied.tracks['tm'].samplerAssetId).toBe('ast_x')
+    expect(applied.tracks['tm'].synth.smpRoot).toBe(127)
+  })
 })
 
 suite('invert', () => {
@@ -300,7 +357,20 @@ suite('invert', () => {
     { type: 'comment/add', comments: [comment('cm9', 'c1', 'cm1')] },
     { type: 'comment/delete', commentId: 'cm2' }, // a reply
     { type: 'comment/delete', commentId: 'cm1' }, // a thread root + its reply
-    { type: 'comment/setResolved', commentId: 'cm1', resolved: true }
+    { type: 'comment/setResolved', commentId: 'cm1', resolved: true },
+    { type: 'track/setSampler', trackId: 'tm', assetId: 'ast_smp' },
+    // Same-gesture params: undo must restore asset AND the touched keys.
+    {
+      type: 'track/setSampler',
+      trackId: 'tm',
+      assetId: 'ast_smp2',
+      params: { instrument: 1, smpMode: 1, smpRoot: 48 }
+    },
+    { type: 'track/setSampler', trackId: 'tm', assetId: null },
+    // Empty cell → invert is pad/clear; occupied cell → invert restores it.
+    { type: 'pad/set', pad: pad(2, 3, { kind: 'note', trackId: 'tm', pitch: 52, gate: true }) },
+    { type: 'pad/set', pad: pad(0, 0, { kind: 'clip', clipId: 'c1', name: 'Chorus' }) },
+    { type: 'pad/clear', padId: padIdAt(0, 0) }
   ]
 
   for (const op of roundTrips) {

@@ -169,6 +169,19 @@ class MidiInputStore {
   }
 
   /**
+   * The performance-pad grid registers here to claim incoming notes while
+   * its MIDI mode is on (a Launchpad drives pads, not tracks). Returning
+   * true consumes the event; false lets it route to tracks as usual.
+   */
+  private padSink: ((kind: 'on' | 'off', pitch: number, velocity: number) => boolean) | null = null
+
+  setPadSink(
+    sink: ((kind: 'on' | 'off', pitch: number, velocity: number) => boolean) | null
+  ): void {
+    this.padSink = sink
+  }
+
+  /**
    * Route one parsed message (note-on/note-off only — the parser in
    * audio/midiCapture drops everything else). A note-on remembers which
    * tracks it reached; the matching note-off replays to exactly that set,
@@ -179,6 +192,7 @@ class MidiInputStore {
     const message = parseMidiNoteMessage(data)
     if (!message) return
     const { kind, channel, pitch, velocity } = message
+    if (this.padSink?.(kind, pitch, velocity)) return
     const routeKey = `${inputId}:${channel}:${pitch}`
     const remembered = kind === 'off' ? this.openNoteRoutes.get(routeKey) : undefined
     // No memory for an off = the key was down before we listened; current

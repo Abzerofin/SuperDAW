@@ -12,8 +12,14 @@ import {
   sliceClipAtEditPoint,
   sliceSelectionIntoEqualParts
 } from '@/lib/clipActions'
+import {
+  canSliceAtTransients,
+  sliceClipAtTransients,
+  sliceClipToSampler
+} from '@/lib/sliceActions'
 import { TRACK_COLORS } from '@/lib/colors'
 import { historyUi } from '@/state/historyUi'
+import { stepSeqUi } from '@/state/stepSeqUi'
 import { collab, useCollab } from '@/state/collab'
 
 /**
@@ -113,6 +119,19 @@ export function ClipMenu({
         </>
       )}
 
+      {!isAudio && (
+        <button
+          className="menu-item"
+          title="Program this clip as a beat grid — rows are the drum pads (or pitches), columns are steps"
+          onClick={() => {
+            stepSeqUi.open(clip.id)
+            onClose()
+          }}
+        >
+          <span>Step sequencer</span>
+        </button>
+      )}
+
       <button
         className="menu-item"
         disabled={!canSliceAtEditPoint(clip.id)}
@@ -143,6 +162,33 @@ export function ClipMenu({
             </button>
           ))}
         </span>
+      )}
+
+      {isAudio && (
+        <>
+          <button
+            className="menu-item"
+            disabled={!canSliceAtTransients(clip.id)}
+            title="Cut the clip at its detected transients — every hit becomes its own clip (one undo)"
+            onClick={() => {
+              sliceClipAtTransients(clip.id)
+              onClose()
+            }}
+          >
+            <span>Slice at transients</span>
+          </button>
+          <button
+            className="menu-item"
+            disabled={missingAsset}
+            title="New MIDI track: the sampler plays this audio in slices (keys from C1), with a clip replaying the original groove"
+            onClick={() => {
+              sliceClipToSampler(clip.id)
+              onClose()
+            }}
+          >
+            <span>Slice to sampler track</span>
+          </button>
+        </>
       )}
 
       {isAudio && (
