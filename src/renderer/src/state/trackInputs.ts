@@ -24,17 +24,47 @@ import { appStorageGet, appStorageSet } from './appStorage'
  * ordinary operations.
  */
 
+/** MIDI channel filter: 'all', or one channel 1..16. */
+export type MidiChannelChoice = 'all' | number
+
 export interface TrackInputConfig {
   /** null = follow the global input device chosen in Settings → Audio. */
   readonly deviceId: string | null
   readonly channels: InputChannelConfig
   readonly monitor: boolean
+  /** MIDI tracks: null = follow the global MIDI input (Settings → Audio). */
+  readonly midiInputId: string | null
+  /** MIDI tracks: which channel this track listens to. */
+  readonly midiChannel: MidiChannelChoice
 }
 
 const DEFAULT_CONFIG: TrackInputConfig = {
   deviceId: null,
   channels: DEFAULT_INPUT_CHANNELS,
-  monitor: false
+  monitor: false,
+  midiInputId: null,
+  midiChannel: 'all'
+}
+
+/** Stored configs predate fields / may be hand-edited — normalize hard. */
+function sanitizeConfig(config: Partial<TrackInputConfig>): TrackInputConfig {
+  const midiChannel = config.midiChannel
+  return {
+    ...DEFAULT_CONFIG,
+    ...config,
+    // Monitoring never persists: it must be re-armed deliberately, or a
+    // launch could start feeding a live mic into the speakers.
+    monitor: false,
+    midiInputId: typeof config.midiInputId === 'string' ? config.midiInputId : null,
+    midiChannel:
+      midiChannel === 'all' ||
+      (typeof midiChannel === 'number' &&
+        Number.isInteger(midiChannel) &&
+        midiChannel >= 1 &&
+        midiChannel <= 16)
+        ? midiChannel
+        : 'all'
+  }
 }
 
 const STORAGE_KEY = 'trackInputs'
@@ -80,12 +110,10 @@ class TrackInputStore {
   }
 
   private async load(): Promise<void> {
-    const stored = await appStorageGet<Record<string, TrackInputConfig>>(STORAGE_KEY)
+    const stored = await appStorageGet<Record<string, Partial<TrackInputConfig>>>(STORAGE_KEY)
     if (stored) {
       for (const [trackId, config] of Object.entries(stored)) {
-        // Monitoring never persists: it must be re-armed deliberately, or a
-        // launch could start feeding a live mic into the speakers.
-        if (!this.configs.has(trackId)) this.configs.set(trackId, { ...config, monitor: false })
+        if (!this.configs.has(trackId)) this.configs.set(trackId, sanitizeConfig(config))
       }
     }
     this.loaded = true

@@ -7,14 +7,14 @@ import {
 } from '@core/model/types'
 import type { AutomationPoint } from '@core/model/types'
 import { ticksPerBeat } from '@core/model/timebase'
-import { denormalizeParam } from '@core/model/effects'
+import { denormalizeParam, synthIsAudible } from '@core/model/effects'
 import { paramDefsOf } from '@core/plugins/builtin'
 import type { AssetEvent, AssetStore } from './assets'
 import { applyClipFades } from './fades'
 import { LivePreview } from './livePreview'
 import { pluginRegistry, type PluginAnalysis, type PluginNodes } from './pluginRegistry'
 import type { ExternalPluginHost } from './render'
-import { buildSynthVoice } from './synth'
+import { buildLiveSynthVoice, buildSynthVoice, type LiveVoiceHandle } from './synth'
 import {
   beatIndexAt,
   metronomeClicks,
@@ -87,6 +87,13 @@ const SCHEDULE_INTERVAL_MS = 250
  */
 const FX_AUTO_INTERVAL_MS = 50
 
+/**
+ * Held live-input voices across all tracks before the oldest is stolen.
+ * Each voice is 4 nodes; 32 is far beyond ten fingers + sustained chords,
+ * yet keeps a stuck controller from flooding the graph.
+ */
+const LIVE_VOICE_CAP = 32
+
 /** Seconds of finished VST3 audio produced per window. Also the latency. */
 const PREVIEW_WINDOW_SEC = 2
 /** How far ahead of the playhead preview audio is kept queued. */
@@ -158,6 +165,17 @@ export class AudioEngine {
   private fadeNodes = new Map<GainNode, { endSec: number; trackId: TrackId }>()
   /** Live input monitors feeding track chains, by track. */
   private monitors = new Map<TrackId, AudioNode>()
+
+  /**
+   * Live (MIDI-played) synth voices, held-keys only, keyed by pitch.
+   * Independent of the transport — playing along while stopped is the
+   * point — so they are deliberately NOT in sources/sourcesByTrack and
+   * survive stopAllSources. They die with their track (syncMixer's
+   * removed-track pass) or when the track's synth is toggled off.
+   */
+  private liveVoices = new Map<TrackId, Map<number, { handle: LiveVoiceHandle; seq: number }>>()
+  /** Monotonic voice age, so the cap steals the OLDEST voice. */
+  private liveVoiceSeq = 0
 
   /**
    * Live VST3 preview. Tracks in `previewTracks` have their clips and
@@ -406,6 +424,88 @@ export class AudioEngine {
 
   isMonitoring(trackId: TrackId): boolean {
     return this.monitors.has(trackId)
+  }
+
+  // ---------- Live instrument (MIDI input → per-track synth) ----------
+
+  /**
+   * Start a live synth voice on a MIDI track — the note-on half of playing
+   * the track's instrument from a MIDI keyboard, routed through the
+   * track's own inserts, fader and pan exactly like scheduled playback.
+   * Retriggering a held pitch releases the old voice politely; past
+   * LIVE_VOICE_CAP the oldest held voice anywhere is stolen. Transport
+   * state is irrelevant: auditioning while stopped is the normal case.
+   */
+  liveNoteOn(trackId: TrackId, pitch: number, velocity: number): void {
+    const track = this.store.state.tracks[trackId]
+    // A frozen track's instrument is baked into its render; a removed or
+    // bypassed synth is silent for scheduled notes and must be live too.
+    if (!track || track.kind !== 'midi' || track.frozenAssetId !== null) return
+    if (!synthIsAudible(track.synth)) return
+    const ctx = this.ensureContext()
+    if (ctx.state === 'suspended') void ctx.resume()
+
+    const key = Math.min(127, Math.max(0, Math.round(pitch)))
+    let voices = this.liveVoices.get(trackId)
+    if (!voices) this.liveVoices.set(trackId, (voices = new Map()))
+    const held = voices.get(key)
+    if (held) {
+      held.handle.release()
+      voices.delete(key)
+    }
+    this.stealOldestLiveVoiceIfFull()
+
+    const seq = ++this.liveVoiceSeq
+    const handle = buildLiveSynthVoice(
+      ctx,
+      this.chain(trackId).input,
+      key,
+      Math.min(1, Math.max(0, velocity)),
+      track.synth,
+      () => {
+        // Belt and braces: released/stolen voices are already deregistered.
+        const current = this.liveVoices.get(trackId)
+        if (current?.get(key)?.seq === seq) current.delete(key)
+      }
+    )
+    voices.set(key, { handle, seq })
+  }
+
+  /** The note-off half: begin the release ramp of a held live voice. */
+  liveNoteOff(trackId: TrackId, pitch: number): void {
+    const voices = this.liveVoices.get(trackId)
+    const key = Math.min(127, Math.max(0, Math.round(pitch)))
+    const held = voices?.get(key)
+    if (!voices || !held) return
+    held.handle.release()
+    voices.delete(key)
+  }
+
+  /** Kill every held live voice (one track, or all) — hard, near-instant. */
+  liveAllNotesOff(trackId?: TrackId): void {
+    const maps = trackId !== undefined
+      ? ([this.liveVoices.get(trackId)].filter(Boolean) as Map<number, { handle: LiveVoiceHandle; seq: number }>[])
+      : [...this.liveVoices.values()]
+    for (const voices of maps) {
+      for (const { handle } of voices.values()) handle.stop()
+      voices.clear()
+    }
+    if (trackId !== undefined) this.liveVoices.delete(trackId)
+    else this.liveVoices.clear()
+  }
+
+  private stealOldestLiveVoiceIfFull(): void {
+    let total = 0
+    let oldest: { voices: Map<number, { handle: LiveVoiceHandle; seq: number }>; key: number; seq: number } | null = null
+    for (const voices of this.liveVoices.values()) {
+      for (const [key, voice] of voices) {
+        total++
+        if (oldest === null || voice.seq < oldest.seq) oldest = { voices, key, seq: voice.seq }
+      }
+    }
+    if (total < LIVE_VOICE_CAP || oldest === null) return
+    oldest.voices.get(oldest.key)?.handle.stop()
+    oldest.voices.delete(oldest.key)
   }
 
   /** Live-preview a plugin knob while dragging (no op until release). */
@@ -961,7 +1061,12 @@ export class AudioEngine {
     if (state.tracks !== this.prevTracks) {
       for (const [id, track] of Object.entries(state.tracks)) {
         const prev = this.prevTracks[id]
-        if (prev && prev.synth !== track.synth) synthEdited.add(id)
+        if (prev && prev.synth !== track.synth) {
+          synthEdited.add(id)
+          // Removing/bypassing the instrument silences live voices too —
+          // a keyboard must never keep sounding through a synth that is off.
+          if (!synthIsAudible(track.synth)) this.liveAllNotesOff(id)
+        }
         if (prev && prev.frozenAssetId !== track.frozenAssetId) frozenFlipped.add(id)
       }
     }
@@ -1857,6 +1962,7 @@ export class AudioEngine {
     for (const [trackId, chain] of this.chains) {
       const track = this.store.state.tracks[trackId]
       if (!track) {
+        this.liveAllNotesOff(trackId)
         this.monitors.get(trackId)?.disconnect()
         this.monitors.delete(trackId)
         chain.input.disconnect()

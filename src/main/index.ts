@@ -1,4 +1,4 @@
-import { app, BrowserWindow, dialog, ipcMain, Menu, shell } from 'electron'
+import { app, BrowserWindow, dialog, ipcMain, Menu, session, shell } from 'electron'
 import { copyFile, readFile } from 'node:fs/promises'
 import { basename, join } from 'node:path'
 import { asBuffer, writeFileAtomic } from './atomicWrite'
@@ -10,6 +10,25 @@ import { checkForUpdates } from './updater'
 import { ensureScanned } from './pluginScan'
 
 const PROJECT_FILTERS = [{ name: 'SuperDAW Project', extensions: ['sdaw'] }]
+
+/**
+ * Web MIDI needs an explicit grant: with no handlers registered, Chromium's
+ * 'midi' permission request is denied and navigator.requestMIDIAccess
+ * rejects. Everything else the app already relies on (microphone capture
+ * for recording, media enumeration) keeps grant-by-default — but only for
+ * the app's own pages; sysex is denied outright (SuperDAW never sends it).
+ */
+function registerPermissionHandlers(): void {
+  const isAppUrl = (url: string): boolean =>
+    url.startsWith('file://') ||
+    (!!process.env['ELECTRON_RENDERER_URL'] && url.startsWith(process.env['ELECTRON_RENDERER_URL']))
+  session.defaultSession.setPermissionRequestHandler((webContents, permission, callback) => {
+    callback(permission !== 'midiSysex' && isAppUrl(webContents.getURL()))
+  })
+  session.defaultSession.setPermissionCheckHandler((_webContents, permission, requestingOrigin) => {
+    return permission !== 'midiSysex' && isAppUrl(requestingOrigin)
+  })
+}
 
 function registerAppDataIpc(): void {
   ipcMain.handle('appdata:get', async (_event, key: string): Promise<unknown> => {
@@ -227,6 +246,7 @@ app.whenReady().then(() => {
   // No menu bar in production — everything is in-app (dev keeps the
   // default menu for DevTools/reload).
   if (!process.env['ELECTRON_RENDERER_URL']) Menu.setApplicationMenu(null)
+  registerPermissionHandlers()
   registerIpc()
   registerAppDataIpc()
   registerCollabIpc()

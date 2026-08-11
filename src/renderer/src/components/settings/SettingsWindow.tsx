@@ -1,6 +1,7 @@
 import { useEffect, useState } from 'react'
 import { audioEngine } from '@/state/audioInstance'
 import { audioDevices, useAudioDevices } from '@/state/audioDevices'
+import { midiInputs, useMidiInputs } from '@/state/midiInputs'
 import { collab, useCollab } from '@/state/collab'
 import {
   IMPLEMENTED_SECTIONS,
@@ -291,6 +292,7 @@ function GeneralPane(): React.JSX.Element {
 
 function AudioPane(): React.JSX.Element {
   const devices = useAudioDevices()
+  const midi = useMidiInputs()
   usePreferences()
   // The context reports the live sample rate / channel layout; creating it
   // here is safe (it starts suspended until the first transport gesture).
@@ -299,6 +301,9 @@ function AudioPane(): React.JSX.Element {
     audioEngine.ensureContext()
     setInfo(audioEngine.contextInfo())
     void audioDevices.refresh(false)
+    // Web MIDI opens lazily; the settings pane is one of the surfaces
+    // that asks (plain Chrome may show its permission prompt here).
+    void midiInputs.ensure()
   }, [])
   const ms = (seconds: number): string => `${Math.round(seconds * 1000 * 10) / 10} ms`
 
@@ -372,6 +377,31 @@ function AudioPane(): React.JSX.Element {
             ))}
         </select>
         <p className="settings-dim">Used when recording armed tracks.</p>
+      </div>
+
+      <div className="settings-field">
+        <label htmlFor="settings-midi-input">MIDI input</label>
+        <select
+          id="settings-midi-input"
+          value={midi.selectedInputId ?? ''}
+          disabled={!midi.supported}
+          onChange={(e) => midiInputs.setSelected(e.target.value || null)}
+        >
+          <option value="">All devices</option>
+          {midi.inputs.map((d) => (
+            <option key={d.id} value={d.id}>
+              {d.name}
+            </option>
+          ))}
+        </select>
+        <p className="settings-dim">
+          {!midi.supported
+            ? 'Web MIDI is not available in this browser.'
+            : midi.status === 'denied'
+              ? 'MIDI access was denied — allow it in the browser to use a keyboard.'
+              : `${midi.inputs.length === 0 ? 'No MIDI devices' : `${midi.inputs.length} MIDI device${midi.inputs.length === 1 ? '' : 's'}`} connected. Plays and records armed MIDI tracks (per-track overrides on the track's MIDI input panel).`}
+          {' '}MIDI devices are personal — never saved into the project, never synced.
+        </p>
       </div>
 
       <div className="settings-field">

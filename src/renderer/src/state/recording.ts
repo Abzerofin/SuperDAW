@@ -1,6 +1,7 @@
 import { useSyncExternalStore } from 'react'
 import type { TrackId } from '@core/model/types'
 import { newId } from '@core/model/ids'
+import { buildMidiTakeOp, type MidiTake } from '@core/ops/midiTake'
 import { Recorder } from '@audio/recorder'
 import { buildInputTap, type InputTap } from '@audio/input'
 import { encodeWavPcm16Async } from '@audio/wav'
@@ -9,20 +10,24 @@ import { projectStore } from './projectStore'
 import { transport } from './transport'
 import { audioEngine, assetStore } from './audioInstance'
 import { trackInputs } from './trackInputs'
+import { midiInputs } from './midiInputs'
 import { preferences } from './preferences'
 
 /**
  * Recording session state (all ephemeral, per-user): which tracks are
  * armed, whether capture is running, and the region being recorded.
  *
- * Each armed track records its OWN input (device + channel selection from
- * trackInputs), so a multi-track take yields one asset per track rather
- * than the same audio duplicated everywhere. Streams are shared and
- * reference-counted per device by the input store.
+ * Each armed AUDIO track records its OWN input (device + channel selection
+ * from trackInputs), so a multi-track take yields one asset per track
+ * rather than the same audio duplicated everywhere. Streams are shared and
+ * reference-counted per device by the input store. Armed MIDI tracks
+ * capture note events instead (routed here by state/midiInputs) — no
+ * stream, no asset, just notes.
  *
- * On stop, every take becomes a normal asset + bay entry + clip through
- * ordinary ops — so a recording reaches collaborators through the exact
- * same machinery as an imported file.
+ * On stop, every audio take becomes a normal asset + bay entry + clip, and
+ * every MIDI take ONE clip/create with its notes (ONE clip/createMany when
+ * several stop together) — so a recording reaches collaborators through
+ * the exact same machinery as an imported file.
  */
 
 /** One armed track's live capture rig. */
@@ -31,6 +36,22 @@ interface TrackCapture {
   recorder: Recorder
   tap: InputTap
   deviceKey: string
+}
+
+/** One captured note; times on the AudioContext clock, endSec null = held. */
+interface CapturedNote {
+  pitch: number
+  velocity: number
+  startSec: number
+  endSec: number | null
+}
+
+/** One armed MIDI track's growing take. */
+interface MidiCapture {
+  trackId: TrackId
+  /** Held keys → their open note (retrigger closes and replaces). */
+  active: Map<number, CapturedNote>
+  closed: CapturedNote[]
 }
 
 class RecordingStore {
@@ -44,6 +65,10 @@ class RecordingStore {
   lastError: string | null = null
 
   private captures: TrackCapture[] = []
+  private midiCaptures = new Map<TrackId, MidiCapture>()
+  /** ctx.currentTime − performance.now()/1000 at roll: maps Web MIDI
+   *  event.timeStamp (performance timeline, ms) onto the audio clock. */
+  private midiClockOffsetSec = 0
   private takeCounter = 1
   private countInTimer: number | null = null
 
@@ -88,20 +113,32 @@ class RecordingStore {
   /** Start capture. `streamOverride` lets tests inject a synthetic stream. */
   async start(streamOverride?: MediaStream): Promise<void> {
     if (this.recording || this.countingIn) return
-    const armed = this.armedIds().filter(
-      (id) => projectStore.state.tracks[id]?.kind === 'audio'
-    )
+    const state = projectStore.state
+    const armed = this.armedIds().filter((id) => {
+      const track = state.tracks[id]
+      return (
+        track !== undefined &&
+        (track.kind === 'audio' || track.kind === 'midi') &&
+        track.frozenAssetId === null
+      )
+    })
+    const audioArmed = armed.filter((id) => state.tracks[id]?.kind === 'audio')
     if (armed.length === 0) {
-      this.fail('Arm an audio track first (● on the track header)')
+      this.fail('Arm a track first (● on the track header)')
       return
     }
     try {
       const ctx = audioEngine.ensureContext()
       if (ctx.state === 'suspended') await ctx.resume()
 
+      // MIDI needs no stream, only open access — up front so the browser's
+      // permission prompt (plain Chrome) happens before the count-in, like
+      // getUserMedia below. Denied/unsupported still records via inject().
+      if (armed.length > audioArmed.length) await midiInputs.ensure()
+
       // Acquire inputs up front (permission prompts happen here), but hold
       // capture until the roll so a count-in never ends up in the take.
-      for (const trackId of armed) {
+      for (const trackId of audioArmed) {
         const config = trackInputs.configOf(trackId)
         let stream = streamOverride
         let deviceKey = ''
@@ -146,6 +183,16 @@ class RecordingStore {
       for (const capture of this.captures) {
         await capture.recorder.start(ctx, capture.tap.output)
       }
+      // Fresh MIDI note sinks for every armed MIDI track, and the clock
+      // anchor pair that places their events on the timeline.
+      this.midiCaptures.clear()
+      for (const trackId of this.armedIds()) {
+        const track = projectStore.state.tracks[trackId]
+        if (track?.kind === 'midi' && track.frozenAssetId === null) {
+          this.midiCaptures.set(trackId, { trackId, active: new Map(), closed: [] })
+        }
+      }
+      this.midiClockOffsetSec = ctx.currentTime - performance.now() / 1000
       this.recordStartTicks = transport.positionTicks()
       this.rollAnchorSec = ctx.currentTime
       this.recording = true
@@ -160,6 +207,40 @@ class RecordingStore {
     }
   }
 
+  /**
+   * One routed note event from state/midiInputs (hardware or inject()).
+   * Ignored unless the roll is on and the track is armed for MIDI. A
+   * note-on over a held pitch closes it (retrigger); a note-off with no
+   * open note is an orphan (key was already down at record start) and is
+   * dropped. `timeStampMs` is on the performance timeline, like
+   * MIDIMessageEvent.timeStamp.
+   */
+  captureMidiEvent(
+    trackId: TrackId,
+    kind: 'on' | 'off',
+    pitch: number,
+    velocity: number,
+    timeStampMs: number
+  ): void {
+    if (!this.recording) return
+    const capture = this.midiCaptures.get(trackId)
+    if (!capture) return
+    const eventSec = timeStampMs / 1000 + this.midiClockOffsetSec
+    const open = capture.active.get(pitch)
+    if (kind === 'on') {
+      if (open) {
+        open.endSec = Math.max(open.startSec, eventSec)
+        capture.closed.push(open)
+      }
+      capture.active.set(pitch, { pitch, velocity, startSec: eventSec, endSec: null })
+    } else {
+      if (!open) return
+      open.endSec = Math.max(open.startSec, eventSec)
+      capture.closed.push(open)
+      capture.active.delete(pitch)
+    }
+  }
+
   /** Release every capture rig (taps + pooled streams); keeps no takes. */
   private teardownCaptures(): void {
     for (const capture of this.captures) {
@@ -167,6 +248,7 @@ class RecordingStore {
       if (capture.deviceKey) trackInputs.release(capture.deviceKey)
     }
     this.captures = []
+    this.midiCaptures.clear()
   }
 
   /** Stop capture; every track's take becomes its own asset + bay entry + clip. */
@@ -194,10 +276,46 @@ class RecordingStore {
     this.emit()
 
     const ctx = audioEngine.ensureContext()
-    // Takes finish asynchronously: the WAV encode is chunked so hitting
-    // Stop after a long multitrack take never freezes the app at the very
-    // moment the user is most anxious about whether the take survived.
+    // MIDI takes are pure data — committed synchronously, right now.
+    this.finishMidiTakes(ctx, this.recordStartTicks, this.rollAnchorSec)
+    // Audio takes finish asynchronously: the WAV encode is chunked so
+    // hitting Stop after a long multitrack take never freezes the app at
+    // the very moment the user is most anxious about whether it survived.
     void this.finishTakes(takes, ctx, this.recordStartTicks, this.rollAnchorSec)
+  }
+
+  /**
+   * Commit captured MIDI: ONE clip/create per take, ONE clip/createMany
+   * when several tracks stopped together, nothing for empty takes — the
+   * op itself is built by the pure core helper (see core/ops/midiTake).
+   * Events land with the SAME latency compensation as audio takes: the
+   * performer played along with what they HEARD, which ran late by the
+   * output path.
+   */
+  private finishMidiTakes(ctx: AudioContext, anchorTicks: number, anchorSec: number): void {
+    const captures = [...this.midiCaptures.values()]
+    this.midiCaptures.clear()
+    if (captures.length === 0) return
+    const stopSec = ctx.currentTime
+    const compensationSec =
+      audioEngine.outputLatencySec() + preferences.recordLatencyTrimMs / 1000
+    const tps = ticksPerSecond(projectStore.state.tempo)
+    const toTicks = (sec: number): number =>
+      Math.round(anchorTicks + (sec - anchorSec - compensationSec) * tps)
+    const takes: MidiTake[] = captures.map((capture) => ({
+      trackId: capture.trackId,
+      startTicks: anchorTicks,
+      endTicks: Math.max(anchorTicks + 1, toTicks(stopSec)),
+      notes: [...capture.closed, ...capture.active.values()].map((note) => ({
+        pitch: note.pitch,
+        velocity: note.velocity,
+        startTicks: toTicks(note.startSec),
+        // null = still held at stop; the helper closes it at the take end.
+        endTicks: note.endSec === null ? null : toTicks(note.endSec)
+      }))
+    }))
+    const op = buildMidiTakeOp(projectStore.state, takes)
+    if (op) projectStore.dispatch(op)
   }
 
   private async finishTakes(

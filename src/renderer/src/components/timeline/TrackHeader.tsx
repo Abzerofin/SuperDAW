@@ -80,7 +80,9 @@ export const TrackHeader = memo(function TrackHeader({
   )
   const isFolder = track.kind === 'folder'
   const frozen = track.frozenAssetId !== null
-  const canRecord = track.kind === 'audio' && !frozen
+  /** Arm is for audio AND MIDI tracks; monitoring (a mic feed) audio only. */
+  const canRecord = (track.kind === 'audio' || track.kind === 'midi') && !frozen
+  const canMonitor = track.kind === 'audio' && !frozen
   const inputOpen = useSyncExternalStore(
     trackInputUi.subscribe,
     () => trackInputUi.trackId === track.id
@@ -278,34 +280,32 @@ export const TrackHeader = memo(function TrackHeader({
               <path d="M1 8 L4 3 L8 6 L11 2" />
             </svg>
           </button>
-          {canRecord && (
-            <>
-              <button
-                className={`track-toggle ${monitoring ? 'track-toggle-monitor' : ''}`}
-                title={
-                  monitoring
-                    ? 'Monitoring the live input — click to stop'
-                    : 'Monitor the live input through this track (use headphones)'
-                }
-                onClick={() => void trackInputs.toggleMonitor(track.id)}
+          {canMonitor && (
+            <button
+              className={`track-toggle ${monitoring ? 'track-toggle-monitor' : ''}`}
+              title={
+                monitoring
+                  ? 'Monitoring the live input — click to stop'
+                  : 'Monitor the live input through this track (use headphones)'
+              }
+              onClick={() => void trackInputs.toggleMonitor(track.id)}
+            >
+              <svg
+                width="13"
+                height="11"
+                viewBox="0 0 13 11"
+                fill="none"
+                stroke="currentColor"
+                strokeWidth="1.3"
+                strokeLinecap="round"
               >
-                <svg
-                  width="13"
-                  height="11"
-                  viewBox="0 0 13 11"
-                  fill="none"
-                  stroke="currentColor"
-                  strokeWidth="1.3"
-                  strokeLinecap="round"
-                >
-                  <path d="M2.6 9a5.5 5.5 0 0 1 0-7" />
-                  <path d="M10.4 2a5.5 5.5 0 0 1 0 7" />
-                  <circle cx="6.5" cy="5.5" r="1.4" fill="currentColor" stroke="none" />
-                </svg>
-              </button>
-              <ArmToggle trackId={track.id} />
-            </>
+                <path d="M2.6 9a5.5 5.5 0 0 1 0-7" />
+                <path d="M10.4 2a5.5 5.5 0 0 1 0 7" />
+                <circle cx="6.5" cy="5.5" r="1.4" fill="currentColor" stroke="none" />
+              </svg>
+            </button>
           )}
+          {canRecord && <ArmToggle trackId={track.id} />}
           {!isFolder && (
             <button
               className={`track-toggle ${looping ? 'track-toggle-loop' : ''}`}
@@ -365,8 +365,11 @@ export const TrackHeader = memo(function TrackHeader({
               },
               false
             )}
-            {canRecord &&
+            {canMonitor &&
               menuItem('Input, channels & monitoring…', () => trackInputUi.open(track.id))}
+            {track.kind === 'midi' &&
+              !frozen &&
+              menuItem('MIDI input & channel…', () => trackInputUi.open(track.id))}
             {track.kind === 'audio' &&
               !frozen &&
               menuItem('Stretch audio to tempo', () => conformTrackAudioToTempo(track.id))}

@@ -2,7 +2,9 @@ import { projectStore } from './projectStore'
 import { transport } from './transport'
 import { collab } from './collab'
 import { recording } from './recording'
+import { midiInputs } from './midiInputs'
 import { panels } from './panels'
+import { preferences } from './preferences'
 import { audioEngine, assetStore } from './audioInstance'
 import {
   generateStressProject,
@@ -28,6 +30,12 @@ if (import.meta.env.DEV) {
     panels,
     audioEngine,
     assetStore,
+    preferences,
+    midiInputs,
+    // MIDI without hardware: raw bytes through the real input path.
+    midi: {
+      inject: (data: number[], timeStampMs?: number) => midiInputs.inject(data, timeStampMs)
+    },
     // Stress testing utilities
     stressTest: {
       generate: (config?: any) => generateStressProject(projectStore, config),

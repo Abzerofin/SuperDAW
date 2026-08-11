@@ -228,12 +228,12 @@ function RecordButton(): React.JSX.Element {
       className={`tbtn tbtn-rec ${rec.recording ? 'tbtn-rec-active' : ''} ${rec.countingIn ? 'tbtn-rec-countin' : ''}`}
       title={
         rec.armedCount === 0
-          ? 'Record (arm a track first: ● on a track header)'
+          ? 'Record (R) — arm an audio or MIDI track first: ● on a track header'
           : rec.recording
-            ? 'Stop recording'
+            ? 'Stop recording (R)'
             : rec.countingIn
               ? 'Counting in… click to cancel'
-              : 'Record'
+              : 'Record (R)'
       }
       onClick={() => void rec.toggle()}
     >

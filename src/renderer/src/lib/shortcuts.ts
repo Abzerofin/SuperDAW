@@ -7,6 +7,7 @@ import { commentUi } from '@/state/commentUi'
 import { appShell } from '@/state/appShell'
 import { paletteUi } from '@/state/paletteUi'
 import { gridTicksFor, gridUi } from '@/state/gridUi'
+import { recording } from '@/state/recording'
 import { trackInputs } from '@/state/trackInputs'
 import { audioEngine } from '@/state/audioInstance'
 import { keymap } from '@/state/keymap'
@@ -91,6 +92,10 @@ export function useGlobalShortcuts(): void {
         case 'transport.returnToStart':
           e.preventDefault()
           transport.returnToStart()
+          return
+        case 'transport.record':
+          e.preventDefault()
+          void recording.toggle()
           return
         case 'project.save':
           e.preventDefault()

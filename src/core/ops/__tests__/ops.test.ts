@@ -258,6 +258,12 @@ suite('invert', () => {
     { type: 'track/setSolo', trackId: 't2', soloed: true },
     { type: 'track/reorder', trackId: 't2', index: 0 },
     { type: 'clip/create', clip: clip('c9', 't2', 480), notes: [] },
+    // A clip created WITH seeded notes — the MIDI-take / import shape:
+    // undoing must remove the clip AND its notes in one step.
+    { type: 'clip/create', clip: clip('cn', 'tm', 0, 3840), notes: [
+      { id: 'nn1', clipId: 'cn', pitch: 64, start: 120, duration: 240, velocity: 96 },
+      { id: 'nn2', clipId: 'cn', pitch: 67, start: 480, duration: 480, velocity: 64 }
+    ] },
     { type: 'clip/delete', clipId: 'c1' },
     { type: 'clip/move', clipId: 'c1', trackId: 't2', start: 4800 },
     { type: 'clip/moveMany', moves: [
