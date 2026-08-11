@@ -10,6 +10,7 @@ import { transport } from '@/state/transport'
 import { selection } from '@/state/selection'
 import { sessionFile } from '@/state/sessionFile'
 import { pianoRollUi } from '@/state/pianoRollUi'
+import { stepSeqUi } from '@/state/stepSeqUi'
 import { trackInputs } from '@/state/trackInputs'
 import { collab } from '@/state/collab'
 import { gridUi } from '@/state/gridUi'
@@ -95,8 +96,9 @@ function startFromTemplateText(text: string, fileName: string): void {
 
   transport.stop()
   transport.setPosition(0)
-  selection.select(null)
+  selection.clear()
   pianoRollUi.close()
+  stepSeqUi.close()
   void trackInputs.stopAllMonitors()
   assetStore.clear()
   projectStore.loadProject(state)

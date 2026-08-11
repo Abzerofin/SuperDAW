@@ -34,6 +34,12 @@ export function RoutingPanel(): React.JSX.Element | null {
     return () => window.removeEventListener('keydown', onKeyDown)
   }, [ui.trackId])
 
+  // The track can vanish under the panel (deleted, undone): close for real
+  // instead of rendering nothing while staying invisibly "open".
+  useEffect(() => {
+    if (ui.trackId !== null && !state.tracks[ui.trackId]) routingUi.close()
+  }, [ui.trackId, state.tracks])
+
   const track = ui.trackId !== null ? state.tracks[ui.trackId] : undefined
   if (!track) return null
 

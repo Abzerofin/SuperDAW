@@ -31,10 +31,14 @@ export function StatusBar(): React.JSX.Element {
       </div>
       <DeviceNotice />
       <AppNotice />
-      <div className="statusbar-hint statusbar-dim">
-        Drop audio or .mid files on a track · Double-click a lane to add a clip · Double-click a
-        MIDI clip to edit notes · Right-click a clip for colors
-      </div>
+      {/* Getting-started hints earn their place only while the project is
+          empty; once real work exists the strip stays clean. */}
+      {clipCount === 0 && (
+        <div className="statusbar-hint statusbar-dim">
+          Drop audio or .mid files on a track · Double-click a lane to add a clip · Double-click a
+          MIDI clip to edit notes · Right-click a clip for colors
+        </div>
+      )}
       <div className="statusbar-right statusbar-dim mono">
         {trackCount} tracks · {clipCount} clips
         <PluginManifestStatus state={state} />

@@ -62,7 +62,12 @@ export function ChatPanel(): React.JSX.Element {
             if (e.key === 'Enter') send()
           }}
         />
-        <button className="chat-send" disabled={!draft.trim()} onClick={send}>
+        <button
+          className="chat-send"
+          disabled={!draft.trim()}
+          title={draft.trim() ? 'Send (Enter)' : 'Type a message first'}
+          onClick={send}
+        >
           Send
         </button>
       </div>

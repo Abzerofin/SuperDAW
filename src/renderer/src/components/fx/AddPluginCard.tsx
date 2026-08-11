@@ -111,6 +111,12 @@ export function AddPluginCard({
     fxUi.collapse(instanceId)
     setAnchor(null)
     setQuery('')
+    // The new card lands at the END of the chain — bring it into view, or
+    // on a long rack the add appears to do nothing.
+    requestAnimationFrame(() => {
+      const chain = rootRef.current?.closest('.fx-dock-chain')
+      if (chain) chain.scrollLeft = chain.scrollWidth
+    })
   }
 
   const addVst3 = async (plugin: ExternalPluginEntry): Promise<void> => {
@@ -177,10 +183,15 @@ export function AddPluginCard({
           >
             <input
               className="fx-browser-search"
-              placeholder="Search plugins…"
+              placeholder="Search plugins… (Enter adds the top match)"
               autoFocus
               value={query}
               onChange={(e) => setQuery(e.target.value)}
+              onKeyDown={(e) => {
+                if (e.key !== 'Enter') return
+                if (builtins.length > 0) addPlugin(builtins[0])
+                else if (vst3Effects.length > 0) void addVst3(vst3Effects[0])
+              }}
             />
             <div className="fx-browser-list">
               {builtins.length > 0 && <div className="fx-browser-group statusbar-dim">Built-in</div>}

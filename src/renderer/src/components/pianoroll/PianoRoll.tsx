@@ -5,6 +5,7 @@ import { PPQ, snapTicks, ticksPerBar } from '@core/model/timebase'
 import { newId } from '@core/model/ids'
 import { projectStore } from '@/state/projectStore'
 import { useProjectState } from '@/state/hooks'
+import { audioEngine } from '@/state/audioInstance'
 import { transport } from '@/state/transport'
 import { pianoRollUi } from '@/state/pianoRollUi'
 import { keymap } from '@/state/keymap'
@@ -563,6 +564,16 @@ export function PianoRoll({ clipId }: { clipId: string }): React.JSX.Element | n
                   className={`proll-key ${isBlackKey(pitch) ? 'proll-key-black' : ''} ${
                     chordClasses?.has(pitch % 12) ? 'proll-key-chord' : ''
                   } ${chord && pitch % 12 === chord.root ? 'proll-key-chord-root' : ''}`}
+                  // Click a key to hear the pitch through this track's
+                  // instrument — same audition the step labels give.
+                  onPointerDown={(e) => {
+                    if (e.button !== 0) return
+                    audioEngine.liveNoteOn(track.id, pitch, 0.85)
+                  }}
+                  onPointerUp={() => audioEngine.liveNoteOff(track.id, pitch)}
+                  onPointerLeave={(e) => {
+                    if (e.buttons !== 0) audioEngine.liveNoteOff(track.id, pitch)
+                  }}
                 >
                   {pitch % 12 === 0 && (
                     <span className="proll-key-label mono">
@@ -595,6 +606,7 @@ export function PianoRoll({ clipId }: { clipId: string }): React.JSX.Element | n
               <div
                 key={`${region.start}`}
                 className="proll-dead"
+                title="No clip covers this range — notes need a clip to live in. Drag a clip end handle to extend one."
                 style={{
                   left: region.start * pxPerTick,
                   width: Math.max(0, (region.end - region.start) * pxPerTick)
@@ -640,6 +652,16 @@ export function PianoRoll({ clipId }: { clipId: string }): React.JSX.Element | n
                   onDoubleClick={(e) => {
                     e.stopPropagation()
                     projectStore.dispatch({ type: 'note/delete', noteIds: [raw.id] })
+                  }}
+                  // Right-click erases — the note, or the whole selection
+                  // when it is part of one (standard piano-roll gesture).
+                  onContextMenu={(e) => {
+                    e.preventDefault()
+                    e.stopPropagation()
+                    const ids =
+                      selected.has(raw.id) && selected.size > 1 ? [...selected] : [raw.id]
+                    projectStore.dispatch({ type: 'note/delete', noteIds: ids })
+                    setSelected(new Set())
                   }}
                 >
                   <div

@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from 'react'
+import { useRef, useState } from 'react'
 import { createPortal } from 'react-dom'
 import { useProjectState } from '@/state/hooks'
 import { useSelectedClipId, useSelectedTrackId } from '@/state/selection'
@@ -8,6 +8,7 @@ import { stepSeqUi, useStepSeqUi } from '@/state/stepSeqUi'
 import { bayUi, type BayIntent } from '@/state/bayUi'
 import { capturePointer } from '@/lib/pointer'
 import { contextMenuStyle } from '@/lib/contextMenu'
+import { useDismiss } from '@/lib/dismiss'
 import { FileBay } from './bay/FileBay'
 import { EffectsDock } from './fx/EffectsDock'
 import { MixerPanel } from './mixer/MixerPanel'
@@ -27,9 +28,15 @@ import { LyricsPanel } from './LyricsPanel'
 export function Dock({ side }: { side: DockSide }): React.JSX.Element {
   const panelState = usePanels()
   const rollState = usePianoRollUi()
+  const stepsState = useStepSeqUi()
   const ids = panelState.layout.docks[side]
   const active = panelState.layout.active[side]
-  const showBody = active !== null && (active !== 'pianoroll' || rollState.clipId !== null)
+  // The clip editors need a target clip; a persisted layout can name them
+  // active with none (e.g. Steps was open at quit) — show no body then.
+  const showBody =
+    active !== null &&
+    (active !== 'pianoroll' || rollState.clipId !== null) &&
+    (active !== 'steps' || stepsState.clipId !== null)
 
   if (side === 'bottom') {
     return (
@@ -139,35 +146,45 @@ function DockTab({ id, vertical = false }: { id: PanelId; vertical?: boolean }):
   const selectedClipId = useSelectedClipId()
   const [drag, setDragState] = useState<TabDrag | null>(null)
   const dragRef = useRef<TabDrag | null>(null)
-  /** Right-click menu on the Files tab: bay actions without opening it first. */
-  const [filesMenu, setFilesMenu] = useState<{ x: number; y: number } | null>(null)
+  /** Right-click menu on a tab: move/close everywhere, bay actions on Files. */
+  const [tabMenu, setTabMenu] = useState<{ x: number; y: number } | null>(null)
   const setDrag = (value: TabDrag | null): void => {
     dragRef.current = value
     setDragState(value)
   }
 
-  useEffect(() => {
-    if (!filesMenu) return
-    const close = (): void => setFilesMenu(null)
-    window.addEventListener('pointerdown', close)
-    return () => window.removeEventListener('pointerdown', close)
-  }, [filesMenu])
+  useDismiss(tabMenu !== null, () => setTabMenu(null))
 
   /** Open the bay and hand it the action — same code the bay's own UI runs. */
   const sendBayAction = (intent: BayIntent): void => {
-    setFilesMenu(null)
+    setTabMenu(null)
     panels.openPanel('files')
     bayUi.send(intent)
   }
 
   // A MIDI clip is "editable" when it's already open in the roll, or the
-  // current selection can be opened. The step sequencer follows the same
-  // rule with its own target clip.
+  // current selection can be opened. Selecting a MIDI TRACK is enough —
+  // its first clip is the target — so clicking a header or mixer strip
+  // arms the editors too. The step sequencer follows the same rule with
+  // its own target clip. Dead ids (clip deleted while the panel was
+  // closed) count as no target instead of a tab that opens nothing.
   const selectedClip = selectedClipId ? state.clips[selectedClipId] : undefined
   const selectedMidiClipId =
     selectedClip && state.tracks[selectedClip.trackId]?.kind === 'midi' ? selectedClip.id : null
-  const openable = rollState.clipId ?? selectedMidiClipId
-  const stepsOpenable = stepsState.clipId ?? selectedMidiClipId
+  const selectedTrackMidiClipId =
+    selectedMidiClipId === null &&
+    selectedTrackId !== null &&
+    state.tracks[selectedTrackId]?.kind === 'midi'
+      ? (Object.values(state.clips)
+          .filter((c) => c.trackId === selectedTrackId && c.assetId === null)
+          .sort((a, b) => a.start - b.start)[0]?.id ?? null)
+      : null
+  const editTarget = selectedMidiClipId ?? selectedTrackMidiClipId
+  const rollClipId = rollState.clipId !== null && state.clips[rollState.clipId] ? rollState.clipId : null
+  const stepsClipId =
+    stepsState.clipId !== null && state.clips[stepsState.clipId] ? stepsState.clipId : null
+  const openable = rollClipId ?? editTarget
+  const stepsOpenable = stepsClipId ?? editTarget
   const disabled =
     (id === 'pianoroll' && openable === null) || (id === 'steps' && stepsOpenable === null)
 
@@ -200,9 +217,9 @@ function DockTab({ id, vertical = false }: { id: PanelId; vertical?: boolean }):
     if (id === 'pianoroll') {
       if (panelState.isOpen('pianoroll')) {
         panels.closePanel('pianoroll')
-      } else if (selectedMidiClipId && selectedMidiClipId !== rollState.clipId) {
-        pianoRollUi.open(selectedMidiClipId)
-      } else if (rollState.clipId !== null) {
+      } else if (editTarget && editTarget !== rollClipId) {
+        pianoRollUi.open(editTarget)
+      } else if (rollClipId !== null) {
         panels.openPanel('pianoroll')
       }
       return
@@ -210,9 +227,9 @@ function DockTab({ id, vertical = false }: { id: PanelId; vertical?: boolean }):
     if (id === 'steps') {
       if (panelState.isOpen('steps')) {
         panels.closePanel('steps')
-      } else if (selectedMidiClipId && selectedMidiClipId !== stepsState.clipId) {
-        stepSeqUi.open(selectedMidiClipId)
-      } else if (stepsState.clipId !== null) {
+      } else if (editTarget && editTarget !== stepsClipId) {
+        stepSeqUi.open(editTarget)
+      } else if (stepsClipId !== null) {
         panels.openPanel('steps')
       }
       return
@@ -247,10 +264,9 @@ function DockTab({ id, vertical = false }: { id: PanelId; vertical?: boolean }):
         title={title}
         onClick={onClick}
         onContextMenu={(e) => {
-          if (id !== 'files') return
           e.preventDefault()
           e.stopPropagation()
-          setFilesMenu({ x: e.clientX, y: e.clientY })
+          setTabMenu({ x: e.clientX, y: e.clientY })
         }}
         onPointerDown={(e) => {
           if (e.button !== 0 || disabled) return
@@ -285,20 +301,46 @@ function DockTab({ id, vertical = false }: { id: PanelId; vertical?: boolean }):
           {PANEL_LABELS[id]}
         </div>
       )}
-      {filesMenu &&
+      {tabMenu &&
         createPortal(
           <div
             className="menu-panel ctx-menu"
-            style={contextMenuStyle(filesMenu.x, filesMenu.y)}
+            style={contextMenuStyle(tabMenu.x, tabMenu.y)}
             onPointerDown={(e) => e.stopPropagation()}
             onContextMenu={(e) => e.preventDefault()}
           >
-            <button className="menu-item" onClick={() => sendBayAction('import')}>
-              <span>Import files…</span>
+            {id === 'files' && (
+              <>
+                <button className="menu-item" onClick={() => sendBayAction('import')}>
+                  <span>Import files…</span>
+                </button>
+                <button className="menu-item" onClick={() => sendBayAction('new-folder')}>
+                  <span>New folder</span>
+                </button>
+                <div className="menu-sep" />
+              </>
+            )}
+            <button
+              className="menu-item"
+              onClick={() => {
+                setTabMenu(null)
+                const other: DockSide = panels.dockOf(id) === 'bottom' ? 'right' : 'bottom'
+                panels.movePanel(id, other, panels.layout.docks[other].length)
+              }}
+            >
+              <span>Move to {panels.dockOf(id) === 'bottom' ? 'right' : 'bottom'} dock</span>
             </button>
-            <button className="menu-item" onClick={() => sendBayAction('new-folder')}>
-              <span>New folder</span>
-            </button>
+            {panelState.isOpen(id) && (
+              <button
+                className="menu-item"
+                onClick={() => {
+                  setTabMenu(null)
+                  panels.closePanel(id)
+                }}
+              >
+                <span>Close panel</span>
+              </button>
+            )}
           </div>,
           document.body
         )}

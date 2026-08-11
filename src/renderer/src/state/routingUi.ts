@@ -1,5 +1,6 @@
 import { useSyncExternalStore } from 'react'
 import type { TrackId } from '@core/model/types'
+import { selection } from './selection'
 
 /** Which track's routing visualizer is open (null = none). Ephemeral. */
 class RoutingUiStore {
@@ -7,6 +8,18 @@ class RoutingUiStore {
 
   private version = 0
   private listeners = new Set<() => void>()
+
+  constructor() {
+    // While open, the panel shows the signal path of the track the user is
+    // working on — selecting another track anywhere retargets it, the same
+    // follow rule as the Effects dock.
+    selection.subscribe(() => {
+      const trackId = selection.selectedTrackId
+      if (this.trackId === null || trackId === null || trackId === this.trackId) return
+      this.trackId = trackId
+      this.emit()
+    })
+  }
 
   open(trackId: TrackId): void {
     this.trackId = trackId

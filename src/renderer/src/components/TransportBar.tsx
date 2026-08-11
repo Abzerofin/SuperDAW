@@ -25,6 +25,7 @@ import { settingsUi } from '@/state/settingsUi'
 import { preferences } from '@/state/preferences'
 import { sessionFile } from '@/state/sessionFile'
 import { capturePointer } from '@/lib/pointer'
+import { useDismiss } from '@/lib/dismiss'
 import { changeTempo, tempoConformEntries } from '@/lib/tempoActions'
 import { useRecentProjects } from '@/state/recentProjects'
 import { CollabPanel } from './CollabPanel'
@@ -62,10 +63,20 @@ export function TransportBar(): React.JSX.Element {
 
       <div className="transport-right">
         <CollabButton />
-        <button className="tbtn" title="Undo (Ctrl+Z)" disabled={!canUndo} onClick={() => projectStore.undo()}>
+        <button
+          className="tbtn"
+          title={canUndo ? 'Undo (Ctrl+Z)' : 'Nothing to undo'}
+          disabled={!canUndo}
+          onClick={() => projectStore.undo()}
+        >
           ↶
         </button>
-        <button className="tbtn" title="Redo (Ctrl+Y)" disabled={!canRedo} onClick={() => projectStore.redo()}>
+        <button
+          className="tbtn"
+          title={canRedo ? 'Redo (Ctrl+Y)' : 'Nothing to redo'}
+          disabled={!canRedo}
+          onClick={() => projectStore.redo()}
+        >
           ↷
         </button>
         <button
@@ -568,11 +579,17 @@ function CollabButton(): React.JSX.Element {
     if (appShell.consumeCollabIntent()) setOpen(true)
   }, [])
 
+  // Click-away or Escape closes the panel like every other popover (its
+  // own clicks stop propagation; the button swallows the pointerdown so a
+  // toggle click doesn't close-then-reopen).
+  useDismiss(open, () => setOpen(false))
+
   return (
     <div className="collab-anchor">
       <button
         className={`tbtn ${active ? 'tbtn-active' : ''}`}
         title="Collaboration"
+        onPointerDown={(e) => e.stopPropagation()}
         onClick={() => setOpen((v) => !v)}
       >
         {active ? (

@@ -4,9 +4,11 @@ import { automationOf, pluginsOfTrack } from '@core/model/types'
 import { denormalizeParam, normalizeParam, type ParamDef } from '@core/model/effects'
 import { paramDefsOf } from '@core/plugins/builtin'
 import { newId } from '@core/model/ids'
+import { snapTicks } from '@core/model/timebase'
 import { projectStore } from '@/state/projectStore'
 import { arrayShallowEqual, useProjectSelector } from '@/state/hooks'
 import { automationUi, type AutomationTarget } from '@/state/automationUi'
+import { selection } from '@/state/selection'
 import { capturePointer } from '@/lib/pointer'
 import { AUTO_H } from './geometry'
 
@@ -19,6 +21,8 @@ interface Props {
   track: Track
   pxPerTick: number
   contentW: number
+  /** Snap resolution for new points (Shift bypasses, like clip drags). */
+  gridTicks: number
 }
 
 /**
@@ -31,7 +35,8 @@ interface Props {
 export const AutomationLane = memo(function AutomationLane({
   track,
   pxPerTick,
-  contentW
+  contentW,
+  gridTicks
 }: Props): React.JSX.Element {
   const stored = useSyncExternalStore(automationUi.subscribe, () =>
     automationUi.targetOf(track.id)
@@ -89,12 +94,15 @@ export const AutomationLane = memo(function AutomationLane({
 
   const addPoint = (e: React.MouseEvent): void => {
     const rect = (e.currentTarget as HTMLElement).getBoundingClientRect()
+    // Points snap to the grid like every other timeline gesture; Shift
+    // places them freely at tick resolution.
+    const rawTicks = Math.max(0, (e.clientX - rect.left) / pxPerTick)
     const point: AutomationPoint = {
       id: newId('aut'),
       trackId: track.id,
       param: target.param,
       ...(target.instanceId !== undefined ? { instanceId: target.instanceId } : {}),
-      ticks: Math.max(0, (e.clientX - rect.left) / pxPerTick),
+      ticks: e.shiftKey ? rawTicks : Math.max(0, snapTicks(rawTicks, gridTicks)),
       value: yToValue(e.clientY - rect.top)
     }
     projectStore.dispatch({ type: 'automation/add', point })
@@ -157,6 +165,8 @@ export const AutomationLane = memo(function AutomationLane({
     <div
       className="auto-lane"
       style={{ '--track-color': track.color } as React.CSSProperties}
+      // Working in a track's automation selects it, like its lane/header.
+      onPointerDown={() => selection.selectTrack(track.id)}
       onDoubleClick={addPoint}
       onPointerMove={onPointerMove}
       onPointerUp={endDrag}
@@ -226,9 +236,14 @@ export const AutomationLane = memo(function AutomationLane({
           key={point.id}
           className="auto-point"
           style={{ left: point.ticks * pxPerTick - 5, top: valueToY(point.value) - 5 }}
-          title={`${pointLabel(point.value)} — double-click to delete`}
+          title={`${pointLabel(point.value)} — right-click or double-click to delete`}
           onPointerDown={(e) => beginDrag(e, point)}
           onDoubleClick={(e) => {
+            e.stopPropagation()
+            projectStore.dispatch({ type: 'automation/delete', pointId: point.id })
+          }}
+          onContextMenu={(e) => {
+            e.preventDefault()
             e.stopPropagation()
             projectStore.dispatch({ type: 'automation/delete', pointId: point.id })
           }}

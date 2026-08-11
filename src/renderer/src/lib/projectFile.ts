@@ -15,6 +15,7 @@ import { transport } from '@/state/transport'
 import { selection } from '@/state/selection'
 import { sessionFile } from '@/state/sessionFile'
 import { pianoRollUi } from '@/state/pianoRollUi'
+import { stepSeqUi } from '@/state/stepSeqUi'
 import { recentProjects, type RecentProject } from '@/state/recentProjects'
 import { appShell } from '@/state/appShell'
 import { trackInputs } from '@/state/trackInputs'
@@ -147,7 +148,7 @@ export async function loadProjectBytes(data: Uint8Array, path: string | null): P
   const decoded = await decodeArchiveAssets(archive, assets, { skipExisting: false })
 
   transport.stop()
-  selection.select(null)
+  selection.clear()
   // Never carry a live input into another project's tracks.
   void trackInputs.stopAllMonitors()
   assetStore.clear()
@@ -242,8 +243,9 @@ export function newProject(): void {
   }
   transport.stop()
   transport.setPosition(0)
-  selection.select(null)
+  selection.clear()
   pianoRollUi.close()
+  stepSeqUi.close()
   void trackInputs.stopAllMonitors()
   assetStore.clear()
   projectStore.loadProject(createEmptyProject('Untitled', Date.now()))
@@ -270,8 +272,9 @@ export function closeProject(skipConfirm = false): boolean {
   }
   transport.stop()
   transport.setPosition(0)
-  selection.select(null)
+  selection.clear()
   pianoRollUi.close()
+  stepSeqUi.close()
   void trackInputs.stopAllMonitors()
   assetStore.clear()
   projectStore.loadProject(createEmptyProject('Untitled'))
@@ -373,8 +376,9 @@ export async function recoverProject(): Promise<boolean> {
     const decoded = await decodeArchiveAssets(archive, parsed.assets, { skipExisting: false })
 
     transport.stop()
-    selection.select(null)
+    selection.clear()
     pianoRollUi.close()
+    stepSeqUi.close()
     void trackInputs.stopAllMonitors()
     assetStore.clear()
     registerDecodedAssets(decoded)
@@ -416,8 +420,9 @@ export async function mergeProjectBytes(data: Uint8Array): Promise<void> {
   }
 
   transport.stop()
-  selection.select(null)
+  selection.clear()
   pianoRollUi.close()
+  stepSeqUi.close()
   // Additive: keeps what we already have, so decode-then-register needs no
   // staging here — nothing is cleared.
   registerDecodedAssets(await decodeArchiveAssets(archive, parsed.assets, { skipExisting: true }))

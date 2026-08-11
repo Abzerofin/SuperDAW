@@ -1,14 +1,16 @@
-import { useRef, useState } from 'react'
+import { useEffect, useRef, useState, useSyncExternalStore } from 'react'
 import type { Track } from '@core/model/types'
 import { MAX_GAIN } from '@core/model/types'
 import { projectStore } from '@/state/projectStore'
 import { useProjectState } from '@/state/hooks'
 import { audioEngine } from '@/state/audioInstance'
 import { panels } from '@/state/panels'
-import { selection } from '@/state/selection'
+import { selection, useSelectedTrackId } from '@/state/selection'
 import { capturePointer } from '@/lib/pointer'
 import { parseDb, parsePan } from '@/lib/valueParse'
+import { selectTrackRange } from '@/lib/trackActions'
 import { EditableValue } from '../controls/EditableValue'
+import { TrackMenu } from '../timeline/TrackMenu'
 import { Knob } from './Knob'
 
 function panLabel(pan: number): string {
@@ -23,10 +25,21 @@ function panLabel(pan: number): string {
  */
 export function MixerPanel(): React.JSX.Element {
   const state = useProjectState()
+  const selectedTrackId = useSelectedTrackId()
+  const rootRef = useRef<HTMLDivElement>(null)
   const tracks = state.trackOrder.map((id) => state.tracks[id]).filter((t) => t !== undefined)
 
+  // The mixer follows the selection both ways: selecting a track anywhere
+  // highlights its strip AND scrolls it into view on a wide project.
+  useEffect(() => {
+    if (!selectedTrackId) return
+    rootRef.current
+      ?.querySelector(`[data-ping-id="mixer:${selectedTrackId}"]`)
+      ?.scrollIntoView({ block: 'nearest', inline: 'nearest' })
+  }, [selectedTrackId])
+
   return (
-    <div className="mixer">
+    <div className="mixer" ref={rootRef}>
       {tracks.length === 0 && <div className="bay-empty">No tracks yet</div>}
       {tracks.map((track) => (
         <TrackStrip key={track.id} track={track} />
@@ -37,17 +50,34 @@ export function MixerPanel(): React.JSX.Element {
 }
 
 function TrackStrip({ track }: { track: Track }): React.JSX.Element {
+  const isSelected = useSyncExternalStore(selection.subscribe, () =>
+    selection.isTrackSelected(track.id)
+  )
+  const [menu, setMenu] = useState<{ x: number; y: number } | null>(null)
   return (
     <div
-      className="strip"
+      className={`strip ${isSelected ? 'strip-selected' : ''}`}
       style={{ '--track-color': track.color } as React.CSSProperties}
       data-ping-id={`mixer:${track.id}`}
       data-ping={`mixer · "${track.name}"`}
-      onPointerDown={() => selection.selectTrack(track.id)}
+      // Same selection gestures as a track header: plain click selects,
+      // Ctrl/Cmd extends, Shift selects the range.
+      onPointerDown={(e) => {
+        if (e.ctrlKey || e.metaKey) selection.toggleTrack(track.id)
+        else if (e.shiftKey) selectTrackRange(projectStore.state, track.id)
+        else selection.selectTrack(track.id)
+      }}
+      onContextMenu={(e) => {
+        e.preventDefault()
+        e.stopPropagation()
+        if (!selection.isTrackSelected(track.id)) selection.selectTrack(track.id)
+        setMenu({ x: e.clientX, y: e.clientY })
+      }}
     >
-      <div className="strip-name" title={track.name}>
+      <div className="strip-name" title={`${track.name} — right-click for all track actions`}>
         {track.name}
       </div>
+      {menu && <TrackMenu track={track} x={menu.x} y={menu.y} onClose={() => setMenu(null)} />}
       <button
         className="corner-btn strip-fx"
         title="Effects (opens the Effects tab)"

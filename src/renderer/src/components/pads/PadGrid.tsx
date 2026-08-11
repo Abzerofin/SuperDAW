@@ -141,6 +141,7 @@ function PadCell({
   onSelect: () => void
 }): React.JSX.Element {
   const perform = usePadPerform()
+  const [dropHover, setDropHover] = useState(false)
   const lit =
     pad !== undefined &&
     (perform.isHeld(id) ||
@@ -152,7 +153,7 @@ function PadCell({
     <button
       className={`pad-cell ${pad ? 'pad-cell-assigned' : ''} ${lit ? 'pad-cell-lit' : ''} ${
         selected ? 'pad-cell-selected' : ''
-      }`}
+      } ${dropHover ? 'pad-cell-drop' : ''}`}
       style={tint ? ({ ['--pad-tint' as string]: tint } as React.CSSProperties) : undefined}
       title={
         pad
@@ -173,9 +174,12 @@ function PadCell({
         if (e.dataTransfer.types.includes(`${BAY_DRAG_MIME}-audio`)) {
           e.preventDefault()
           e.dataTransfer.dropEffect = 'copy'
+          setDropHover(true)
         }
       }}
+      onDragLeave={() => setDropHover(false)}
       onDrop={(e) => {
+        setDropHover(false)
         const raw = e.dataTransfer.getData(BAY_DRAG_MIME)
         if (!raw) return
         e.preventDefault()
@@ -276,6 +280,14 @@ function PadEditor({
               min={0}
               max={127}
               defaultValue={pad.pitch}
+              onKeyDown={(e) => {
+                e.stopPropagation() // typing must not trigger pad/app keys
+                if (e.key === 'Enter') e.currentTarget.blur()
+                if (e.key === 'Escape') {
+                  e.currentTarget.value = String(pad.pitch)
+                  e.currentTarget.blur()
+                }
+              }}
               onBlur={(e) => {
                 const pitch = Number(e.target.value)
                 if (Number.isFinite(pitch) && pitch !== pad.pitch) set({ pitch })
@@ -313,6 +325,14 @@ function PadEditor({
         className="pads-name"
         placeholder="Label"
         defaultValue={pad.name}
+        onKeyDown={(e) => {
+          e.stopPropagation() // typing must not trigger pad/app keys
+          if (e.key === 'Enter') e.currentTarget.blur()
+          if (e.key === 'Escape') {
+            e.currentTarget.value = pad.name
+            e.currentTarget.blur()
+          }
+        }}
         onBlur={(e) => {
           if (e.target.value !== pad.name) set({ name: e.target.value })
         }}

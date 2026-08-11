@@ -1,5 +1,5 @@
 ﻿import { useCallback, useEffect, useLayoutEffect, useMemo, useReducer, useRef, useState } from 'react'
-import type { ClipId, Note, Track, TrackKind } from '@core/model/types'
+import type { ClipId, Note, Track, TrackId, TrackKind } from '@core/model/types'
 import {
   childTracksOf,
   isTrackEffectivelyAudible,
@@ -27,6 +27,8 @@ import { collab } from '@/state/collab'
 import { timelineViewport } from '@/state/timelineViewport'
 import { createTrack } from '@/lib/trackActions'
 import { capturePointer } from '@/lib/pointer'
+import { contextMenuStyle } from '@/lib/contextMenu'
+import { useDismiss } from '@/lib/dismiss'
 import { onMiddleClick } from '@/lib/middleMouse'
 import { buildPeakSnapTargets, peakSnapStart, type PeakSnapTargets } from '@/lib/peakSnap'
 import { commentUi, useCommentUi } from '@/state/commentUi'
@@ -474,20 +476,9 @@ export function TimelineView(): React.JSX.Element {
     []
   )
 
-  // A click anywhere outside the clip color palette closes it.
-  useEffect(() => {
-    if (!colorMenu) return
-    const onPointerDown = (): void => setColorMenu(null)
-    window.addEventListener('pointerdown', onPointerDown)
-    return () => window.removeEventListener('pointerdown', onPointerDown)
-  }, [colorMenu])
-
-  useEffect(() => {
-    if (!spaceMenu) return
-    const onPointerDown = (): void => setSpaceMenu(null)
-    window.addEventListener('pointerdown', onPointerDown)
-    return () => window.removeEventListener('pointerdown', onPointerDown)
-  }, [spaceMenu])
+  // A click anywhere outside (or Escape) closes the clip and space menus.
+  useDismiss(colorMenu !== null, () => setColorMenu(null))
+  useDismiss(spaceMenu !== null, () => setSpaceMenu(null))
 
   // Outside chrome (the transport's ⇤ button) can ask the view to scroll.
   useEffect(
@@ -582,7 +573,7 @@ export function TimelineView(): React.JSX.Element {
    * Rubber-band select: drag from empty lane space to gather every clip the
    * box touches. Pure selection — no ops, nothing to undo.
    */
-  const beginMarquee = (e: React.PointerEvent): void => {
+  const beginMarquee = (e: React.PointerEvent, trackId?: TrackId): void => {
     if (e.button !== 0) return
     const additive = e.ctrlKey || e.metaKey
     const { x, y } = contentPoint(e)
@@ -596,8 +587,10 @@ export function TimelineView(): React.JSX.Element {
       base: additive ? [...selection.selectedClipIds] : []
     })
     // A plain click on empty space still clears, as it always did; the
-    // marquee only adds to that once the pointer actually moves.
-    if (!additive) selection.select(null)
+    // marquee only adds to that once the pointer actually moves. Clicking
+    // a LANE also makes its track the working track — the Effects dock,
+    // piano roll and mixer all follow, same as clicking the header.
+    if (!additive) selection.select(null, trackId)
   }
 
   /** Clip ids whose rectangles intersect the dragged box. */
@@ -882,7 +875,21 @@ export function TimelineView(): React.JSX.Element {
       processGestureMove()
     }
     if (marqueeRef.current) {
-      // The selection was already applied as the box moved.
+      // The selection was already applied as the box moved; on release the
+      // track focus joins it, so the Effects dock and editors point at the
+      // material just gathered (multi-track boxes select every hit track).
+      const hitIds = [...selection.selectedClipIds]
+      if (hitIds.length > 0) {
+        const trackIds = new Set<TrackId>()
+        for (const id of hitIds) {
+          const trackId = projectStore.state.clips[id]?.trackId
+          if (trackId) trackIds.add(trackId)
+        }
+        const focusClip = selection.selectedClipId
+          ? projectStore.state.clips[selection.selectedClipId]
+          : undefined
+        if (trackIds.size > 0) selection.selectTracks(trackIds, focusClip?.trackId)
+      }
       setMarquee(null)
       return
     }
@@ -1069,6 +1076,21 @@ export function TimelineView(): React.JSX.Element {
     void importFilesToTrack(Array.from(e.dataTransfer.files), track, start)
   }
 
+  // Dropping on a track HEADER is the "put this on that track" gesture —
+  // same acceptance as the lane, landing at the playhead.
+  const onHeaderDrop = (e: React.DragEvent, trackIndex: number): void => {
+    const track = tracks[trackIndex]
+    if (!track || track.kind === 'folder' || track.frozenAssetId) return
+    e.preventDefault()
+    const start = Math.max(0, Math.floor(transport.displayTicks() / gridTicks) * gridTicks)
+    const bayData = e.dataTransfer.getData(BAY_DRAG_MIME)
+    if (bayData) {
+      createClipFromBayAsset(JSON.parse(bayData) as BayDragPayload, track, start)
+      return
+    }
+    void importFilesToTrack(Array.from(e.dataTransfer.files), track, start)
+  }
+
   /**
    * The ruler has two gestures: the lower half scrubs the playhead, the
    * upper strip drags out the loop region (and a drag anywhere with Alt
@@ -1143,6 +1165,12 @@ export function TimelineView(): React.JSX.Element {
 
   const addTrack = (kind: TrackKind): void => {
     createTrack(kind)
+    // New tracks append at the bottom — bring the new row into view, or on
+    // a tall project it lands offscreen and the button reads as broken.
+    requestAnimationFrame(() => {
+      const el = scrollRef.current
+      if (el) el.scrollTop = el.scrollHeight
+    })
   }
 
   /** Empty space below the tracks: double-click adds, right-click offers. */
@@ -1376,6 +1404,8 @@ export function TimelineView(): React.JSX.Element {
               reorder?.active && reorder.fromIndex === i ? 'header-cell-dragging' : ''
             }`}
             onPointerDown={(e) => beginReorder(e, i)}
+            onDragOver={(e) => onLaneDragOver(e, i)}
+            onDrop={(e) => onHeaderDrop(e, i)}
           >
             <TrackHeader track={track} depth={depthOf[i]} compact={compact} />
           </div>
@@ -1396,7 +1426,7 @@ export function TimelineView(): React.JSX.Element {
                 transport.setMarker(snapTicks((e.clientX - rect.left) / pxPerTick, gridTicks))
                 return
               }
-              beginMarquee(e)
+              beginMarquee(e, track.id)
             }}
             onDoubleClick={(e) => onLaneDoubleClick(e, i)}
             onDragOver={(e) => onLaneDragOver(e, i)}
@@ -1410,7 +1440,12 @@ export function TimelineView(): React.JSX.Element {
           title="Drop audio or MIDI files here, or click to browse"
           onClick={() => void browseForMediaFiles()}
           onDragOver={(e) => {
-            if (!e.dataTransfer.types.includes('Files')) return
+            // OS files and File Bay assets both mean "new track from this".
+            if (
+              !e.dataTransfer.types.includes('Files') &&
+              !e.dataTransfer.types.includes(BAY_DRAG_MIME)
+            )
+              return
             e.preventDefault()
             e.dataTransfer.dropEffect = 'copy'
             setDropBarActive(true)
@@ -1419,6 +1454,13 @@ export function TimelineView(): React.JSX.Element {
           onDrop={(e) => {
             e.preventDefault()
             setDropBarActive(false)
+            const bayData = e.dataTransfer.getData(BAY_DRAG_MIME)
+            if (bayData) {
+              const payload = JSON.parse(bayData) as BayDragPayload
+              const track = createTrack(payload.kind === 'midi' ? 'midi' : 'audio', payload.name)
+              createClipFromBayAsset(payload, track, 0)
+              return
+            }
             const files = Array.from(e.dataTransfer.files)
             if (files.length > 0) void importFilesAsNewTracks(files)
           }}
@@ -1438,7 +1480,12 @@ export function TimelineView(): React.JSX.Element {
                 className="auto-row"
                 style={{ gridRow: gridRowOfTrack[i] + 1, gridColumn: 2 }}
               >
-                <AutomationLane track={track} pxPerTick={pxPerTick} contentW={contentW} />
+                <AutomationLane
+                  track={track}
+                  pxPerTick={pxPerTick}
+                  contentW={contentW}
+                  gridTicks={gridTicks}
+                />
               </div>
             )
         )}
@@ -1629,7 +1676,7 @@ export function TimelineView(): React.JSX.Element {
       {spaceMenu && (
         <div
           className="menu-panel space-menu"
-          style={{ left: spaceMenu.x, top: spaceMenu.y }}
+          style={contextMenuStyle(spaceMenu.x, spaceMenu.y, 208, 130)}
           onPointerDown={(e) => e.stopPropagation()}
         >
           {(['audio', 'midi', 'folder'] as const).map((kind) => (

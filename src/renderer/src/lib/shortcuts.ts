@@ -144,7 +144,7 @@ export function useGlobalShortcuts(): void {
         case 'clip.split':
           splitSelectedClipAtEditPoint()
           return
-        case 'selection.all':
+        case 'selection.all': {
           // Widens a clip selection to every clip; with nothing selected
           // it deliberately selects nothing.
           if (selection.selectedClipIds.size > 0) {
@@ -153,8 +153,15 @@ export function useGlobalShortcuts(): void {
               Object.keys(projectStore.state.clips),
               selection.selectedClipId ?? undefined
             )
+            // The track focus follows the focused clip, so the Effects
+            // dock and editors stay pointed at what the user last touched.
+            const focusClip = selection.selectedClipId
+              ? projectStore.state.clips[selection.selectedClipId]
+              : undefined
+            if (focusClip) selection.selectTrack(focusClip.trackId)
           }
           return
+        }
         case 'track.mute': {
           const trackId = selection.selectedTrackId
           const track = trackId ? projectStore.state.tracks[trackId] : undefined
@@ -202,6 +209,16 @@ export function useGlobalShortcuts(): void {
                 ? { type: 'clip/delete', clipId: clipIds[0] }
                 : { type: 'clip/deleteMany', clipIds }
             )
+            return
+          }
+          // No clips selected: Delete removes the selected track(s), same
+          // as the header menu — fully undoable.
+          const trackIds = [...selection.selectedTrackIds]
+          if (trackIds.length > 0) {
+            selection.selectTrack(null)
+            for (const trackId of trackIds) {
+              projectStore.dispatch({ type: 'track/delete', trackId })
+            }
           }
           return
         }

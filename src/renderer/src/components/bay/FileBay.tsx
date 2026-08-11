@@ -14,6 +14,7 @@ import {
   type BayDragPayload
 } from '@/lib/importAudio'
 import { contextMenuStyle } from '@/lib/contextMenu'
+import { useDismiss } from '@/lib/dismiss'
 import { sliceAssetToSampler } from '@/lib/sliceActions'
 import { useTheme } from '@/state/theme'
 
@@ -43,12 +44,7 @@ export function FileBay(): React.JSX.Element {
     if (selectedId !== null && !state.files[selectedId]) setSelectedId(null)
   }, [state.files, selectedId])
 
-  useEffect(() => {
-    if (!ctxMenu) return
-    const close = (): void => setCtxMenu(null)
-    window.addEventListener('pointerdown', close)
-    return () => window.removeEventListener('pointerdown', close)
-  }, [ctxMenu])
+  useDismiss(ctxMenu !== null, () => setCtxMenu(null))
 
   const items = childrenOf(state, folderId).sort((a, b) => {
     if ((a.kind === 'folder') !== (b.kind === 'folder')) return a.kind === 'folder' ? -1 : 1
@@ -198,11 +194,17 @@ export function FileBay(): React.JSX.Element {
           <button
             className="bay-btn"
             disabled={!selectedId}
+            title={selectedId ? 'Rename (F2)' : 'Select a file or folder first'}
             onClick={() => selectedId && setRenamingId(selectedId)}
           >
             Rename
           </button>
-          <button className="bay-btn" disabled={!selectedId} onClick={deleteSelected}>
+          <button
+            className="bay-btn"
+            disabled={!selectedId}
+            title={selectedId ? 'Delete (Del)' : 'Select a file or folder first'}
+            onClick={deleteSelected}
+          >
             Delete
           </button>
         </div>

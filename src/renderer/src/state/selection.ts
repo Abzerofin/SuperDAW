@@ -94,6 +94,22 @@ class SelectionStore {
     this.emit()
   }
 
+  /** Full reset — for a new/loaded project: neither clips nor tracks carry over. */
+  clear(): void {
+    if (
+      this.clipIds.size === 0 &&
+      this.clipId === null &&
+      this.trackIds.size === 0 &&
+      this.trackId === null
+    )
+      return
+    this.clipIds = new Set()
+    this.clipId = null
+    this.trackIds = new Set()
+    this.trackId = null
+    this.emit()
+  }
+
   selectTrack(trackId: TrackId | null): void {
     const same = this.trackId === trackId && this.trackIds.size === (trackId === null ? 0 : 1)
     if (same) return

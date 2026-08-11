@@ -5,7 +5,7 @@ import { DRUM_PADS, instrumentKindOf } from '@core/model/effects'
 import { newId } from '@core/model/ids'
 import { useProjectState } from '@/state/hooks'
 import { projectStore } from '@/state/projectStore'
-import { useStepSeqUi } from '@/state/stepSeqUi'
+import { stepSeqUi, useStepSeqUi } from '@/state/stepSeqUi'
 import { audioEngine } from '@/state/audioInstance'
 import { transport } from '@/state/transport'
 
@@ -56,6 +56,12 @@ export function StepSequencer(): React.JSX.Element {
 
   const stepTicks = PPQ / stepsPerBeat
   const clipId = clip?.id ?? null
+
+  // The clip can vanish under the panel (deleted, undone, project closed).
+  // Close instead of dangling — a dead id would keep the tab "openable".
+  useEffect(() => {
+    if (ui.clipId !== null && !projectStore.state.clips[ui.clipId]) stepSeqUi.close()
+  }, [ui.clipId, state.clips])
 
   const clipNotes = useMemo(() => {
     if (!clipId) return []
@@ -134,16 +140,18 @@ export function StepSequencer(): React.JSX.Element {
     window.setTimeout(() => audioEngine.liveNoteOff(track.id, pitch), 140)
   }
 
-  const beginPaint = (pitch: number, col: number, accent: boolean): void => {
+  const beginPaint = (pitch: number, col: number, accent: boolean, forceErase = false): void => {
     if (!clipId) return
     const existing = byCell.get(`${pitch}:${col}`)
+    // Right-click always erases (the standard drum-machine gesture), even
+    // when starting on an empty cell — the drag erases whatever it crosses.
     const stroke: PaintState =
-      existing && existing.length > 0
+      forceErase || (existing && existing.length > 0)
         ? {
             mode: 'erase',
             accent: false,
             cells: new Map([[`${pitch}:${col}`, { pitch, col }]]),
-            eraseIds: new Set(existing.map((n) => n.id)),
+            eraseIds: new Set((existing ?? []).map((n) => n.id)),
             clipId,
             stepTicks
           }
@@ -257,7 +265,7 @@ function StepRow({
   byCell: Map<string, Note[]>
   paint: PaintState | null
   onAudition: () => void
-  onBegin: (pitch: number, col: number, accent: boolean) => void
+  onBegin: (pitch: number, col: number, accent: boolean, forceErase?: boolean) => void
   onExtend: (pitch: number, col: number) => void
 }): React.JSX.Element {
   return (
@@ -287,15 +295,16 @@ function StepRow({
                   : ''
             }`}
             style={active ? { ['--step-vel' as string]: (0.35 + 0.65 * velocity / 127).toFixed(2) } : undefined}
-            title={`${row.label} · step ${col + 1}${active ? ` · velocity ${velocity}` : ''} — Shift+click for an accent`}
+            title={`${row.label} · step ${col + 1}${active ? ` · velocity ${velocity}` : ''} — Shift+click for an accent · right-click to erase`}
             onPointerDown={(e) => {
-              if (e.button !== 0) return
+              if (e.button !== 0 && e.button !== 2) return
               e.preventDefault()
-              onBegin(row.pitch, col, e.shiftKey)
+              onBegin(row.pitch, col, e.shiftKey, e.button === 2)
             }}
             onPointerEnter={(e) => {
-              if ((e.buttons & 1) === 1) onExtend(row.pitch, col)
+              if ((e.buttons & 3) !== 0) onExtend(row.pitch, col)
             }}
+            onContextMenu={(e) => e.preventDefault()}
           />
         )
       })}

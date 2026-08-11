@@ -41,10 +41,9 @@ export function LyricsPanel(): React.JSX.Element {
         onChange={(e) => setDraft(e.target.value)}
         onBlur={commit}
         onKeyDown={(e) => {
-          if (e.key === 'Escape') {
-            setDraft(null)
-            e.currentTarget.blur()
-          }
+          // Escape just leaves the field; blur commits. Nulling the draft
+          // first would silently discard the whole editing session.
+          if (e.key === 'Escape') e.currentTarget.blur()
         }}
       />
     </aside>

@@ -1,4 +1,5 @@
 import { useEffect, useRef } from 'react'
+import { useProjectSelector } from '@/state/hooks'
 import { historyUi, useHistoryUi } from '@/state/historyUi'
 import { ItemHistory } from './ItemHistory'
 
@@ -13,6 +14,21 @@ const POPOVER_W = 300
 export function HistoryPopover(): React.JSX.Element | null {
   const target = useHistoryUi().current
   const ref = useRef<HTMLDivElement>(null)
+
+  // The item can be deleted while its history is up (another user, undo):
+  // close rather than offer restores on something that no longer exists.
+  const exists = useProjectSelector((s) =>
+    target === null
+      ? true
+      : target.kind === 'clip'
+        ? !!s.clips[target.id]
+        : target.kind === 'track'
+          ? !!s.tracks[target.id]
+          : !!s.plugins[target.id]
+  )
+  useEffect(() => {
+    if (target && !exists) historyUi.close()
+  }, [target, exists])
 
   useEffect(() => {
     if (!target) return

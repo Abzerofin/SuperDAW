@@ -25,17 +25,20 @@ class PianoRollUiStore {
     const trackId = selection.selectedTrackId
     if (trackId === null) return
     const state = projectStore.state
-    if (state.clips[this.clipId]?.trackId === trackId) return
     // The selected clip when it is a MIDI clip on that track (the user
-    // pointed at it), otherwise the track's first MIDI clip. The roll is a
-    // whole-track editor, so any of the track's clips brings all of them up.
+    // pointed at it) — refocusing even within the same track, so the
+    // roll's scroll-to-clip brings the clicked material into view.
+    // Otherwise the track's first MIDI clip. The roll is a whole-track
+    // editor, so any of the track's clips brings all of them up.
     const picked = selection.selectedClipId ? state.clips[selection.selectedClipId] : undefined
     const target =
       picked && picked.trackId === trackId && picked.assetId === null
         ? picked
-        : Object.values(state.clips)
-            .filter((c) => c.trackId === trackId && c.assetId === null)
-            .sort((a, b) => a.start - b.start)[0]
+        : state.clips[this.clipId]?.trackId === trackId
+          ? undefined // still on the selected track: keep the current focus
+          : Object.values(state.clips)
+              .filter((c) => c.trackId === trackId && c.assetId === null)
+              .sort((a, b) => a.start - b.start)[0]
     if (!target || target.id === this.clipId) return
     this.clipId = target.id
     this.emit()

@@ -66,6 +66,25 @@ export function RoutingGraph({ track }: { track: Track }): React.JSX.Element {
   const routes = routesOfTrack(state, track.id)
   const graphMode = routes.length > 0
 
+  // A selected wire can vanish underneath us (undo, a removed plugin
+  // cascading its routes away) — clear it or Delete becomes a silent no-op.
+  useEffect(() => {
+    if (selectedWire !== null && !routes.some((r) => r.id === selectedWire)) {
+      setSelectedWire(null)
+    }
+  }, [routes, selectedWire])
+
+  // Escape abandons a wire mid-drag.
+  useEffect(() => {
+    if (!wireDrag) return
+    const onKey = (e: KeyboardEvent): void => {
+      if (e.key === 'Escape') setWireDrag(null)
+    }
+    window.addEventListener('keydown', onKey)
+    return () => window.removeEventListener('keydown', onKey)
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [wireDrag !== null])
+
   // Ctrl+wheel zoom (native listener — React wheel events are passive).
   // Registered above the empty-state return per the rules of hooks.
   useEffect(() => {
@@ -280,7 +299,7 @@ export function RoutingGraph({ track }: { track: Track }): React.JSX.Element {
         </button>
       </div>
       <div
-        className="rg-canvas"
+        className={`rg-canvas ${wireDrag ? 'rg-wiring' : ''}`}
         ref={canvasRef}
         data-pan
         tabIndex={0}

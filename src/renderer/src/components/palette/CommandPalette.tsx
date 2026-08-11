@@ -145,13 +145,20 @@ export function CommandPalette(): React.JSX.Element | null {
         category: 'Mixer',
         label: `${track.name} strip`,
         detail: 'open in mixer',
-        action: () => panels.openPanel('mixer')
+        action: () => {
+          // Select too, so the mixer highlights and scrolls to THIS strip.
+          selection.selectTrack(id)
+          panels.openPanel('mixer')
+        }
       })
       out.push({
         id: `routing:${id}`,
         category: 'Routing',
         label: `${track.name} routing`,
-        action: () => routingUi.open(id)
+        action: () => {
+          selection.selectTrack(id)
+          routingUi.open(id)
+        }
       })
     }
 

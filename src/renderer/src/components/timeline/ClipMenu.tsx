@@ -18,6 +18,8 @@ import {
   sliceClipToSampler
 } from '@/lib/sliceActions'
 import { TRACK_COLORS } from '@/lib/colors'
+import { contextMenuStyle } from '@/lib/contextMenu'
+import { EditableValue } from '../controls/EditableValue'
 import { historyUi } from '@/state/historyUi'
 import { stepSeqUi } from '@/state/stepSeqUi'
 import { collab, useCollab } from '@/state/collab'
@@ -92,8 +94,33 @@ export function ClipMenu({
   )
 
   return (
-    <div className="clipmenu" style={{ left: x, top: y }} onPointerDown={(e) => e.stopPropagation()}>
-      <div className="clipmenu-title">{clip.name}</div>
+    <div
+      className="clipmenu"
+      style={contextMenuStyle(x, y, 240, isAudio ? 560 : 320)}
+      onPointerDown={(e) => e.stopPropagation()}
+      onContextMenu={(e) => e.preventDefault()}
+    >
+      <input
+        key={clip.id}
+        className="clipmenu-title clipmenu-title-input"
+        title="Clip name — click to rename"
+        defaultValue={clip.name}
+        spellCheck={false}
+        onKeyDown={(e) => {
+          e.stopPropagation() // typing must not trigger app shortcuts
+          if (e.key === 'Enter') e.currentTarget.blur()
+          if (e.key === 'Escape') {
+            e.currentTarget.value = clip.name
+            e.currentTarget.blur()
+          }
+        }}
+        onBlur={(e) => {
+          const name = e.target.value.trim()
+          if (name && name !== clip.name) {
+            projectStore.dispatch({ type: 'clip/rename', clipId: clip.id, name })
+          }
+        }}
+      />
 
       {missingAsset && (
         <>
@@ -215,10 +242,16 @@ export function ClipMenu({
               >
                 −
               </button>
-              <span className="clipmenu-value mono">
-                {clip.pitch > 0 ? '+' : ''}
-                {clip.pitch} st
-              </span>
+              <EditableValue
+                className="clipmenu-value"
+                text={`${clip.pitch > 0 ? '+' : ''}${clip.pitch} st`}
+                title="Pitch in semitones — click to type it"
+                parse={(raw) => {
+                  const n = Math.round(Number(raw.replace(/st/i, '').trim()))
+                  return Number.isFinite(n) ? Math.min(MAX_PITCH, Math.max(MIN_PITCH, n)) : null
+                }}
+                onCommit={(pitch) => setPlayback({ pitch })}
+              />
               <button
                 title="Up a semitone"
                 disabled={clip.pitch >= MAX_PITCH}
@@ -247,7 +280,18 @@ export function ClipMenu({
               >
                 −
               </button>
-              <span className="clipmenu-value mono">×{clip.stretch.toFixed(2)}</span>
+              <EditableValue
+                className="clipmenu-value"
+                text={`×${clip.stretch.toFixed(2)}`}
+                title="Time factor — click to type it (1 = original length)"
+                parse={(raw) => {
+                  const n = Number(raw.replace(/[×x]/i, '').trim())
+                  return Number.isFinite(n) && n > 0
+                    ? Math.min(MAX_STRETCH, Math.max(MIN_STRETCH, n))
+                    : null
+                }}
+                onCommit={(stretch) => setPlayback({ stretch })}
+              />
               <button
                 title="Extend the material (plays slower, lower)"
                 disabled={clip.stretch >= MAX_STRETCH}

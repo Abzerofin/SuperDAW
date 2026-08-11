@@ -2582,7 +2582,9 @@ body.middle-panning * {
   top: 0;
   bottom: 0;
   background: rgba(0, 0, 0, 0.35);
-  pointer-events: none;
+  /* Events bubble to the lane's own handlers; keeping the element hoverable
+     lets its "no clip covers this range" tooltip explain the dead zone. */
+  cursor: not-allowed;
 }
 
 .proll-note {
@@ -2635,6 +2637,16 @@ body.middle-panning * {
   align-items: center;
   padding: 6px 4px;
   gap: 6px;
+}
+
+.strip:hover {
+  background: color-mix(in srgb, var(--bg-3) 55%, var(--bg-2));
+}
+
+/* Mirrors .track-header-selected: one selection, every surface shows it. */
+.strip-selected {
+  background: color-mix(in srgb, var(--accent) 12%, var(--bg-2));
+  border-color: color-mix(in srgb, var(--accent) 45%, var(--border));
 }
 
 .strip-master {
@@ -4363,6 +4375,31 @@ body.middle-panning * {
   text-overflow: ellipsis;
 }
 
+/* The title doubles as the clip's rename field. */
+.clipmenu-title-input {
+  display: block;
+  width: calc(100% - 12px);
+  margin: 0 6px;
+  padding: 2px 4px 6px;
+  background: transparent;
+  border: none;
+  border-bottom: 1px solid transparent;
+  outline: none;
+  font: inherit;
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--text-dim);
+}
+
+.clipmenu-title-input:hover {
+  border-bottom-color: var(--border);
+}
+
+.clipmenu-title-input:focus {
+  color: var(--text);
+  border-bottom-color: var(--accent);
+}
+
 .clipmenu-row {
   display: flex;
   align-items: center;
@@ -5050,6 +5087,12 @@ body.middle-panning * {
   left: -6px;
 }
 
+/* While a wire is being dragged, light every input it could land on. */
+.rg-wiring .rg-port-in {
+  background: color-mix(in srgb, var(--accent) 40%, var(--bg-0));
+  box-shadow: 0 0 6px color-mix(in srgb, var(--accent) 60%, transparent);
+}
+
 .rg-port-out {
   right: -6px;
 }
@@ -5320,6 +5363,13 @@ body.middle-panning * {
 
 .pad-cell-selected {
   outline: 1px solid var(--accent);
+}
+
+/* A bay sample hovering over the pad: show where the drop will land. */
+.pad-cell-drop {
+  outline: 2px dashed var(--accent);
+  outline-offset: -2px;
+  background: color-mix(in srgb, var(--accent) 18%, var(--bg-2));
 }
 
 .pad-cell-label {

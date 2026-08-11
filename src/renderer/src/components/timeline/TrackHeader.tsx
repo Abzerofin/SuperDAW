@@ -1,8 +1,6 @@
-import { memo, useEffect, useState, useSyncExternalStore } from 'react'
-import { createPortal } from 'react-dom'
+import { memo, useState, useSyncExternalStore } from 'react'
 import type { Track } from '@core/model/types'
 import { childTracksOf } from '@core/model/types'
-import { buildDuplicateTrackOp } from '@core/ops/duplicateTrack'
 import { projectStore } from '@/state/projectStore'
 import { useProjectSelector } from '@/state/hooks'
 import { commentUi } from '@/state/commentUi'
@@ -10,26 +8,14 @@ import { automationUi } from '@/state/automationUi'
 import { recording } from '@/state/recording'
 import { panels } from '@/state/panels'
 import { selection } from '@/state/selection'
-import { collab } from '@/state/collab'
 import { folderUi } from '@/state/folderUi'
-import { routingUi } from '@/state/routingUi'
 import { trackInputs } from '@/state/trackInputs'
 import { trackInputUi } from '@/state/trackInputUi'
-import {
-  freezeTrack,
-  groupTracksIntoFolder,
-  loadTrackPreset,
-  saveTrackPreset,
-  selectTrackRange,
-  ungroupFolder,
-  unfreezeTrack
-} from '@/lib/trackActions'
-import { exportTrackAudio } from '@/lib/exportAudio'
-import { conformTrackAudioToTempo } from '@/lib/tempoActions'
+import { selectTrackRange, unfreezeTrack } from '@/lib/trackActions'
 import { audioEngine } from '@/state/audioInstance'
 import { CommentThread } from '../comments/CommentThread'
-import { historyUi } from '@/state/historyUi'
 import { TrackInputPanel } from '../track/TrackInputPanel'
+import { TrackMenu } from './TrackMenu'
 import { TrackStripControls } from './TrackStripControls'
 
 /**
@@ -70,11 +56,6 @@ export const TrackHeader = memo(function TrackHeader({
   const isSelected = useSyncExternalStore(selection.subscribe, () =>
     selection.isTrackSelected(track.id)
   )
-  const multi = useSyncExternalStore(selection.subscribe, () => selection.selectedTrackIds.size > 1)
-  // In a session, freezing does double duty: the render it bakes is also
-  // what reaches collaborators who cannot run this track's plugins, so the
-  // action is named for both jobs.
-  const inSession = useSyncExternalStore(collab.subscribe, () => collab.mode !== 'off')
   const hasFx = useProjectSelector((s) =>
     Object.values(s.plugins).some((p) => p.trackId === track.id)
   )
@@ -101,13 +82,6 @@ export const TrackHeader = memo(function TrackHeader({
     isFolder ? childTracksOf(s, track.id).length : 0
   )
 
-  useEffect(() => {
-    if (!menu) return
-    const close = (): void => setMenu(null)
-    window.addEventListener('pointerdown', close)
-    return () => window.removeEventListener('pointerdown', close)
-  }, [menu])
-
   const commit = (): void => {
     setEditing(false)
     const trimmed = name.trim()
@@ -115,25 +89,6 @@ export const TrackHeader = memo(function TrackHeader({
       projectStore.dispatch({ type: 'track/rename', trackId: track.id, name: trimmed })
     }
   }
-
-  const duplicate = (): void => {
-    const op = buildDuplicateTrackOp(projectStore.state, track.id)
-    if (op) projectStore.dispatch(op)
-  }
-
-  const menuItem = (label: string, action: () => void, disabled = false): React.JSX.Element => (
-    <button
-      key={label}
-      className="menu-item"
-      disabled={disabled}
-      onClick={() => {
-        setMenu(null)
-        action()
-      }}
-    >
-      <span>{label}</span>
-    </button>
-  )
 
   const openMenuAt = (x: number, y: number): void => setMenu({ x, y })
 
@@ -349,77 +304,7 @@ export const TrackHeader = memo(function TrackHeader({
       </div>
       )}
 
-      {/*
-        Portalled to <body>: every track header sits in its own
-        `.header-cell`, which is `position: sticky` WITH a z-index and so
-        opens a stacking context. Rendered in place, the menu's z-index
-        would only rank it inside that one cell, leaving every track below
-        it painting on top. Coordinates are already viewport-based, so
-        `position: fixed` needs no adjustment out here.
-      */}
-      {menu &&
-        createPortal(
-          <div
-            className="menu-panel track-context-menu"
-            style={{ left: menu.x, top: menu.y }}
-            onPointerDown={(e) => e.stopPropagation()}
-          >
-            {menuItem(
-              isFolder ? 'Bus effects…' : 'Instruments & effects…',
-              () => {
-                selection.selectTrack(track.id)
-                panels.openPanel('effects')
-              },
-              false
-            )}
-            {canMonitor &&
-              menuItem('Input, channels & monitoring…', () => trackInputUi.open(track.id))}
-            {track.kind === 'midi' &&
-              !frozen &&
-              menuItem('MIDI input & channel…', () => trackInputUi.open(track.id))}
-            {track.kind === 'audio' &&
-              !frozen &&
-              menuItem('Stretch audio to tempo', () => conformTrackAudioToTempo(track.id))}
-            {menuItem('Automation (volume, pan, effects)', () => automationUi.toggle(track.id))}
-            {menuItem('Comments…', () => commentUi.open({ kind: 'track', id: track.id }))}
-            {menuItem('Show routing…', () => routingUi.open(track.id))}
-            <div className="menu-sep" />
-            {multi &&
-              menuItem(`Group ${selection.selectedTrackIds.size} tracks into a folder`, () =>
-                groupTracksIntoFolder([...selection.selectedTrackIds])
-              )}
-            {!multi && menuItem('Group into a folder', () => groupTracksIntoFolder([track.id]))}
-            {isFolder &&
-              menuItem('Ungroup (keep the tracks)', () => ungroupFolder(track.id))}
-            {menuItem('Duplicate', duplicate)}
-            {!isFolder &&
-              (frozen
-                ? menuItem('Unfreeze', () => unfreezeTrack(track.id))
-                : menuItem(inSession ? 'Freeze/Sync' : 'Freeze', () =>
-                    void freezeTrack(track.id)
-                  ))}
-            {menuItem('Export track as WAV…', () => void exportTrackAudio(track.id, 'wav'))}
-            {menuItem('Export track as MP3…', () => void exportTrackAudio(track.id, 'mp3'))}
-            {menuItem('Save track preset…', () => void saveTrackPreset(track.id))}
-            {menuItem('Load track preset…', () => void loadTrackPreset())}
-            <div className="menu-sep" />
-            {menuItem(isFolder ? 'Delete folder' : 'Delete track', () =>
-              projectStore.dispatch({ type: 'track/delete', trackId: track.id })
-            )}
-            <div className="menu-sep" />
-            {menuItem('History…', () =>
-              historyUi.open({
-                kind: 'track',
-                id: track.id,
-                title: track.name,
-                x: menu.x,
-                y: menu.y
-              })
-            )}
-            {hasFx && <div className="menu-note">This track has effects</div>}
-          </div>,
-          document.body
-        )}
+      {menu && <TrackMenu track={track} x={menu.x} y={menu.y} onClose={() => setMenu(null)} />}
     </div>
   )
 })
