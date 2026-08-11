@@ -257,6 +257,84 @@ suite('project file format', () => {
     expect(plain.state.clips['c1'].loopLength).toBe(0)
   })
 
+  test('a real non-null stateBlob envelope survives save -> load intact', () => {
+    // The exact envelope shape main writes when a VST3 editor closes
+    // (see src/main/vst3State.ts): the producer's plugin state must come
+    // back byte-identical from a project file.
+    const envelope = '{"component":"AAECAwQFBgcICQ=="}'
+    let state = sampleState()
+    state = apply(state, {
+      type: 'plugin/add',
+      instance: {
+        id: 'vst1',
+        trackId: 't1',
+        descriptor: { format: 'vst3', uid: '{5653-5445}', name: 'Verb', vendor: 'Acme', version: '1.0' },
+        enabled: true,
+        rank: 1,
+        params: { '3': 0.25 },
+        stateBlob: envelope
+      }
+    })
+    expect(state.plugins['vst1'].stateBlob).toBe(envelope) // premise: the add kept it
+    const parsed = parseProjectJson(serializeProjectJson(state, []))
+    expect(parsed.state.plugins['vst1']).toEqual(state.plugins['vst1'])
+    expect(parsed.state.plugins['vst1'].stateBlob).toBe(envelope)
+  })
+
+  test('doctored plugin instances are validated field by field on load', () => {
+    const state = sampleState()
+    const good = {
+      id: 'ok',
+      trackId: 't1',
+      descriptor: { format: 'vst3', uid: 'u1', name: 'N', vendor: 'V', version: '1' },
+      enabled: false,
+      rank: 2,
+      params: { '1': 0.5 },
+      stateBlob: '{"component":"QUJD"}',
+      graphX: 40,
+      graphY: 12.5
+    }
+    const doctored = {
+      ...state,
+      plugins: {
+        ok: good,
+        // Load-bearing fields: fail one and the instance is dropped.
+        noDescriptor: { ...good, id: 'noDescriptor', descriptor: undefined },
+        badDescriptor: { ...good, id: 'badDescriptor', descriptor: { format: 'vst3', uid: 42 } },
+        ghostTrack: { ...good, id: 'ghostTrack', trackId: 'no-such-track' },
+        numberTrack: { ...good, id: 'numberTrack', trackId: 7 },
+        notAnObject: 12,
+        // Everything else is coerced, never trusted.
+        messy: {
+          id: 'messy',
+          trackId: 't1',
+          descriptor: good.descriptor,
+          enabled: 'yes', // truthy junk -> default true, not "truthy"
+          rank: Infinity,
+          params: { fine: 1.5, text: 'x', nothing: null, deep: { a: 1 } },
+          stateBlob: { component: 'QUJD' }, // non-string truthy must not survive
+          graphX: 'left',
+          graphY: Infinity
+        },
+        // The record key is the identity ops target — a lying inner id loses.
+        renamed: { ...good, id: 'someOtherId' }
+      }
+    }
+    const parsed = parseProjectJson(
+      JSON.stringify({ formatVersion: 3, state: doctored, assets: [] })
+    )
+    expect(Object.keys(parsed.state.plugins).sort()).toEqual(['messy', 'ok', 'renamed'])
+    expect(parsed.state.plugins['ok']).toEqual(good)
+    expect(parsed.state.plugins['renamed'].id).toBe('renamed')
+    const messy = parsed.state.plugins['messy']
+    expect(messy.enabled).toBe(true)
+    expect(Number.isFinite(messy.rank)).toBe(true)
+    expect(messy.params).toEqual({ fine: 1.5 })
+    expect(messy.stateBlob).toBeNull()
+    expect('graphX' in messy).toBe(false)
+    expect('graphY' in messy).toBe(false)
+  })
+
   test('v1 files with legacy effects load as builtin plugin instances', () => {
     const state = sampleState()
     const { plugins: _plugins, ...rest } = state

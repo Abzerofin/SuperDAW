@@ -4,6 +4,7 @@ import { routeIsValid } from '../model/routing'
 import { synthDefaults, EFFECT_DEFS, type EffectType } from '../model/effects'
 import { normalizeProjectSettings } from '../model/projectSettings'
 import { builtinEffectDescriptor } from '../plugins/builtin'
+import { isPluginDescriptor } from '../plugins/descriptor'
 import type { OpEnvelope } from '../ops/operations'
 import type { ProjectLineage } from '../state/store'
 
@@ -184,7 +185,7 @@ function normalizeState(state: ProjectState): ProjectState {
     ...merged,
     tracks,
     clips,
-    plugins: migratePlugins(merged),
+    plugins: migratePlugins(merged, tracks),
     // Pre-settings files get defaults; stored values re-earn their place
     // through the same normalizer the reducer uses (never trusted raw).
     settings: normalizeProjectSettings(merged.settings)
@@ -270,27 +271,66 @@ interface LegacyEffect {
   readonly params?: Record<string, number>
 }
 
+/** Keep only string-keyed finite-number entries (clamping is the reducer's job). */
+function sanitizeParams(raw: unknown): Record<string, number> {
+  const out: Record<string, number> = {}
+  if (typeof raw !== 'object' || raw === null) return out
+  for (const [key, value] of Object.entries(raw)) {
+    if (typeof value === 'number' && Number.isFinite(value)) out[key] = value
+  }
+  return out
+}
+
 /**
  * v1 inserts were `effects` records identified by a bare EffectType; they
- * become plugin instances with builtin descriptors. v2+ instances pass
- * through with `stateBlob` defaulted for forward compatibility.
+ * become plugin instances with builtin descriptors. v2+ instances re-earn
+ * their place field by field, like routes: a doctored (or collaborator-
+ * authored) file must not smuggle malformed plugin state past the reducer.
+ * Descriptor shape and target track are load-bearing — fail either and the
+ * instance is dropped; every other field is coerced to a safe value.
  */
-function migratePlugins(merged: ProjectState): Record<string, PluginInstance> {
+function migratePlugins(
+  merged: ProjectState,
+  tracks: Record<string, Track>
+): Record<string, PluginInstance> {
   const plugins: Record<string, PluginInstance> = {}
-  for (const [id, instance] of Object.entries(merged.plugins ?? {})) {
-    plugins[id] = { ...instance, stateBlob: instance.stateBlob ?? null }
+  let position = 0
+  for (const [id, raw] of Object.entries(merged.plugins ?? {})) {
+    position++
+    if (typeof raw !== 'object' || raw === null) continue
+    const instance = raw as unknown as Record<string, unknown>
+    if (!isPluginDescriptor(instance.descriptor)) continue
+    // An instance on a track that doesn't exist can never be heard or
+    // edited — dangling state is dropped, exactly like a dangling route.
+    if (typeof instance.trackId !== 'string' || !tracks[instance.trackId]) continue
+    const finite = (v: unknown): v is number => typeof v === 'number' && Number.isFinite(v)
+    plugins[id] = {
+      // The record key names the instance everywhere (ops target
+      // state.plugins[instanceId]) — a mismatched inner id cannot desync.
+      id,
+      trackId: instance.trackId,
+      descriptor: instance.descriptor,
+      enabled: typeof instance.enabled === 'boolean' ? instance.enabled : true,
+      rank: finite(instance.rank) ? instance.rank : position,
+      params: sanitizeParams(instance.params),
+      // The blob is an opaque STRING envelope or null; a non-string truthy
+      // value would reach the native host's parser, so it never survives.
+      stateBlob: typeof instance.stateBlob === 'string' ? instance.stateBlob : null,
+      ...(finite(instance.graphX) ? { graphX: instance.graphX } : {}),
+      ...(finite(instance.graphY) ? { graphY: instance.graphY } : {})
+    }
   }
   const legacy = (merged as { effects?: Record<string, LegacyEffect> }).effects
   if (legacy) {
     for (const [id, fx] of Object.entries(legacy)) {
-      if (plugins[id] || !EFFECT_DEFS[fx.type]) continue
+      if (plugins[id] || !EFFECT_DEFS[fx.type] || !tracks[fx.trackId]) continue
       plugins[id] = {
         id,
         trackId: fx.trackId,
         descriptor: builtinEffectDescriptor(fx.type),
-        enabled: fx.enabled ?? true,
-        rank: fx.rank ?? 1,
-        params: fx.params ?? {},
+        enabled: fx.enabled !== false,
+        rank: typeof fx.rank === 'number' && Number.isFinite(fx.rank) ? fx.rank : 1,
+        params: sanitizeParams(fx.params),
         stateBlob: null
       }
     }

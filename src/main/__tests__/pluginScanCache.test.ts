@@ -3,11 +3,13 @@ import {
   CACHE_VERSION,
   emptyCache,
   isFresh,
+  markUnderInspection,
   normalizeFolders,
   parseCache,
   parseQuarantine,
   pruneToPresent,
   shouldSkip,
+  UNDER_INSPECTION_REASON,
   type CacheEntry
 } from '../pluginScanCache'
 
@@ -100,6 +102,45 @@ suite('quarantine', () => {
     expect(shouldSkip(crashed, true)).toBe(false) // refresh retries it
     expect(shouldSkip(failed, false)).toBe(false) // cheap, always retried
     expect(shouldSkip(undefined, false)).toBe(false)
+  })
+})
+
+suite('presume-guilty inspection marks (crash-safe scanning)', () => {
+  test('marking a bundle presumes a crash and preserves other records', () => {
+    const existing = { 'C:/old.vst3': { reason: 'crashed', at: 1, crashed: true } }
+    const marked = markUnderInspection(existing, 'C:/next.vst3', 42)
+    expect(marked['C:/next.vst3']).toEqual({
+      reason: UNDER_INSPECTION_REASON,
+      at: 42,
+      crashed: true
+    })
+    expect(marked['C:/old.vst3']).toEqual(existing['C:/old.vst3'])
+    // Pure transformation: the input record is untouched.
+    expect(existing['C:/next.vst3' as keyof typeof existing]).toBeUndefined()
+  })
+
+  test('an app death mid-inspection leaves the culprit quarantined on next launch', () => {
+    // What the next launch reads back is whatever JSON hit disk: the mark
+    // must round-trip the persistence layer as an ordinary crash record.
+    const persisted = JSON.parse(JSON.stringify(markUnderInspection({}, 'C:/killer.vst3', 7)))
+    const parsed = parseQuarantine(persisted)
+    expect(shouldSkip(parsed['C:/killer.vst3'], false)).toBe(true) // skipped, not re-crashed
+    expect(shouldSkip(parsed['C:/killer.vst3'], true)).toBe(false) // Refresh retries it
+  })
+
+  test('a finished inspection overwrites the mark with the real outcome', () => {
+    // The scan writes the accumulated quarantine WITHOUT the mark once the
+    // bundle's outcome is known: survived → no record at all; crashed the
+    // worker → the fatal record replaces the presumption.
+    const marked = markUnderInspection({}, 'C:/fine.vst3', 1)
+    expect(shouldSkip(marked['C:/fine.vst3'], false)).toBe(true)
+
+    const survived: Record<string, never> = {} // next write drops the mark
+    expect(shouldSkip(survived['C:/fine.vst3'], false)).toBe(false)
+
+    const fatal = { 'C:/bad.vst3': { reason: 'timed out after 15s', at: 2, crashed: true } }
+    const nextMark = markUnderInspection(fatal, 'C:/later.vst3', 3)
+    expect(nextMark['C:/bad.vst3'].reason).toBe('timed out after 15s')
   })
 })
 

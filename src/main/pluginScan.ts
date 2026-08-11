@@ -7,6 +7,7 @@ import { resolveAddonPath } from './addonPath'
 import {
   emptyCache,
   isFresh,
+  markUnderInspection,
   normalizeFolders,
   parseCache,
   parseQuarantine,
@@ -199,11 +200,14 @@ type InspectOutcome =
  * Drives the scanner child through a list of bundles, one at a time so a
  * death can always be pinned on a specific plugin. A fatal outcome (crash
  * or hang) respawns the child and continues with the next bundle.
+ * `onBefore` is awaited before each bundle is fed to the child — the
+ * presume-guilty persistence hook (see markUnderInspection).
  */
 async function inspectAll(
   paths: readonly string[],
   addonPath: string,
-  onOutcome: (path: string, outcome: InspectOutcome) => void
+  onOutcome: (path: string, outcome: InspectOutcome) => void,
+  onBefore?: (path: string) => Promise<void>
 ): Promise<void> {
   const workerScript = join(__dirname, 'pluginScanWorker.js')
   let index = 0
@@ -244,6 +248,7 @@ async function inspectAll(
 
     while (index < paths.length && !dead) {
       const path = paths[index]
+      await onBefore?.(path)
       const outcome = await inspectOne(child, path, deadPromise)
       onOutcome(path, outcome)
       index++
@@ -390,21 +395,40 @@ async function runScan(forced: boolean): Promise<void> {
         })
       }
     } else {
-      await inspectAll(toInspect, addonPath, (path, outcome) => {
-        if (outcome.kind === 'ok') {
-          const stamp = stamps.get(path)
-          if (stamp) nextEntries[path] = { stamp, classes: outcome.classes }
-          found.push(...flatten(path, outcome.classes))
-          return
+      await inspectAll(
+        toInspect,
+        addonPath,
+        (path, outcome) => {
+          if (outcome.kind === 'ok') {
+            const stamp = stamps.get(path)
+            if (stamp) nextEntries[path] = { stamp, classes: outcome.classes }
+            found.push(...flatten(path, outcome.classes))
+            return
+          }
+          const crashed = outcome.kind === 'fatal'
+          problems.push({ path, reason: outcome.reason, crashed })
+          // Only crashes/hangs earn a quarantine record; a plain load error
+          // is cheap to retry and may be fixed by the next plugin update.
+          if (crashed) {
+            nextQuarantine[path] = { reason: outcome.reason, at: Date.now(), crashed: true }
+            // A crasher's REAL reason reaches disk right away (writes are
+            // serialized) — not only if the scan lives to its final write.
+            void setAppData(QUARANTINE_KEY, { ...nextQuarantine })
+          }
+        },
+        async (path) => {
+          // PRESUME GUILTY, persisted before the bundle loads: if this
+          // inspection takes the whole app down, the next launch reads the
+          // mark as an ordinary crash quarantine and skips the culprit
+          // instead of dying the same way on every startup. Results
+          // accumulated so far ride along in the same batch, so a death
+          // mid-scan also keeps every finished inspection. One small write
+          // per DLL load — dwarfed by the load itself; a warm cache scan
+          // (the every-launch case) inspects nothing and writes nothing.
+          await setAppData(CACHE_KEY, { version: cache.version, entries: { ...nextEntries } })
+          await setAppData(QUARANTINE_KEY, markUnderInspection(nextQuarantine, path, Date.now()))
         }
-        const crashed = outcome.kind === 'fatal'
-        problems.push({ path, reason: outcome.reason, crashed })
-        // Only crashes/hangs earn a quarantine record; a plain load error
-        // is cheap to retry and may be fixed by the next plugin update.
-        if (crashed) {
-          nextQuarantine[path] = { reason: outcome.reason, at: Date.now(), crashed: true }
-        }
-      })
+      )
     }
   }
 

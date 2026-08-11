@@ -44,6 +44,17 @@ class Vst3DockStore {
     this.emit()
   }
 
+  /**
+   * Forget a failure so the next mount retries the editor. Called on the
+   * retry gestures (re-expanding the card) — one transient open failure
+   * must not demote a plugin to generic sliders for the whole session. A
+   * plugin with genuinely no GUI just fails again, cheaply.
+   */
+  clearFailed(instanceId: PluginInstanceId): void {
+    if (!this.failed.delete(instanceId)) return
+    this.emit()
+  }
+
   isFailed(instanceId: PluginInstanceId): boolean {
     return this.failed.has(instanceId)
   }

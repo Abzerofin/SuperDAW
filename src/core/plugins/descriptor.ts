@@ -32,6 +32,26 @@ export function descriptorKey(d: PluginDescriptor): string {
 }
 
 /**
+ * Structural check for descriptors read from FILES (project documents,
+ * track presets) — anything off disk may be doctored or written by another
+ * program, so a descriptor re-earns its shape before entering state. The
+ * single source of truth for "is this a descriptor", shared by every
+ * persistence layer.
+ */
+export function isPluginDescriptor(raw: unknown): raw is PluginDescriptor {
+  const d = raw as Record<string, unknown> | null
+  return (
+    typeof d === 'object' &&
+    d !== null &&
+    typeof d.format === 'string' &&
+    typeof d.uid === 'string' &&
+    typeof d.name === 'string' &&
+    typeof d.vendor === 'string' &&
+    typeof d.version === 'string'
+  )
+}
+
+/**
  * Where to send a user whose machine lacks this plugin.
  *
  * Built LOCALLY from the descriptor's identity, and always a fixed https

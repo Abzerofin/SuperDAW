@@ -1,13 +1,16 @@
 # Native modules
 
-## `vst3host` — VST3 discovery and metadata (Windows)
+## `vst3host` — VST3 discovery, offline audio, and editor hosting (Windows)
 
-Phase 1 of VST3 hosting: finds installed `.vst3` bundles and reads the
-identity of the audio-processor classes they export. It deliberately does
-**not** process audio yet — it only produces the fields that map onto a
-`PluginDescriptor` (format/uid/name/vendor/version), so the existing
-registry, resolution ladder and missing-plugin placeholder can work
-against real plugins before the real-time audio bridge exists.
+Finds installed `.vst3` bundles, reads the identity of the audio-processor
+classes they export (the fields that map onto a `PluginDescriptor`:
+format/uid/name/vendor/version), and hosts the plugins themselves:
+whole-buffer offline processing (`processBuffer`), persistent instances
+whose internal state carries across chunks for look-ahead playback
+(`openInstance`/`processInstance`), component state capture, and the
+plugins' own native editor windows (`openEditor`), floating or docked over
+the app window. The one thing it does **not** do is stream audio in real
+time inside the renderer's graph — see "Why offline first" below.
 
 ### Prerequisites
 

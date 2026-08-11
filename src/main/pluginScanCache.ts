@@ -137,6 +137,30 @@ export function pruneToPresent<T>(
 }
 
 /**
+ * The reason recorded for a bundle whose inspection never finished. Only
+ * ever user-visible when the app actually died mid-inspection — a
+ * completed scan (or the next bundle's mark) always overwrites it.
+ */
+export const UNDER_INSPECTION_REASON = 'took the app down during the last plugin scan'
+
+/**
+ * PRESUME-GUILTY marker, persisted BEFORE a bundle is handed to the
+ * scanner: results used to be written only at scan end, so a plugin that
+ * killed the process early in a large folder was re-inspected — and
+ * re-crashed — on every launch until one full scan survived. With the mark
+ * on disk first, an app death mid-scan leaves exactly the bundle being
+ * inspected quarantined as an ordinary crasher; every bundle that finished
+ * (fine or not) has had its real outcome written over the mark.
+ */
+export function markUnderInspection(
+  quarantine: Record<string, QuarantineEntry>,
+  path: string,
+  at: number
+): Record<string, QuarantineEntry> {
+  return { ...quarantine, [path]: { reason: UNDER_INSPECTION_REASON, at, crashed: true } }
+}
+
+/**
  * Should this bundle be skipped without loading it?
  *
  * A plugin that merely failed to load is retried on every scan — it is

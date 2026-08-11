@@ -2,6 +2,7 @@ import { BrowserWindow, dialog, ipcMain, screen } from 'electron'
 import type { WebContents } from 'electron'
 import { readAppData, setAppData } from './appData'
 import { resolveAddonPath } from './addonPath'
+import { blobFromChunk, chunkFromBlob } from './vst3State'
 import {
   clearQuarantine,
   currentPlugins,
@@ -140,25 +141,6 @@ function loadAddon(): Vst3Addon | null {
 }
 
 /**
- * The component chunk out of a document stateBlob, or undefined. The blob
- * is a small JSON envelope ({"component": base64}) so controller state and
- * versioning can join it later without another format change. Arrives from
- * the DOCUMENT (possibly authored by a collaborator), so anything
- * malformed is ignored rather than trusted.
- */
-function chunkFromBlob(stateBlob: string | null | undefined): Buffer | undefined {
-  if (!stateBlob) return undefined
-  try {
-    const parsed: unknown = JSON.parse(stateBlob)
-    const component = (parsed as { component?: unknown })?.component
-    if (typeof component !== 'string' || component.length === 0) return undefined
-    return Buffer.from(component, 'base64')
-  } catch {
-    return undefined
-  }
-}
-
-/**
  * uid -> installed bundle, from the scanner's index. Callers pass a
  * descriptor uid, never a path: paths are machine-specific and must never
  * enter the document. `ensureScanned` makes the first lookup of a session
@@ -282,7 +264,7 @@ function finalizeEditor(host: Vst3Addon, instanceId: string, sender: WebContents
       sender.send('vst3:editor-event', {
         instanceId,
         kind: 'state',
-        stateBlob: JSON.stringify({ component: final.component.toString('base64') })
+        stateBlob: blobFromChunk(final.component)
       })
     }
   } catch {
@@ -593,9 +575,7 @@ export function registerVst3Ipc(): void {
         if (result.error || !result.component) {
           return { error: result.error ?? 'could not capture state' }
         }
-        return {
-          stateBlob: JSON.stringify({ component: result.component.toString('base64') })
-        }
+        return { stateBlob: blobFromChunk(result.component) }
       } catch (error) {
         return { error: error instanceof Error ? error.message : String(error) }
       }

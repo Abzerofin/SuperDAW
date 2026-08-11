@@ -3,6 +3,7 @@ import { MAX_GAIN } from '../model/types'
 import { newId } from '../model/ids'
 import { SYNTH_DEFS, clampParam, synthDefaults } from '../model/effects'
 import type { PluginDescriptor } from '../plugins/descriptor'
+import { isPluginDescriptor } from '../plugins/descriptor'
 import { paramDefsOf } from '../plugins/builtin'
 
 /**
@@ -72,19 +73,6 @@ function clamp(value: number, min: number, max: number): number {
   return Math.min(max, Math.max(min, value))
 }
 
-function isDescriptor(raw: unknown): raw is PluginDescriptor {
-  const d = raw as Record<string, unknown> | null
-  return (
-    typeof d === 'object' &&
-    d !== null &&
-    typeof d.format === 'string' &&
-    typeof d.uid === 'string' &&
-    typeof d.name === 'string' &&
-    typeof d.vendor === 'string' &&
-    typeof d.version === 'string'
-  )
-}
-
 function sanitizeNumbers(raw: unknown): Record<string, number> {
   const out: Record<string, number> = {}
   if (typeof raw !== 'object' || raw === null) return out
@@ -124,7 +112,7 @@ export function parseTrackPreset(text: string): TrackPresetJson {
   }
 
   const plugins: TrackPresetJson['plugins'] = (Array.isArray(p.plugins) ? p.plugins : [])
-    .filter((entry: unknown) => isDescriptor((entry as Record<string, unknown>)?.descriptor))
+    .filter((entry: unknown) => isPluginDescriptor((entry as Record<string, unknown>)?.descriptor))
     .map((entry: Record<string, unknown>, i: number) => {
       const descriptor = entry.descriptor as PluginDescriptor
       const defs = paramDefsOf(descriptor)

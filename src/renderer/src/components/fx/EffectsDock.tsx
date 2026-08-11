@@ -402,7 +402,13 @@ export function PluginSection({
         <button
           className="fx-collapse"
           title={collapsed ? 'Expand' : 'Collapse to just the header'}
-          onClick={() => fxCollapse.toggleCollapsed(instance.id)}
+          onClick={() => {
+            // Re-expanding is the retry gesture for a failed editor: clear
+            // the mark so DockedEditor mounts and tries again, instead of
+            // one transient failure meaning sliders until app reload.
+            if (collapsed && offline) vst3Dock.clearFailed(instance.id)
+            fxCollapse.toggleCollapsed(instance.id)
+          }}
         >
           {collapsed ? '▸' : '▾'}
         </button>

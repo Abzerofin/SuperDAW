@@ -1,9 +1,11 @@
 import { Mp3Encoder } from '@breezystack/lamejs'
-import type { TrackId } from '@core/model/types'
+import type { ProjectState, TrackId } from '@core/model/types'
+import { isTrackEffectivelyAudible, pluginsOfTrack } from '@core/model/types'
 import type { ProjectExportFormat } from '@core/model/projectSettings'
 import { encodeWavPcmAsync, type WavBitDepth } from '@audio/wav'
 import { renderMixdownChannels, renderTrackChannels } from '@audio/render'
 import { measureIntegratedLufs, formatLufs } from '@audio/loudness'
+import { pluginRegistry } from '@audio/pluginRegistry'
 import { projectStore } from '@/state/projectStore'
 import { assetStore, audioEngine } from '@/state/audioInstance'
 import { statusNotice } from '@/state/statusNotice'
@@ -109,6 +111,37 @@ function loudnessReport(channels: Float32Array[], sampleRate: number): string | 
 }
 
 /**
+ * Tracks whose sound this bounce is missing: unfrozen, audible in the
+ * rendered state, with at least one enabled insert only the out-of-process
+ * host can run ('offline' = an installed VST3). The offline render goes
+ * through Web Audio alone, so those inserts are bypassed — including in
+ * graph-routing mode, where they short inlet→outlet. The export must SAY
+ * so rather than silently sound different from the frozen/live mix.
+ * Builtin-only projects (and the browser build, where nothing is
+ * 'offline') always produce an empty list.
+ */
+function vst3BypassedTrackNames(state: ProjectState): string[] {
+  const names: string[] = []
+  for (const trackId of state.trackOrder) {
+    const track = state.tracks[trackId]
+    if (!track || track.frozenAssetId) continue // frozen = inserts baked into the render
+    if (!isTrackEffectivelyAudible(state, trackId)) continue
+    const bypassed = pluginsOfTrack(state, trackId).some(
+      (p) => p.enabled && pluginRegistry.status(p.descriptor) === 'offline'
+    )
+    if (bypassed) names.push(track.name.trim() || 'Track')
+  }
+  return names
+}
+
+/** The one-shot warning folded into the export notice, or null. */
+function vst3BypassWarning(state: ProjectState): string | null {
+  const names = vst3BypassedTrackNames(state)
+  if (names.length === 0) return null
+  return `VST3 inserts bypassed on ${names.join(', ')} (freeze to include them)`
+}
+
+/**
  * Offline-render the whole project and save it in the project's default
  * export format and bit depth. Resolves when saved (or cancelled); false =
  * empty project, nothing to bounce.
@@ -130,7 +163,12 @@ export async function exportMixdown(): Promise<boolean> {
   const saved = await saveBytes(data, name, exportFormat)
   if (saved) {
     const loudness = loudnessReport(mixed.channels, mixed.sampleRate)
-    statusNotice.show(`Exported ${name}${loudness ? ` — ${loudness}` : ''}`)
+    // One notice per bounce: the VST3 warning joins the loudness report
+    // rather than stacking a second notice on top of it.
+    const warning = vst3BypassWarning(state)
+    statusNotice.show(
+      `Exported ${name}${loudness ? ` — ${loudness}` : ''}${warning ? ` — ${warning}` : ''}`
+    )
   }
   return true
 }
@@ -150,6 +188,23 @@ export async function exportTrackAudio(trackId: TrackId, format: ExportFormat): 
   if (!mixed) return false
   const data = await encode(mixed.channels, mixed.sampleRate, format, state.settings.exportBitDepth)
   const base = track.name.trim() || 'Track'
-  await saveBytes(data, `${base}.${format}`, format)
+  const saved = await saveBytes(data, `${base}.${format}`, format)
+  if (saved) {
+    // Evaluate the bypass against the state the render actually used (the
+    // track soloed, nothing muted) so ancestor buses and, for folders,
+    // descendants are counted exactly as they were heard. A track export
+    // posts no notice normally — the warning is the only reason to speak.
+    const soloed: ProjectState = {
+      ...state,
+      tracks: Object.fromEntries(
+        Object.entries(state.tracks).map(([id, t]) => [
+          id,
+          { ...t, soloed: id === trackId, muted: false }
+        ])
+      )
+    }
+    const warning = vst3BypassWarning(soloed)
+    if (warning) statusNotice.show(`Exported ${base}.${format} — ${warning}`)
+  }
   return true
 }
