@@ -335,6 +335,106 @@ suite('project file format', () => {
     expect('graphY' in messy).toBe(false)
   })
 
+  test('builtin params are clamped through core defs on load, exactly like plugin/add', () => {
+    const state = sampleState()
+    const compressor = {
+      format: 'builtin',
+      uid: 'superdaw.compressor',
+      name: 'Compressor',
+      vendor: 'SuperDAW',
+      version: '1.0.0'
+    }
+    const doctored = {
+      ...state,
+      plugins: {
+        // makeup 1e9 is FINITE, so a finiteness-only screen passes it —
+        // and dbToGain(1e9) then blows up the engine at rewire time.
+        comp: {
+          id: 'comp',
+          trackId: 't1',
+          descriptor: compressor,
+          enabled: true,
+          rank: 1,
+          params: { makeup: 1e9, threshold: -1e9, smuggled: 42 },
+          stateBlob: null
+        },
+        // A builtin uid core doesn't know: the reducer rejects it in
+        // plugin/add, so the load path must drop it too.
+        ghost: {
+          id: 'ghost',
+          trackId: 't1',
+          descriptor: { ...compressor, uid: 'superdaw.doesnotexist' },
+          enabled: true,
+          rank: 2,
+          params: {},
+          stateBlob: null
+        }
+      }
+    }
+    const parsed = parseProjectJson(
+      JSON.stringify({ formatVersion: 3, state: doctored, assets: [] })
+    )
+    const params = parsed.state.plugins['comp'].params
+    expect(params.makeup).toBe(24)
+    expect(params.threshold).toBe(-60)
+    expect('smuggled' in params).toBe(false)
+    expect(params.ratio).toBe(4) // missing defined params fill from defaults
+    expect(parsed.state.plugins['ghost']).toBeUndefined()
+  })
+
+  test('legacy v1 effects get the same clamp: out-of-range clamped, unknown keys dropped', () => {
+    const { plugins: _plugins, ...rest } = sampleState()
+    const legacyState = {
+      ...rest,
+      effects: {
+        fx1: {
+          id: 'fx1',
+          trackId: 't1',
+          type: 'compressor',
+          enabled: true,
+          rank: 1,
+          params: { makeup: 1e9, smuggled: 7 }
+        }
+      }
+    }
+    const parsed = parseProjectJson(
+      JSON.stringify({ formatVersion: 1, state: legacyState, assets: [] })
+    )
+    const params = parsed.state.plugins['fx1'].params
+    expect(params.makeup).toBe(24)
+    expect('smuggled' in params).toBe(false)
+    expect(params.threshold).toBe(-24)
+  })
+
+  test('a descriptor with doctored paramDefs is rejected whole on load', () => {
+    const state = sampleState()
+    const def = { label: 'Vol', min: 0, max: 1, default: 0.5, unit: '', digits: 2 }
+    const vst = (uid: string, paramDefs: unknown) => ({
+      id: uid,
+      trackId: 't1',
+      descriptor: { format: 'vst3', uid, name: 'N', vendor: 'V', version: '1', paramDefs },
+      enabled: true,
+      rank: 1,
+      params: { vol: 0.5 },
+      stateBlob: null
+    })
+    const doctored = {
+      ...state,
+      plugins: {
+        // String min/max would turn every later clamp into NaN — the
+        // instance drops, like any other broken descriptor shape.
+        strings: vst('strings', { vol: { ...def, min: 'a', max: 'b' } }),
+        inverted: vst('inverted', { vol: { ...def, min: 1, max: 0 } }),
+        healthy: vst('healthy', { vol: def })
+      }
+    }
+    const parsed = parseProjectJson(
+      JSON.stringify({ formatVersion: 3, state: doctored, assets: [] })
+    )
+    expect(Object.keys(parsed.state.plugins)).toEqual(['healthy'])
+    expect(parsed.state.plugins['healthy'].params).toEqual({ vol: 0.5 })
+  })
+
   test('v1 files with legacy effects load as builtin plugin instances', () => {
     const state = sampleState()
     const { plugins: _plugins, ...rest } = state
@@ -352,7 +452,9 @@ suite('project file format', () => {
     expect(inst.descriptor).toMatchObject({ format: 'builtin', uid: 'superdaw.eq3' })
     expect(inst.enabled).toBe(false)
     expect(inst.rank).toBe(2)
-    expect(inst.params).toEqual({ low: 3 })
+    // Params load exactly as plugin/add would build them: stored values
+    // kept, missing defined params filled from core defaults.
+    expect(inst.params).toEqual({ low: 3, mid: 0, midFreq: 1000, high: 0 })
     expect(inst.stateBlob).toBeNull()
     // Unknown legacy types are dropped, and the legacy key doesn't linger
     expect(parsed.state.plugins['fx2']).toBeUndefined()

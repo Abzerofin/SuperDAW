@@ -40,14 +40,42 @@ export function descriptorKey(d: PluginDescriptor): string {
  */
 export function isPluginDescriptor(raw: unknown): raw is PluginDescriptor {
   const d = raw as Record<string, unknown> | null
+  if (
+    typeof d !== 'object' ||
+    d === null ||
+    typeof d.format !== 'string' ||
+    typeof d.uid !== 'string' ||
+    typeof d.name !== 'string' ||
+    typeof d.vendor !== 'string' ||
+    typeof d.version !== 'string'
+  ) {
+    return false
+  }
+  // paramDefs is optional, but present defs are load-bearing: the reducer
+  // clamps every setParam with them, so a junk min/max would turn the
+  // clamp into NaN in the synced document on every peer. Like any other
+  // broken descriptor shape, malformed defs reject the descriptor whole
+  // (its instance drops) rather than sanitizing per-def — partial repair
+  // would let two peers disagree about which defs survived.
+  if (d.paramDefs === undefined) return true
+  if (typeof d.paramDefs !== 'object' || d.paramDefs === null || Array.isArray(d.paramDefs)) {
+    return false
+  }
+  return Object.values(d.paramDefs).every(isParamDef)
+}
+
+function isParamDef(raw: unknown): boolean {
+  if (typeof raw !== 'object' || raw === null) return false
+  const def = raw as Record<string, unknown>
+  const finite = (v: unknown): v is number => typeof v === 'number' && Number.isFinite(v)
   return (
-    typeof d === 'object' &&
-    d !== null &&
-    typeof d.format === 'string' &&
-    typeof d.uid === 'string' &&
-    typeof d.name === 'string' &&
-    typeof d.vendor === 'string' &&
-    typeof d.version === 'string'
+    typeof def.label === 'string' &&
+    typeof def.unit === 'string' &&
+    finite(def.min) &&
+    finite(def.max) &&
+    finite(def.default) &&
+    finite(def.digits) &&
+    def.min <= def.max
   )
 }
 

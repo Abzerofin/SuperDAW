@@ -1,4 +1,4 @@
-import { BrowserWindow, utilityProcess, type UtilityProcess } from 'electron'
+import { app, BrowserWindow, utilityProcess, type UtilityProcess } from 'electron'
 import { homedir } from 'node:os'
 import { join } from 'node:path'
 import { readdir, stat } from 'node:fs/promises'
@@ -306,6 +306,26 @@ let failures: PluginFailure[] = []
 let lastScanMs: number | null = null
 let inFlight: Promise<void> | null = null
 
+/**
+ * Erases the on-disk under-inspection mark; set only while a bundle is
+ * being inspected. The presume-guilty mark exists to survive the app
+ * DYING mid-inspection — a deliberate quit is not that, and must not
+ * falsely quarantine the innocently-in-flight bundle until a manual
+ * refresh. will-quit is held open once while the erase write lands.
+ */
+let eraseInspectionMark: (() => Promise<void>) | null = null
+let quitting = false
+app.on('will-quit', (event) => {
+  const erase = eraseInspectionMark
+  if (!erase || quitting) return
+  quitting = true
+  eraseInspectionMark = null
+  event.preventDefault()
+  void erase()
+    .catch(() => {}) // a failed erase just costs the pre-fix false positive
+    .finally(() => app.quit())
+})
+
 /** The current index, synchronously. Empty until the first scan finishes. */
 export function currentPlugins(): Vst3Plugin[] {
   return plugins
@@ -426,11 +446,20 @@ async function runScan(forced: boolean): Promise<void> {
           // per DLL load — dwarfed by the load itself; a warm cache scan
           // (the every-launch case) inspects nothing and writes nothing.
           await setAppData(CACHE_KEY, { version: cache.version, entries: { ...nextEntries } })
+          if (quitting) return // a new mark after the quit-time erase would outlive the app
           await setAppData(QUARANTINE_KEY, markUnderInspection(nextQuarantine, path, Date.now()))
+          // Real crashers accumulated in nextQuarantine survive the erase;
+          // only the current path's presumption goes.
+          eraseInspectionMark = () => setAppData(QUARANTINE_KEY, { ...nextQuarantine })
         }
       )
     }
   }
+
+  // Every inspection finished writing its real outcome — nothing is
+  // presumed guilty anymore, so quitting needs no erase (and a stale one
+  // must not overwrite the pruned records below).
+  eraseInspectionMark = null
 
   plugins = found.sort((a, b) => a.name.localeCompare(b.name))
   failures = problems

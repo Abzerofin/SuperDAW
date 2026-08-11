@@ -3,8 +3,10 @@ import type { PluginInstance, ProjectState, Track } from '../../model/types'
 import { createEmptyProject } from '../../model/types'
 import { apply } from '../../ops/apply'
 import { invert } from '../../ops/invert'
+import type { ParamDef } from '../../model/effects'
+import { clampParam } from '../../model/effects'
 import type { PluginDescriptor } from '../descriptor'
-import { descriptorKey, matchDescriptor, pluginSearchUrl } from '../descriptor'
+import { descriptorKey, isPluginDescriptor, matchDescriptor, pluginSearchUrl } from '../descriptor'
 import { builtinEffectDescriptor, paramDefsOf, pluginDefaults } from '../builtin'
 import { pluginManifest } from '../manifest'
 
@@ -89,6 +91,54 @@ suite('descriptor matching', () => {
   })
 })
 
+suite('descriptor validation', () => {
+  const def = { label: 'Gain', min: -30, max: 30, default: 0, unit: 'dB', digits: 1 }
+  const withDefs = (paramDefs: unknown): unknown => ({ ...VST, paramDefs })
+
+  test('accepts identity-only descriptors and healthy paramDefs snapshots', () => {
+    const { paramDefs: _defs, ...bare } = VST
+    expect(isPluginDescriptor(bare)).toBe(true)
+    expect(isPluginDescriptor(VST)).toBe(true)
+    // min === max is a degenerate but usable range
+    expect(isPluginDescriptor(withDefs({ vol: { ...def, min: 5, max: 5 } }))).toBe(true)
+  })
+
+  test('rejects doctored paramDefs whole — the reducer clamps with these', () => {
+    // { min:'a', max:'b' } would make clampParam emit NaN into the synced
+    // document on every setParam; the descriptor never enters state.
+    expect(isPluginDescriptor(withDefs({ vol: { ...def, min: 'a', max: 'b' } }))).toBe(false)
+    expect(isPluginDescriptor(withDefs({ vol: { ...def, min: 10, max: -10 } }))).toBe(false)
+    expect(isPluginDescriptor(withDefs({ vol: { ...def, default: NaN } }))).toBe(false)
+    expect(isPluginDescriptor(withDefs({ vol: { ...def, digits: Infinity } }))).toBe(false)
+    expect(isPluginDescriptor(withDefs({ vol: { ...def, label: 3 } }))).toBe(false)
+    expect(isPluginDescriptor(withDefs({ vol: { ...def, unit: null } }))).toBe(false)
+    expect(isPluginDescriptor(withDefs({ vol: null }))).toBe(false)
+    expect(isPluginDescriptor(withDefs(null))).toBe(false)
+    expect(isPluginDescriptor(withDefs([def]))).toBe(false)
+  })
+})
+
+suite('clampParam hardening', () => {
+  const junk = { label: 'V', min: 'a', max: 'b', default: 0, unit: '', digits: 1 } as unknown as ParamDef
+
+  test('junk min/max never emits NaN: finite input passes through', () => {
+    expect(clampParam(junk, 5)).toBe(5)
+  })
+
+  test('junk def with non-finite input falls back to a finite default', () => {
+    expect(clampParam(junk, NaN)).toBe(0)
+    const junkDefault = { ...junk, default: 'x' } as unknown as ParamDef
+    expect(clampParam(junkDefault, NaN)).toBe(0)
+  })
+
+  test('healthy defs clamp as before', () => {
+    const gain: ParamDef = { label: 'Gain', min: -30, max: 30, default: 0, unit: 'dB', digits: 1 }
+    expect(clampParam(gain, 100)).toBe(30)
+    expect(clampParam(gain, NaN)).toBe(0)
+    expect(clampParam(undefined, NaN)).toBe(0)
+  })
+})
+
 suite('plugin ops with descriptors', () => {
   test('builtin add clamps params against core defs', () => {
     const s = apply(stateWithTracks(), {
@@ -120,6 +170,23 @@ suite('plugin ops with descriptors', () => {
     expect(s.plugins['p1'].params.gain).toBe(30)
     // Unknown param against a known def table is dropped
     expect(apply(s, { type: 'plugin/setParam', instanceId: 'p1', param: 'nope', value: 1 })).toBe(s)
+  })
+
+  test('a junk defs snapshot in state cannot put NaN in the document (belt and braces)', () => {
+    // Validation rejects such a descriptor at every file boundary; if one
+    // is ever in state anyway, the hardened clamp still yields finite.
+    const junkDesc = {
+      ...VST,
+      uid: 'junk',
+      paramDefs: { vol: { label: 'V', min: 'a', max: 'b', default: 0, unit: '', digits: 1 } }
+    } as unknown as PluginDescriptor
+    let s = apply(stateWithTracks(), {
+      type: 'plugin/add',
+      instance: { ...instance('p1', 't1', junkDesc), params: { vol: 3 } }
+    })
+    expect(s.plugins['p1'].params.vol).toBe(3)
+    s = apply(s, { type: 'plugin/setParam', instanceId: 'p1', param: 'vol', value: 7 })
+    expect(s.plugins['p1'].params.vol).toBe(7)
   })
 
   test('external plugin without paramDefs passes finite values, drops non-finite', () => {

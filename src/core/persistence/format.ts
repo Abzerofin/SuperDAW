@@ -1,10 +1,10 @@
 import type { Clip, PluginInstance, ProjectState, Track } from '../model/types'
 import { createEmptyProject } from '../model/types'
 import { routeIsValid } from '../model/routing'
-import { synthDefaults, EFFECT_DEFS, type EffectType } from '../model/effects'
+import { clampParam, synthDefaults, EFFECT_DEFS, type EffectType } from '../model/effects'
 import { normalizeProjectSettings } from '../model/projectSettings'
-import { builtinEffectDescriptor } from '../plugins/builtin'
-import { isPluginDescriptor } from '../plugins/descriptor'
+import { builtinEffectDescriptor, paramDefsOf } from '../plugins/builtin'
+import { isPluginDescriptor, type PluginDescriptor } from '../plugins/descriptor'
 import type { OpEnvelope } from '../ops/operations'
 import type { ProjectLineage } from '../state/store'
 
@@ -271,14 +271,28 @@ interface LegacyEffect {
   readonly params?: Record<string, number>
 }
 
-/** Keep only string-keyed finite-number entries (clamping is the reducer's job). */
-function sanitizeParams(raw: unknown): Record<string, number> {
-  const out: Record<string, number> = {}
-  if (typeof raw !== 'object' || raw === null) return out
-  for (const [key, value] of Object.entries(raw)) {
-    if (typeof value === 'number' && Number.isFinite(value)) out[key] = value
+/**
+ * Loaded params re-earn their place exactly as in the reducer's
+ * plugin/add: with known defs (builtins, external snapshots) the result is
+ * exactly the defined params, each clamped, unknown keys dropped; without
+ * defs, finite numbers pass through. A loaded document is then
+ * indistinguishable from one built by ops — a doctored file cannot hand
+ * the engine an out-of-range value (dbToGain(1e9) → setTargetAtTime(∞)).
+ */
+function sanitizeParams(descriptor: PluginDescriptor, raw: unknown): Record<string, number> {
+  const finite: Record<string, number> = {}
+  if (typeof raw === 'object' && raw !== null) {
+    for (const [key, value] of Object.entries(raw)) {
+      if (typeof value === 'number' && Number.isFinite(value)) finite[key] = value
+    }
   }
-  return out
+  const defs = paramDefsOf(descriptor)
+  if (!defs) return finite
+  const params: Record<string, number> = {}
+  for (const [key, def] of Object.entries(defs)) {
+    params[key] = clampParam(def, finite[key] ?? def.default)
+  }
+  return params
 }
 
 /**
@@ -300,6 +314,9 @@ function migratePlugins(
     if (typeof raw !== 'object' || raw === null) continue
     const instance = raw as unknown as Record<string, unknown>
     if (!isPluginDescriptor(instance.descriptor)) continue
+    // A builtin descriptor whose uid core doesn't know is unusable — the
+    // reducer rejects it in plugin/add, so the load path must too.
+    if (instance.descriptor.format === 'builtin' && !paramDefsOf(instance.descriptor)) continue
     // An instance on a track that doesn't exist can never be heard or
     // edited — dangling state is dropped, exactly like a dangling route.
     if (typeof instance.trackId !== 'string' || !tracks[instance.trackId]) continue
@@ -312,7 +329,7 @@ function migratePlugins(
       descriptor: instance.descriptor,
       enabled: typeof instance.enabled === 'boolean' ? instance.enabled : true,
       rank: finite(instance.rank) ? instance.rank : position,
-      params: sanitizeParams(instance.params),
+      params: sanitizeParams(instance.descriptor, instance.params),
       // The blob is an opaque STRING envelope or null; a non-string truthy
       // value would reach the native host's parser, so it never survives.
       stateBlob: typeof instance.stateBlob === 'string' ? instance.stateBlob : null,
@@ -324,13 +341,14 @@ function migratePlugins(
   if (legacy) {
     for (const [id, fx] of Object.entries(legacy)) {
       if (plugins[id] || !EFFECT_DEFS[fx.type] || !tracks[fx.trackId]) continue
+      const descriptor = builtinEffectDescriptor(fx.type)
       plugins[id] = {
         id,
         trackId: fx.trackId,
-        descriptor: builtinEffectDescriptor(fx.type),
+        descriptor,
         enabled: fx.enabled !== false,
         rank: typeof fx.rank === 'number' && Number.isFinite(fx.rank) ? fx.rank : 1,
-        params: sanitizeParams(fx.params),
+        params: sanitizeParams(descriptor, fx.params),
         stateBlob: null
       }
     }

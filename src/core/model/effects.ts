@@ -218,8 +218,14 @@ export function effectDefaults(type: EffectType): Record<string, number> {
 }
 
 export function clampParam(def: ParamDef | undefined, value: number): number {
-  if (!def || !Number.isFinite(value)) return def?.default ?? 0
-  return Math.min(def.max, Math.max(def.min, value))
+  if (!def || !Number.isFinite(value)) {
+    const fallback = def?.default
+    return typeof fallback === 'number' && Number.isFinite(fallback) ? fallback : 0
+  }
+  const clamped = Math.min(def.max, Math.max(def.min, value))
+  // A junk def (non-numeric min/max that slipped past validation) must
+  // never emit NaN — clamp output lands in the synced document.
+  return Number.isFinite(clamped) ? clamped : value
 }
 
 /** Normalized 0..1 ↦ the param's real range (automation curve values). */

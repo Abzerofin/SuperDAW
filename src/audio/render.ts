@@ -343,6 +343,22 @@ export async function renderMixdownChannels(
 }
 
 /**
+ * The state a one-track render actually renders: `trackId` soloed and
+ * nothing muted, so its folder buses (and, for folders, descendants)
+ * apply exactly as heard. Exported so callers evaluating that render
+ * (e.g. the export bypass warning) reason over the identical state.
+ */
+export function soloTrackState(state: ProjectState, trackId: TrackId): ProjectState {
+  const tracks = Object.fromEntries(
+    Object.entries(state.tracks).map(([id, track]) => [
+      id,
+      { ...track, soloed: id === trackId, muted: false }
+    ])
+  )
+  return { ...state, tracks }
+}
+
+/**
  * One track's contribution to the master, rendered offline: the mixdown
  * of the project with the track SOLOED (and nothing muted), so its folder
  * buses, automation and the master volume all apply exactly as heard.
@@ -355,13 +371,7 @@ export function renderTrackChannels(
   sampleRate = RENDER_SAMPLE_RATE
 ): Promise<{ channels: Float32Array[]; sampleRate: number } | null> {
   if (!state.tracks[trackId]) return Promise.resolve(null)
-  const tracks = Object.fromEntries(
-    Object.entries(state.tracks).map(([id, track]) => [
-      id,
-      { ...track, soloed: id === trackId, muted: false }
-    ])
-  )
-  return renderMixdownChannels({ ...state, tracks }, assets, sampleRate)
+  return renderMixdownChannels(soloTrackState(state, trackId), assets, sampleRate)
 }
 
 /**

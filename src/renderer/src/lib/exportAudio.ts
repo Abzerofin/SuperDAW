@@ -1,9 +1,9 @@
 import { Mp3Encoder } from '@breezystack/lamejs'
-import type { ProjectState, TrackId } from '@core/model/types'
-import { isTrackEffectivelyAudible, pluginsOfTrack } from '@core/model/types'
+import type { ProjectState, Route, TrackId } from '@core/model/types'
+import { isTrackEffectivelyAudible, pluginsOfTrack, routesOfTrack } from '@core/model/types'
 import type { ProjectExportFormat } from '@core/model/projectSettings'
 import { encodeWavPcmAsync, type WavBitDepth } from '@audio/wav'
-import { renderMixdownChannels, renderTrackChannels } from '@audio/render'
+import { renderMixdownChannels, renderTrackChannels, soloTrackState } from '@audio/render'
 import { measureIntegratedLufs, formatLufs } from '@audio/loudness'
 import { pluginRegistry } from '@audio/pluginRegistry'
 import { projectStore } from '@/state/projectStore'
@@ -111,34 +111,91 @@ function loudnessReport(channels: Float32Array[], sampleRate: number): string | 
 }
 
 /**
- * Tracks whose sound this bounce is missing: unfrozen, audible in the
- * rendered state, with at least one enabled insert only the out-of-process
- * host can run ('offline' = an installed VST3). The offline render goes
- * through Web Audio alone, so those inserts are bypassed — including in
- * graph-routing mode, where they short inlet→outlet. The export must SAY
- * so rather than silently sound different from the frozen/live mix.
- * Builtin-only projects (and the browser build, where nothing is
- * 'offline') always produce an empty list.
+ * Instance ids sitting on some in→out path of a track's routing graph.
+ * Every node passes audio through (bypassed or unresolvable inserts short
+ * inlet→outlet), so plain reachability decides whether an insert touches
+ * the rendered signal; an unwired node cannot be "missing" from a bounce.
  */
-function vst3BypassedTrackNames(state: ProjectState): string[] {
-  const names: string[] = []
+function liveGraphInstanceIds(routes: readonly Route[]): Set<string> {
+  const reach = (start: string, follow: (r: Route) => [string, string]): Set<string> => {
+    const seen = new Set<string>([start])
+    const queue = [start]
+    while (queue.length > 0) {
+      const node = queue.pop()!
+      for (const route of routes) {
+        const [from, to] = follow(route)
+        if (from === node && !seen.has(to)) {
+          seen.add(to)
+          queue.push(to)
+        }
+      }
+    }
+    return seen
+  }
+  const fromIn = reach('in', (r) => [r.from, r.to])
+  const toOut = reach('out', (r) => [r.to, r.from])
+  const live = new Set<string>()
+  for (const id of fromIn) {
+    if (id !== 'in' && id !== 'out' && toOut.has(id)) live.add(id)
+  }
+  return live
+}
+
+export interface Vst3BypassReport {
+  /** Linear-chain tracks: freezing genuinely bakes their VST3s in. */
+  freezable: string[]
+  /** Graph-routed tracks: NO render path includes their VST3s today —
+   * live playback, freeze (the graph fast path) and export all short
+   * them, frozen or not, so freeze advice would be a lie. */
+  graph: string[]
+}
+
+/**
+ * Tracks whose sound this bounce is missing: audible in the rendered
+ * state, with at least one enabled insert only the out-of-process host
+ * can run ('offline' = an installed VST3). The offline render goes
+ * through Web Audio alone, so those inserts are bypassed. The export must
+ * SAY so rather than silently sound different from the frozen/live mix —
+ * split by whether freezing is a real remedy (see Vst3BypassReport).
+ * Builtin-only projects (and the browser build, where nothing is
+ * 'offline') always produce empty lists.
+ */
+export function vst3BypassedTrackNames(state: ProjectState): Vst3BypassReport {
+  const freezable: string[] = []
+  const graph: string[] = []
   for (const trackId of state.trackOrder) {
     const track = state.tracks[trackId]
-    if (!track || track.frozenAssetId) continue // frozen = inserts baked into the render
+    if (!track) continue
     if (!isTrackEffectivelyAudible(state, trackId)) continue
-    const bypassed = pluginsOfTrack(state, trackId).some(
+    const offline = pluginsOfTrack(state, trackId).filter(
       (p) => p.enabled && pluginRegistry.status(p.descriptor) === 'offline'
     )
-    if (bypassed) names.push(track.name.trim() || 'Track')
+    if (offline.length === 0) continue
+    const routes = routesOfTrack(state, trackId)
+    if (routes.length > 0) {
+      // Freezing a graph track shorts externals too (renderTrackFreeze's
+      // fast path), so frozenAssetId does NOT clear the warning here.
+      const live = liveGraphInstanceIds(routes)
+      if (offline.some((p) => live.has(p.id))) graph.push(track.name.trim() || 'Track')
+    } else if (!track.frozenAssetId) {
+      // Frozen linear tracks are silenced: the freeze baked the VST3s in.
+      freezable.push(track.name.trim() || 'Track')
+    }
   }
-  return names
+  return { freezable, graph }
 }
 
 /** The one-shot warning folded into the export notice, or null. */
-function vst3BypassWarning(state: ProjectState): string | null {
-  const names = vst3BypassedTrackNames(state)
-  if (names.length === 0) return null
-  return `VST3 inserts bypassed on ${names.join(', ')} (freeze to include them)`
+export function vst3BypassWarning(state: ProjectState): string | null {
+  const { freezable, graph } = vst3BypassedTrackNames(state)
+  const parts: string[] = []
+  if (freezable.length > 0) {
+    parts.push(`VST3 inserts bypassed on ${freezable.join(', ')} (freeze to include them)`)
+  }
+  if (graph.length > 0) {
+    parts.push(`VST3 inserts in routing graphs are not rendered (${graph.join(', ')})`)
+  }
+  return parts.length > 0 ? parts.join('; ') : null
 }
 
 /**
@@ -191,19 +248,11 @@ export async function exportTrackAudio(trackId: TrackId, format: ExportFormat): 
   const saved = await saveBytes(data, `${base}.${format}`, format)
   if (saved) {
     // Evaluate the bypass against the state the render actually used (the
-    // track soloed, nothing muted) so ancestor buses and, for folders,
-    // descendants are counted exactly as they were heard. A track export
-    // posts no notice normally — the warning is the only reason to speak.
-    const soloed: ProjectState = {
-      ...state,
-      tracks: Object.fromEntries(
-        Object.entries(state.tracks).map(([id, t]) => [
-          id,
-          { ...t, soloed: id === trackId, muted: false }
-        ])
-      )
-    }
-    const warning = vst3BypassWarning(soloed)
+    // same soloTrackState renderTrackChannels renders) so ancestor buses
+    // and, for folders, descendants are counted exactly as they were
+    // heard. A track export posts no notice normally — the warning is the
+    // only reason to speak.
+    const warning = vst3BypassWarning(soloTrackState(state, trackId))
     if (warning) statusNotice.show(`Exported ${base}.${format} — ${warning}`)
   }
   return true
