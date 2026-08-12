@@ -292,12 +292,17 @@ export async function importFilesAsNewTracks(files: readonly File[]): Promise<vo
 
 const MEDIA_PICKER_ACCEPT = 'audio/*,.wav,.mp3,.flac,.ogg,.m4a,.aac,.aif,.aiff,.mid,.midi'
 
+const AUDIO_PICKER_ACCEPT = 'audio/*,.wav,.mp3,.flac,.ogg,.m4a,.aac,.aif,.aiff'
+
 /** Hidden-input OS file picker (works identically in Electron and browser). */
-function pickMediaFiles(onPicked: (files: File[]) => void): void {
+function pickMediaFiles(
+  onPicked: (files: File[]) => void,
+  options: { multiple?: boolean; accept?: string } = {}
+): void {
   const input = document.createElement('input')
   input.type = 'file'
-  input.multiple = true
-  input.accept = MEDIA_PICKER_ACCEPT
+  input.multiple = options.multiple ?? true
+  input.accept = options.accept ?? MEDIA_PICKER_ACCEPT
   input.onchange = () => {
     const files = input.files
     if (files && files.length > 0) onPicked(Array.from(files))
@@ -316,6 +321,29 @@ export async function browseForMediaFiles(): Promise<void> {
  */
 export function browseForBayFiles(folderId: FileNodeId | null): void {
   pickMediaFiles((files) => void importFilesToBay(files, folderId))
+}
+
+/**
+ * Pick ONE audio file and import it as an asset (with its File Bay entry,
+ * exactly as a drop would), handing back the asset id — the click path for
+ * anything that plays a sample without owning a clip, e.g. a pad.
+ */
+export function browseForAudioAsset(onImported: (assetId: string) => void): void {
+  pickMediaFiles(
+    (files) => {
+      void (async () => {
+        const failed: string[] = []
+        const [asset] = await importAssetBatch(files.slice(0, 1), failed)
+        if (asset) {
+          const nodes = bayNodesFor([asset], null)
+          if (nodes.length > 0) projectStore.dispatch({ type: 'file/create', nodes })
+          onImported(asset.id)
+        }
+        reportFailedImports(failed)
+      })()
+    },
+    { multiple: false, accept: AUDIO_PICKER_ACCEPT }
+  )
 }
 
 /** Payload for dragging an asset out of the File Bay (onto a track). */

@@ -21,7 +21,7 @@ import { TRACK_COLORS } from '@/lib/colors'
 import { contextMenuStyle } from '@/lib/contextMenu'
 import { EditableValue } from '../controls/EditableValue'
 import { historyUi } from '@/state/historyUi'
-import { stepSeqUi } from '@/state/stepSeqUi'
+import { editorUi } from '@/state/editorUi'
 import { collab, useCollab } from '@/state/collab'
 
 /**
@@ -151,7 +151,7 @@ export function ClipMenu({
           className="menu-item"
           title="Program this clip as a beat grid — rows are the drum pads (or pitches), columns are steps"
           onClick={() => {
-            stepSeqUi.open(clip.id)
+            editorUi.open(clip.id, 'steps')
             onClose()
           }}
         >

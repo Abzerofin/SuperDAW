@@ -1,6 +1,7 @@
 import { defineConfig } from 'electron-vite'
 import react from '@vitejs/plugin-react'
 import { resolve } from 'node:path'
+import { version } from './package.json'
 
 export default defineConfig({
   // ws stays a runtime require: bundling it trips on its optional native deps.
@@ -19,6 +20,9 @@ export default defineConfig({
   },
   preload: {},
   renderer: {
+    // The app version is a build-time constant: the renderer shows it under
+    // the brand and must not read package.json at runtime (browser build).
+    define: { __APP_VERSION__: JSON.stringify(version) },
     resolve: {
       alias: {
         '@core': resolve('src/core'),

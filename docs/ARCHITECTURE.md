@@ -527,12 +527,16 @@ and the offline renderer so bounces and freezes sound like playback.
   Pure Web Audio synthesis (pitch-enveloped sines, filtered noise, the
   clap's stuttered envelope) — no samples, nothing to transfer. Unmapped
   pitches are silent; drum hits are one-shots (live release is a no-op).
-- **Step sequencer** (Steps tab): a drum grid over ONE MIDI clip's notes —
-  rows are the kit's pads (or the pitches in play on melodic tracks),
-  columns 16th/8th steps. Cells are ordinary `Note` entities, so the
-  piano roll, clip previews and collaborators see the same edit; a paint
-  stroke commits as ONE `note/addMany`/`note/delete` on release (the
-  one-gesture-one-op rule — painting never floods the sync stream).
+- **Step sequencer** (the Editor tab's step form): a drum grid over ONE
+  MIDI clip's notes — rows are the kit's pads (or the pitches in play on
+  melodic tracks), columns 16th/8th steps. Cells are ordinary `Note`
+  entities, so the piano roll, clip previews and collaborators see the same
+  edit; a paint stroke commits as ONE `note/addMany`/`note/delete` on
+  release (the one-gesture-one-op rule — painting never floods the sync
+  stream). Which form the Editor tab wears follows the track's instrument
+  (`state/editorUi.ts`: a drum kit gets the grid, anything else the roll);
+  the PIANO/STEPS switch in the panel head pins the other form for that
+  track and the pin drops when the editor retargets to another one.
 - **Slicer.** "Slice at transients" cuts an audio clip in place (one
   `clip/slice`); "Slice to sampler" builds a sliced-sampler track plus a
   clip whose notes replay the original groove via the pure
@@ -560,7 +564,12 @@ per-clip looping and inserts, survive mid-set document edits (restart
 rewinds each loop's repeat counter), and die on transport stop/seek.
 Pads are playable by mouse, computer keyboard (bottom four grid rows),
 or a MIDI grid controller (notes 36+, claimed from the track-input
-router by `midiInputs.setPadSink`).
+router by `midiInputs.setPadSink`). Managing them is right-click:
+add/replace the pad's audio through the OS picker (importing into the bay
+exactly as a drop would, `browseForAudioAsset`), remove that audio, copy a
+pad and paste it onto another cell (the clipboard is per-user UI state —
+pasting is an ordinary `pad/set` on the target cell's id), open the pad
+editor, or clear the cell.
 
 Hits ride the presence channel (`PresenceData.padHit` — additive, opaque
 to relay and host; older builds ignore it): the performer hears their
@@ -942,6 +951,19 @@ anyone raises the comfortable ~100-200-track ceiling.
     grew ▾ quick-picks of the common values, both running the same code
     path typing or dragging does (tempo picks still go through the
     stretch-audio conform flow).
+
+29. ✅ **Editor unification & pad management** — the Piano and Steps tabs
+    became ONE Editor panel that takes the form the track's instrument
+    calls for (`state/editorUi.ts` replaces `pianoRollUi`/`stepSeqUi`;
+    persisted dock layouts migrate the two legacy ids onto the surviving
+    tab's position, `LEGACY_PANEL_IDS`). Pressing anywhere in the timeline
+    ruler grabs the playhead and keeps scrubbing — no need to hit the cap —
+    and the cursor snaps to the grid like every other timeline drag (Grid:
+    Off scrubs freely). Pads gained a right-click menu: add/replace audio
+    through the OS picker (the file lands in the bay, as a drop would),
+    remove the audio, copy/paste a pad onto another cell, edit, clear. The
+    app version sits under the brand on the home screen and in the
+    transport bar (`__APP_VERSION__`, a build-time define).
 
 Roadmap beyond: loopback latency calibration then the native backend
 phases (docs/NATIVE_AUDIO_BACKEND.md), collaborator audio streaming +

@@ -33,7 +33,7 @@ import { onMiddleClick } from '@/lib/middleMouse'
 import { buildPeakSnapTargets, peakSnapStart, type PeakSnapTargets } from '@/lib/peakSnap'
 import { commentUi, useCommentUi } from '@/state/commentUi'
 import { automationUi, useAutomationUi } from '@/state/automationUi'
-import { pianoRollUi } from '@/state/pianoRollUi'
+import { editorUi } from '@/state/editorUi'
 import { useRecording } from '@/state/recording'
 import { folderUi, useFolderUi } from '@/state/folderUi'
 import { trackViewUi, useTrackViewUi } from '@/state/trackViewUi'
@@ -280,6 +280,9 @@ export function TimelineView(): React.JSX.Element {
     loopDragRef.current = value
     setLoopDragState(value)
   }
+  // Scrubbing the playhead by dragging the ruler itself (no need to grab
+  // the playhead cap — pressing anywhere in the ruler takes the cursor).
+  const scrubbingRef = useRef(false)
   // Redraw when transport STATE changes: loop region, marker, play/stop.
   // Deliberately subscribeUi, never the frame feed — a frame subscription
   // here would re-render the entire timeline at 60 fps for the whole of
@@ -1092,11 +1095,13 @@ export function TimelineView(): React.JSX.Element {
   }
 
   /**
-   * The ruler has two gestures: the lower half scrubs the playhead, the
-   * upper strip drags out the loop region (and a drag anywhere with Alt
-   * does too, for muscle memory from other DAWs).
+   * The ruler has two gestures: the lower half grabs the playhead — the
+   * press moves it and the drag keeps scrubbing, so the cursor never has to
+   * be hit exactly — while the upper strip drags out the loop region (and a
+   * drag anywhere with Alt does too, for muscle memory from other DAWs).
    */
   const onRulerPointerDown = (e: React.PointerEvent): void => {
+    if (e.button !== 0) return
     const rect = (e.currentTarget as HTMLElement).getBoundingClientRect()
     const ticks = Math.max(0, snapTicks((e.clientX - rect.left) / pxPerTick, gridTicks))
     // Shift pins the edit marker instead of moving the playhead, so edits
@@ -1111,9 +1116,23 @@ export function TimelineView(): React.JSX.Element {
       setLoopDrag({ mode: 'new', anchorTicks: ticks, start: ticks, end: ticks })
       return
     }
-    // Scrubbing means "edit here" again: drop any pinned marker.
+    // Scrubbing means "edit here" again: drop any pinned marker. The
+    // cursor lands ON the grid (Grid: Off scrubs freely), so a scrub then
+    // an edit line up without nudging.
     transport.clearMarker()
-    transport.setPosition((e.clientX - rect.left) / pxPerTick)
+    capturePointer(e)
+    scrubbingRef.current = true
+    transport.setPosition(ticks)
+  }
+
+  const onRulerPointerMove = (e: React.PointerEvent): void => {
+    if (!scrubbingRef.current) return
+    const rect = (e.currentTarget as HTMLElement).getBoundingClientRect()
+    transport.setPosition(Math.max(0, snapTicks((e.clientX - rect.left) / pxPerTick, gridTicks)))
+  }
+
+  const onRulerPointerUp = (): void => {
+    scrubbingRef.current = false
   }
 
   /** Grab an existing region: its edges resize, its body moves it. */
@@ -1266,7 +1285,7 @@ export function TimelineView(): React.JSX.Element {
     },
     []
   )
-  const onClipOpenEditor = useCallback((clipId: ClipId): void => pianoRollUi.open(clipId), [])
+  const onClipOpenEditor = useCallback((clipId: ClipId): void => editorUi.open(clipId), [])
 
   // Cull to the viewport: only clips near the visible rectangle mount.
   // Clips taking part in a drag always stay mounted so a fast drag out of
@@ -1358,7 +1377,11 @@ export function TimelineView(): React.JSX.Element {
         <div
           className="timeline-ruler"
           style={{ gridRow: 1, gridColumn: 2 }}
+          title="Drag to scrub the playhead (snaps to the grid) · top strip drags a loop region · Shift+click pins the edit marker"
           onPointerDown={onRulerPointerDown}
+          onPointerMove={onRulerPointerMove}
+          onPointerUp={onRulerPointerUp}
+          onPointerCancel={onRulerPointerUp}
         >
           {rulerLabels.map((label) => (
             <span key={label.x} className="ruler-label mono" style={{ left: label.x + 4 }}>
@@ -1366,7 +1389,7 @@ export function TimelineView(): React.JSX.Element {
             </span>
           ))}
           <div className="ruler-loop-strip" style={{ height: LOOP_STRIP_H }} />
-          <PlayheadCap pxPerTick={pxPerTick} gridRef={gridRef} />
+          <PlayheadCap pxPerTick={pxPerTick} gridTicks={gridTicks} gridRef={gridRef} />
           {shownLoop && (
             <div
               className={`ruler-loop ${transport.loopEnabled ? '' : 'ruler-loop-off'}`}
@@ -1705,9 +1728,11 @@ export function TimelineView(): React.JSX.Element {
  */
 function PlayheadCap({
   pxPerTick,
+  gridTicks,
   gridRef
 }: {
   pxPerTick: number
+  gridTicks: number
   gridRef: React.RefObject<HTMLDivElement | null>
 }): React.JSX.Element {
   const [, force] = useReducer((c: number) => c + 1, 0)
@@ -1717,7 +1742,8 @@ function PlayheadCap({
   const positionFrom = (e: React.PointerEvent): number => {
     const rect = gridRef.current?.getBoundingClientRect()
     if (!rect) return 0
-    return Math.max(0, (e.clientX - rect.left - HEADER_W) / pxPerTick)
+    // Snaps like every other timeline drag (Grid: Off = free).
+    return Math.max(0, snapTicks((e.clientX - rect.left - HEADER_W) / pxPerTick, gridTicks))
   }
 
   return (

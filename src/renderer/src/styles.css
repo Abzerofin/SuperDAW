@@ -104,10 +104,23 @@ input {
 }
 
 .transport-brand {
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
+  line-height: 1.15;
   font-weight: 600;
   letter-spacing: 0.4px;
   color: var(--text-dim);
   width: 160px;
+}
+
+/* The build version, sitting right under the brand (transport and home). */
+.brand-version {
+  font-size: 9px;
+  font-weight: 400;
+  letter-spacing: 0;
+  color: var(--text-dim);
+  opacity: 0.7;
 }
 
 .transport-center {
@@ -3593,9 +3606,16 @@ body.middle-panning * {
 }
 
 .home-brand {
+  display: flex;
+  flex-direction: column;
   font-size: 22px;
   font-weight: 700;
   letter-spacing: 0.4px;
+}
+
+.home-brand .brand-version {
+  font-size: 10px;
+  margin-top: 2px;
 }
 
 .home-tagline {
@@ -5265,6 +5285,11 @@ body.middle-panning * {
   gap: 8px;
   padding: 4px 10px;
   border-bottom: 1px solid var(--border);
+}
+
+/* No flexible filler in this head — push the close button to the edge. */
+.steps-close {
+  margin-left: auto;
 }
 
 .steps-scroll {

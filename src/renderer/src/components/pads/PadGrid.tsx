@@ -1,4 +1,5 @@
 import { useState } from 'react'
+import { createPortal } from 'react-dom'
 import type { PerformancePad, ProjectState, Track } from '@core/model/types'
 import {
   PAD_GRID_COLS,
@@ -10,7 +11,9 @@ import { projectStore } from '@/state/projectStore'
 import { audioEngine, assetStore } from '@/state/audioInstance'
 import { padPerform, usePadPerform } from '@/state/padPerform'
 import { useCollab } from '@/state/collab'
-import { BAY_DRAG_MIME, type BayDragPayload } from '@/lib/importAudio'
+import { BAY_DRAG_MIME, browseForAudioAsset, type BayDragPayload } from '@/lib/importAudio'
+import { contextMenuStyle } from '@/lib/contextMenu'
+import { useDismiss } from '@/lib/dismiss'
 
 /**
  * The Pads tab: an 8×8 launchpad. ASSIGNMENTS are document state (shared,
@@ -38,12 +41,18 @@ function emptyPad(row: number, col: number): PerformancePad {
   }
 }
 
+/** A copied pad, minus its position — pasting drops it on another cell. */
+type PadClip = Omit<PerformancePad, 'id' | 'row' | 'col'>
+
 export function PadGrid(): React.JSX.Element {
   const state = useProjectState()
   const perform = usePadPerform()
   useCollab() // roster changes etc. keep the hint fresh
   const [selectedId, setSelectedId] = useState<string | null>(null)
   const selected = selectedId ? (state.pads[selectedId] ?? null) : null
+  /** Right-click target, and the per-user pad clipboard (never the document). */
+  const [menu, setMenu] = useState<{ row: number; col: number; x: number; y: number } | null>(null)
+  const [clipboard, setClipboard] = useState<PadClip | null>(null)
 
   return (
     <div className="pads-panel">
@@ -68,7 +77,8 @@ export function PadGrid(): React.JSX.Element {
           <PadEditor pad={selected} state={state} onClear={() => setSelectedId(null)} />
         ) : (
           <div className="pads-hint statusbar-dim">
-            Drop samples from Files onto pads. Right-click a pad to edit it.
+            Drop samples from Files onto pads, or right-click a pad to load, copy or
+            clear one.
             <br />
             Sample pads fire one-shots · note pads play a track's instrument ·
             clip pads loop a clip from the next bar.
@@ -91,11 +101,160 @@ export function PadGrid(): React.JSX.Element {
               state={state}
               selected={selectedId === id}
               onSelect={() => setSelectedId(id)}
+              onMenu={(x, y) => setMenu({ row, col, x, y })}
             />
           )
         })}
       </div>
+      {menu && (
+        <PadMenu
+          row={menu.row}
+          col={menu.col}
+          x={menu.x}
+          y={menu.y}
+          pad={state.pads[padIdAt(menu.row, menu.col)]}
+          clipboard={clipboard}
+          onCopy={setClipboard}
+          onEdit={() => setSelectedId(padIdAt(menu.row, menu.col))}
+          onClose={() => setMenu(null)}
+          onCleared={(id) => setSelectedId((current) => (current === id ? null : current))}
+        />
+      )}
     </div>
+  )
+}
+
+/**
+ * Right-click on a pad: load or drop its audio, copy a pad onto another
+ * one, clear it. Every assignment is a `pad/set` / `pad/clear` op, so it
+ * is undoable and every collaborator's grid follows.
+ */
+function PadMenu({
+  row,
+  col,
+  x,
+  y,
+  pad,
+  clipboard,
+  onCopy,
+  onEdit,
+  onClose,
+  onCleared
+}: {
+  row: number
+  col: number
+  x: number
+  y: number
+  pad: PerformancePad | undefined
+  clipboard: PadClip | null
+  onCopy: (clip: PadClip) => void
+  onEdit: () => void
+  onClose: () => void
+  onCleared: (padId: string) => void
+}): React.JSX.Element {
+  useDismiss(true, onClose)
+  const id = padIdAt(row, col)
+  const base = pad ?? emptyPad(row, col)
+  const set = (changes: Partial<PerformancePad>): void => {
+    projectStore.dispatch({ type: 'pad/set', pad: { ...base, ...changes } })
+  }
+  const sampleName =
+    pad?.kind === 'sample' && pad.assetId ? (assetStore.get(pad.assetId)?.name ?? 'sample') : null
+
+  return createPortal(
+    <div
+      className="menu-panel ctx-menu"
+      style={contextMenuStyle(x, y)}
+      onPointerDown={(e) => e.stopPropagation()}
+      onContextMenu={(e) => e.preventDefault()}
+    >
+      <div className="clipmenu-title">
+        Pad {row + 1}·{col + 1}
+        {sampleName && <span className="statusbar-dim"> · {sampleName}</span>}
+      </div>
+      <button
+        className="menu-item"
+        title="Pick an audio file — it lands in the File Bay and on this pad"
+        onClick={() => {
+          onClose()
+          browseForAudioAsset((assetId) => {
+            // Decoding can take a while — assign onto the pad as it stands
+            // NOW, not as it stood when the picker opened.
+            const current = projectStore.state.pads[id] ?? emptyPad(row, col)
+            projectStore.dispatch({
+              type: 'pad/set',
+              pad: { ...current, kind: 'sample', assetId, trackId: null, clipId: null }
+            })
+          })
+        }}
+      >
+        <span>{sampleName ? 'Replace audio…' : 'Add audio…'}</span>
+      </button>
+      {sampleName && (
+        <button
+          className="menu-item"
+          title="Unload the sample, keeping the pad's label and colour"
+          onClick={() => {
+            onClose()
+            set({ assetId: null })
+          }}
+        >
+          <span>Remove audio</span>
+        </button>
+      )}
+      <div className="menu-sep" />
+      <button
+        className="menu-item"
+        disabled={!pad}
+        onClick={() => {
+          onClose()
+          if (!pad) return
+          const { id: _id, row: _row, col: _col, ...rest } = pad
+          onCopy(rest)
+        }}
+      >
+        <span>Copy pad</span>
+      </button>
+      <button
+        className="menu-item"
+        disabled={clipboard === null}
+        title={clipboard === null ? 'Copy a pad first' : 'Paste the copied pad here'}
+        onClick={() => {
+          onClose()
+          if (clipboard) projectStore.dispatch({ type: 'pad/set', pad: { ...clipboard, id, row, col } })
+        }}
+      >
+        <span>Paste pad</span>
+      </button>
+      <div className="menu-sep" />
+      <button
+        className="menu-item"
+        title="Open this pad in the editor — kind, target, gate, label and colour"
+        onClick={() => {
+          onClose()
+          // An empty cell needs a pad before it can be edited: make a blank
+          // one (a sample pad with nothing loaded) and open it.
+          if (!pad) projectStore.dispatch({ type: 'pad/set', pad: base })
+          onEdit()
+        }}
+      >
+        <span>{pad ? 'Edit pad…' : 'New pad…'}</span>
+      </button>
+      <button
+        className="menu-item"
+        disabled={!pad}
+        title="Empty the pad completely"
+        onClick={() => {
+          onClose()
+          if (!pad) return
+          projectStore.dispatch({ type: 'pad/clear', padId: id })
+          onCleared(id)
+        }}
+      >
+        <span>Clear pad</span>
+      </button>
+    </div>,
+    document.body
   )
 }
 
@@ -130,7 +289,8 @@ function PadCell({
   pad,
   state,
   selected,
-  onSelect
+  onSelect,
+  onMenu
 }: {
   id: string
   row: number
@@ -139,6 +299,7 @@ function PadCell({
   state: ProjectState
   selected: boolean
   onSelect: () => void
+  onMenu: (x: number, y: number) => void
 }): React.JSX.Element {
   const perform = usePadPerform()
   const [dropHover, setDropHover] = useState(false)
@@ -157,8 +318,8 @@ function PadCell({
       style={tint ? ({ ['--pad-tint' as string]: tint } as React.CSSProperties) : undefined}
       title={
         pad
-          ? `${padLabel(pad, state)} (${pad.kind}) — right-click to edit`
-          : 'Empty pad — drop a sample from Files, or right-click to assign'
+          ? `${padLabel(pad, state)} (${pad.kind}) — right-click for audio, copy/paste and clear`
+          : 'Empty pad — drop a sample from Files, or right-click to load one'
       }
       onPointerDown={(e) => {
         if (e.button !== 0) return
@@ -168,7 +329,9 @@ function PadCell({
       onPointerLeave={() => pad && perform.isHeld(id) && padPerform.padUp(id)}
       onContextMenu={(e) => {
         e.preventDefault()
-        onSelect()
+        e.stopPropagation()
+        if (pad) onSelect() // the editor follows the pad you pointed at
+        onMenu(e.clientX, e.clientY)
       }}
       onDragOver={(e) => {
         if (e.dataTransfer.types.includes(`${BAY_DRAG_MIME}-audio`)) {

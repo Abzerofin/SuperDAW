@@ -2,6 +2,8 @@ import { defineConfig } from 'vitest/config'
 import { resolve } from 'node:path'
 
 export default defineConfig({
+  // Matches the renderer builds' build-time constant (see vite configs).
+  define: { __APP_VERSION__: JSON.stringify('test') },
   resolve: {
     alias: {
       '@core': resolve('src/core'),

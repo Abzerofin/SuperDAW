@@ -10,6 +10,7 @@ import { newProject, openProject, openRecentProject, recoverProject } from '@/li
 import { autosave, peekRecovery, type RecoveryOffer } from '@/lib/autosave'
 import { recentProjects } from '@/state/recentProjects'
 import { collab } from '@/state/collab'
+import { APP_VERSION } from '@/lib/appVersion'
 
 /**
  * The launcher: shown before any project is open (and via "Return to
@@ -56,7 +57,10 @@ export function HomeScreen(): React.JSX.Element {
   return (
     <div className="home">
       <div className="home-header">
-        <div className="home-brand">SuperDAW</div>
+        <div className="home-brand">
+          SuperDAW
+          <span className="brand-version mono">v{APP_VERSION}</span>
+        </div>
         <div className="home-tagline">Collaboration-first digital audio workstation</div>
         <button
           className="home-settings"

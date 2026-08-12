@@ -4,9 +4,11 @@
 import { defineConfig } from 'vite'
 import react from '@vitejs/plugin-react'
 import { resolve } from 'node:path'
+import { version } from './package.json'
 
 export default defineConfig({
   root: 'src/renderer',
+  define: { __APP_VERSION__: JSON.stringify(version) },
   plugins: [react()],
   resolve: {
     alias: {

@@ -3,8 +3,7 @@ import { createPortal } from 'react-dom'
 import { useProjectState } from '@/state/hooks'
 import { useSelectedClipId, useSelectedTrackId } from '@/state/selection'
 import { panels, usePanels, PANEL_LABELS, type DockSide, type PanelId } from '@/state/panels'
-import { pianoRollUi, usePianoRollUi } from '@/state/pianoRollUi'
-import { stepSeqUi, useStepSeqUi } from '@/state/stepSeqUi'
+import { editorUi, useEditorUi, editorFormFor, type EditorForm } from '@/state/editorUi'
 import { bayUi, type BayIntent } from '@/state/bayUi'
 import { capturePointer } from '@/lib/pointer'
 import { contextMenuStyle } from '@/lib/contextMenu'
@@ -27,16 +26,12 @@ import { LyricsPanel } from './LyricsPanel'
  */
 export function Dock({ side }: { side: DockSide }): React.JSX.Element {
   const panelState = usePanels()
-  const rollState = usePianoRollUi()
-  const stepsState = useStepSeqUi()
+  const editorState = useEditorUi()
   const ids = panelState.layout.docks[side]
   const active = panelState.layout.active[side]
-  // The clip editors need a target clip; a persisted layout can name them
-  // active with none (e.g. Steps was open at quit) — show no body then.
-  const showBody =
-    active !== null &&
-    (active !== 'pianoroll' || rollState.clipId !== null) &&
-    (active !== 'steps' || stepsState.clipId !== null)
+  // The clip editor needs a target clip; a persisted layout can name it
+  // active with none (e.g. it was open at quit) — show no body then.
+  const showBody = active !== null && (active !== 'editor' || editorState.clipId !== null)
 
   if (side === 'bottom') {
     return (
@@ -49,7 +44,7 @@ export function Dock({ side }: { side: DockSide }): React.JSX.Element {
         {showBody && (
           <div className="dock-body" style={{ height: panelState.layout.bottomHeight }}>
             <DockResizer side="bottom" />
-            <PanelBody id={active} clipId={rollState.clipId} />
+            <PanelBody id={active} clipId={editorState.clipId} />
           </div>
         )}
       </div>
@@ -64,7 +59,7 @@ export function Dock({ side }: { side: DockSide }): React.JSX.Element {
           style={{ width: panelState.layout.rightWidth }}
         >
           <DockResizer side="right" />
-          <PanelBody id={active} clipId={rollState.clipId} />
+          <PanelBody id={active} clipId={editorState.clipId} />
         </div>
       )}
       <div className="dock-tabs dock-tabs-vertical" data-dock="right">
@@ -84,10 +79,8 @@ function PanelBody({ id, clipId }: { id: PanelId; clipId: string | null }): Reac
       return <MixerPanel />
     case 'effects':
       return <EffectsDock />
-    case 'pianoroll':
-      return clipId ? <PianoRoll clipId={clipId} /> : null
-    case 'steps':
-      return <StepSequencer />
+    case 'editor':
+      return clipId ? <ClipEditor clipId={clipId} /> : null
     case 'pads':
       return <PadGrid />
     case 'activity':
@@ -97,6 +90,22 @@ function PanelBody({ id, clipId }: { id: PanelId; clipId: string | null }): Reac
     case 'lyrics':
       return <LyricsPanel />
   }
+}
+
+/**
+ * One clip editor in two forms: the step grid for drum kits, the piano
+ * roll for everything else. Switching the track's instrument switches the
+ * form under the same tab — no reopening, no second panel.
+ */
+function ClipEditor({ clipId }: { clipId: string }): React.JSX.Element | null {
+  const state = useProjectState()
+  useEditorUi()
+  if (!state.clips[clipId]) return null
+  return editorFormFor(state, clipId) === 'steps' ? (
+    <StepSequencer clipId={clipId} />
+  ) : (
+    <PianoRoll clipId={clipId} />
+  )
 }
 
 /** Drag the dock edge to resize it (per-user, persisted). */
@@ -139,8 +148,7 @@ interface TabDrag {
 
 function DockTab({ id, vertical = false }: { id: PanelId; vertical?: boolean }): React.JSX.Element {
   const panelState = usePanels()
-  const rollState = usePianoRollUi()
-  const stepsState = useStepSeqUi()
+  const editorState = useEditorUi()
   const state = useProjectState()
   const selectedTrackId = useSelectedTrackId()
   const selectedClipId = useSelectedClipId()
@@ -162,11 +170,10 @@ function DockTab({ id, vertical = false }: { id: PanelId; vertical?: boolean }):
     bayUi.send(intent)
   }
 
-  // A MIDI clip is "editable" when it's already open in the roll, or the
+  // A MIDI clip is "editable" when it's already open in the editor, or the
   // current selection can be opened. Selecting a MIDI TRACK is enough —
   // its first clip is the target — so clicking a header or mixer strip
-  // arms the editors too. The step sequencer follows the same rule with
-  // its own target clip. Dead ids (clip deleted while the panel was
+  // arms the editor too. Dead ids (clip deleted while the panel was
   // closed) count as no target instead of a tab that opens nothing.
   const selectedClip = selectedClipId ? state.clips[selectedClipId] : undefined
   const selectedMidiClipId =
@@ -180,57 +187,47 @@ function DockTab({ id, vertical = false }: { id: PanelId; vertical?: boolean }):
           .sort((a, b) => a.start - b.start)[0]?.id ?? null)
       : null
   const editTarget = selectedMidiClipId ?? selectedTrackMidiClipId
-  const rollClipId = rollState.clipId !== null && state.clips[rollState.clipId] ? rollState.clipId : null
-  const stepsClipId =
-    stepsState.clipId !== null && state.clips[stepsState.clipId] ? stepsState.clipId : null
-  const openable = rollClipId ?? editTarget
-  const stepsOpenable = stepsClipId ?? editTarget
-  const disabled =
-    (id === 'pianoroll' && openable === null) || (id === 'steps' && stepsOpenable === null)
+  const editorClipId =
+    editorState.clipId !== null && state.clips[editorState.clipId] ? editorState.clipId : null
+  const openable = editorClipId ?? editTarget
+  const disabled = id === 'editor' && openable === null
+  // The tab wears the form it would show: a drum track reads "Steps", a
+  // melodic one "Piano" — the same control either way.
+  const editorForm: EditorForm = editorFormFor(state, openable)
 
   const effectsTrack =
     id === 'effects' && selectedTrackId ? state.tracks[selectedTrackId] : undefined
   const title =
-    id === 'pianoroll'
+    id === 'editor'
       ? disabled
-        ? 'Piano roll — select or double-click a MIDI clip to edit its notes'
-        : 'Toggle piano roll'
-      : id === 'steps'
-        ? disabled
-          ? 'Step sequencer — select a MIDI clip to program a beat'
-          : 'Toggle step sequencer'
-        : id === 'effects'
-          ? effectsTrack
-            ? `Effects — ${effectsTrack.name}'s insert chain`
-            : 'Effects — select a track to edit its insert chain'
-          : {
-              files: 'File Bay — imported audio and MIDI · right-click to import',
-              mixer: 'Mixer — faders, pans and inserts for every track',
-              pads: 'Performance pads — samples, notes and clip launches on an 8×8 grid',
-              activity: 'Activity — who changed what, when',
-              chat: 'Chat — saved with the project',
-              lyrics: 'Lyrics — saved with the project'
-            }[id as Exclude<PanelId, 'pianoroll' | 'effects' | 'steps'>]
+        ? 'Clip editor — select or double-click a MIDI clip to edit it'
+        : editorForm === 'steps'
+          ? 'Toggle the step grid (drum instrument — right-click for the piano roll)'
+          : 'Toggle the piano roll (right-click for the step grid)'
+      : id === 'effects'
+        ? effectsTrack
+          ? `Effects — ${effectsTrack.name}'s insert chain`
+          : 'Effects — select a track to edit its insert chain'
+        : {
+            files: 'File Bay — imported audio and MIDI · right-click to import',
+            mixer: 'Mixer — faders, pans and inserts for every track',
+            pads: 'Performance pads — samples, notes and clip launches on an 8×8 grid',
+            activity: 'Activity — who changed what, when',
+            chat: 'Chat — saved with the project',
+            lyrics: 'Lyrics — saved with the project'
+          }[id as Exclude<PanelId, 'editor' | 'effects'>]
+
+  const label = id === 'editor' ? (editorForm === 'steps' ? 'Steps' : 'Piano') : PANEL_LABELS[id]
 
   const onClick = (): void => {
     if (dragRef.current) return // a drop, not a click
-    if (id === 'pianoroll') {
-      if (panelState.isOpen('pianoroll')) {
-        panels.closePanel('pianoroll')
-      } else if (editTarget && editTarget !== rollClipId) {
-        pianoRollUi.open(editTarget)
-      } else if (rollClipId !== null) {
-        panels.openPanel('pianoroll')
-      }
-      return
-    }
-    if (id === 'steps') {
-      if (panelState.isOpen('steps')) {
-        panels.closePanel('steps')
-      } else if (editTarget && editTarget !== stepsClipId) {
-        stepSeqUi.open(editTarget)
-      } else if (stepsClipId !== null) {
-        panels.openPanel('steps')
+    if (id === 'editor') {
+      if (panelState.isOpen('editor')) {
+        panels.closePanel('editor')
+      } else if (editTarget && editTarget !== editorClipId) {
+        editorUi.open(editTarget)
+      } else if (editorClipId !== null) {
+        panels.openPanel('editor')
       }
       return
     }
@@ -259,7 +256,7 @@ function DockTab({ id, vertical = false }: { id: PanelId; vertical?: boolean }):
         }`}
         data-dock-tab={id}
         data-ping-id={`tab:${id}`}
-        data-ping={`the ${PANEL_LABELS[id]} tab`}
+        data-ping={`the ${label} tab`}
         disabled={disabled}
         title={title}
         onClick={onClick}
@@ -291,14 +288,14 @@ function DockTab({ id, vertical = false }: { id: PanelId; vertical?: boolean }):
           }
         }}
       >
-        {PANEL_LABELS[id]}
+        {label}
         {id === 'chat' && panelState.unreadChat > 0 && (
           <span className="chat-badge">{Math.min(panelState.unreadChat, 99)}</span>
         )}
       </button>
       {drag?.dragging && (
         <div className="dock-tab-ghost" style={{ left: drag.x + 10, top: drag.y + 8 }}>
-          {PANEL_LABELS[id]}
+          {label}
         </div>
       )}
       {tabMenu &&
@@ -309,6 +306,39 @@ function DockTab({ id, vertical = false }: { id: PanelId; vertical?: boolean }):
             onPointerDown={(e) => e.stopPropagation()}
             onContextMenu={(e) => e.preventDefault()}
           >
+            {id === 'editor' && (
+              <>
+                {(['piano', 'steps'] as const).map((form) => (
+                  <button
+                    key={form}
+                    className="menu-item"
+                    title={
+                      form === 'piano'
+                        ? 'Edit as notes on a keyboard grid'
+                        : 'Edit as a drum-machine step grid'
+                    }
+                    onClick={() => {
+                      setTabMenu(null)
+                      if (openable !== null) editorUi.open(openable, form)
+                    }}
+                  >
+                    <span>{form === 'piano' ? 'Piano roll' : 'Step grid'}</span>
+                    {editorForm === form && <span className="menu-shortcut">•</span>}
+                  </button>
+                ))}
+                <button
+                  className="menu-item"
+                  title="Let the track's instrument choose: drum kits get the step grid"
+                  onClick={() => {
+                    setTabMenu(null)
+                    editorUi.setForm(null)
+                  }}
+                >
+                  <span>Follow the instrument</span>
+                </button>
+                <div className="menu-sep" />
+              </>
+            )}
             {id === 'files' && (
               <>
                 <button className="menu-item" onClick={() => sendBayAction('import')}>

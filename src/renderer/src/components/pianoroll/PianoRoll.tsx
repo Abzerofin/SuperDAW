@@ -7,7 +7,7 @@ import { projectStore } from '@/state/projectStore'
 import { useProjectState } from '@/state/hooks'
 import { audioEngine } from '@/state/audioInstance'
 import { transport } from '@/state/transport'
-import { pianoRollUi } from '@/state/pianoRollUi'
+import { editorUi } from '@/state/editorUi'
 import { keymap } from '@/state/keymap'
 import { capturePointer } from '@/lib/pointer'
 import { humanizeNotes, quantizeNotes } from '@/lib/noteActions'
@@ -20,6 +20,7 @@ import {
   type ChordType
 } from '@/lib/chords'
 import { EditableValue } from '../controls/EditableValue'
+import { EditorFormSwitch } from '../editor/EditorFormSwitch'
 
 const ROW_H = 12
 const KEYS_W = 56
@@ -134,7 +135,7 @@ export function PianoRoll({ clipId }: { clipId: string }): React.JSX.Element | n
 
   // Close if the clip vanishes (deleted locally or by a peer).
   useEffect(() => {
-    if (!clip) pianoRollUi.close()
+    if (!clip) editorUi.close()
   }, [clip])
 
   // On open: take keyboard focus (Delete must edit notes, not the timeline
@@ -503,7 +504,7 @@ export function PianoRoll({ clipId }: { clipId: string }): React.JSX.Element | n
       humanizeNotes(selected.size > 0 ? selected : laid.map(({ note }) => note.id))
       return
     }
-    if (e.key === 'Escape') pianoRollUi.close()
+    if (e.key === 'Escape') editorUi.close()
   }
 
   const rowStripes = {
@@ -530,6 +531,7 @@ export function PianoRoll({ clipId }: { clipId: string }): React.JSX.Element | n
             <span className="statusbar-dim"> · {trackClips.length} clips</span>
           )}
         </span>
+        <EditorFormSwitch />
         <ChordPicker chord={chord} onPick={setChord} />
         {selectedNote && <VelocityControl key={selectedNote.id} note={selectedNote} />}
         {selected.size > 1 && <span className="proll-hint">{selected.size} notes selected</span>}
@@ -537,7 +539,7 @@ export function PianoRoll({ clipId }: { clipId: string }): React.JSX.Element | n
           Double-click to add · drag empty space to select · edges resize · drag a clip&apos;s edge
           to extend · Del to delete
         </span>
-        <button className="proll-close" title="Close (Esc)" onClick={() => pianoRollUi.close()}>
+        <button className="proll-close" title="Close (Esc)" onClick={() => editorUi.close()}>
           ×
         </button>
       </div>

@@ -16,8 +16,7 @@ export type PanelId =
   | 'files'
   | 'mixer'
   | 'effects'
-  | 'pianoroll'
-  | 'steps'
+  | 'editor'
   | 'pads'
   | 'activity'
   | 'chat'
@@ -28,8 +27,7 @@ export const PANEL_LABELS: Record<PanelId, string> = {
   files: 'Files',
   mixer: 'Mixer',
   effects: 'Effects',
-  pianoroll: 'Piano',
-  steps: 'Steps',
+  editor: 'Editor',
   pads: 'Pads',
   activity: 'Activity',
   chat: 'Chat',
@@ -40,8 +38,7 @@ const ALL_PANELS: readonly PanelId[] = [
   'files',
   'mixer',
   'effects',
-  'pianoroll',
-  'steps',
+  'editor',
   'pads',
   'activity',
   'chat',
@@ -57,12 +54,18 @@ interface DockLayout {
 
 const DEFAULT_LAYOUT: DockLayout = {
   docks: {
-    bottom: ['files', 'mixer', 'effects', 'pianoroll', 'steps', 'pads'],
+    bottom: ['files', 'mixer', 'effects', 'editor', 'pads'],
     right: ['activity', 'chat', 'lyrics']
   },
   active: { bottom: 'files', right: 'activity' },
   bottomHeight: 240,
   rightWidth: 300
+}
+
+/** Panel ids from earlier versions and the panel that replaced them. */
+const LEGACY_PANEL_IDS: Record<string, PanelId | undefined> = {
+  pianoroll: 'editor',
+  steps: 'editor'
 }
 
 const STORAGE_KEY = 'superdaw.dockLayout'
@@ -76,11 +79,26 @@ function loadLayout(): DockLayout {
     const raw = typeof localStorage !== 'undefined' ? localStorage.getItem(STORAGE_KEY) : null
     if (!raw) return structuredClone(DEFAULT_LAYOUT)
     const parsed = JSON.parse(raw) as DockLayout
-    // Panels from removed eras drop out; panels ADDED since the layout was
-    // saved adopt their default dock — an app update must neither lose the
-    // user's arrangement nor hide new tabs.
+    // Renamed panels keep their place in the strip (the piano roll and the
+    // step grid became the one Editor tab); panels from removed eras drop
+    // out, and panels ADDED since the layout was saved adopt their default
+    // dock — an app update must neither lose the user's arrangement nor
+    // hide new tabs.
+    const renamed = (id: PanelId): PanelId => LEGACY_PANEL_IDS[id as string] ?? id
+    const claimed = new Set<PanelId>()
     for (const side of ['bottom', 'right'] as const) {
-      parsed.docks[side] = parsed.docks[side].filter((id) => ALL_PANELS.includes(id))
+      const kept: PanelId[] = []
+      for (const id of parsed.docks[side].map(renamed)) {
+        // Two legacy tabs can rename to the same panel: keep the first.
+        if (!ALL_PANELS.includes(id) || claimed.has(id)) continue
+        claimed.add(id)
+        kept.push(id)
+      }
+      parsed.docks[side] = kept
+    }
+    for (const side of ['bottom', 'right'] as const) {
+      const active = parsed.active[side]
+      if (active !== null) parsed.active[side] = renamed(active)
     }
     const present = [...parsed.docks.bottom, ...parsed.docks.right]
     for (const id of ALL_PANELS) {

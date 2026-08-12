@@ -28,6 +28,7 @@ import { capturePointer } from '@/lib/pointer'
 import { useDismiss } from '@/lib/dismiss'
 import { changeTempo, tempoConformEntries } from '@/lib/tempoActions'
 import { useRecentProjects } from '@/state/recentProjects'
+import { APP_VERSION } from '@/lib/appVersion'
 import { CollabPanel } from './CollabPanel'
 
 export function TransportBar(): React.JSX.Element {
@@ -38,7 +39,10 @@ export function TransportBar(): React.JSX.Element {
 
   return (
     <div className="transport">
-      <div className="transport-brand">SuperDAW</div>
+      <div className="transport-brand">
+        SuperDAW
+        <span className="brand-version mono">v{APP_VERSION}</span>
+      </div>
       <ExitButton />
       <FileMenu />
       <button className="tbtn" title="Settings" onClick={() => settingsUi.open()}>

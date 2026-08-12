@@ -5,12 +5,14 @@ import { DRUM_PADS, instrumentKindOf } from '@core/model/effects'
 import { newId } from '@core/model/ids'
 import { useProjectState } from '@/state/hooks'
 import { projectStore } from '@/state/projectStore'
-import { stepSeqUi, useStepSeqUi } from '@/state/stepSeqUi'
+import { editorUi } from '@/state/editorUi'
+import { EditorFormSwitch } from '../editor/EditorFormSwitch'
 import { audioEngine } from '@/state/audioInstance'
 import { transport } from '@/state/transport'
 
 /**
- * The Steps tab: a drum-machine grid over ONE MIDI clip's notes. Rows are
+ * The step-grid form of the clip editor: a drum-machine grid over ONE MIDI
+ * clip's notes (the piano roll is the same tab's other form). Rows are
  * the drum kit's pads (or, on melodic tracks, the pitches in play); columns
  * are 16th/8th steps. Cells are the clip's actual Note entities — the piano
  * roll, the timeline previews and collaborators all see the same edit the
@@ -45,10 +47,9 @@ interface PaintState {
   readonly stepTicks: number
 }
 
-export function StepSequencer(): React.JSX.Element {
+export function StepSequencer({ clipId: openClipId }: { clipId: string }): React.JSX.Element {
   const state = useProjectState()
-  const ui = useStepSeqUi()
-  const clip = ui.clipId ? state.clips[ui.clipId] : undefined
+  const clip = state.clips[openClipId]
   const track = clip ? state.tracks[clip.trackId] : undefined
   const [stepsPerBeat, setStepsPerBeat] = useState(4)
   const [paint, setPaint] = useState<PaintState | null>(null)
@@ -60,8 +61,8 @@ export function StepSequencer(): React.JSX.Element {
   // The clip can vanish under the panel (deleted, undone, project closed).
   // Close instead of dangling — a dead id would keep the tab "openable".
   useEffect(() => {
-    if (ui.clipId !== null && !projectStore.state.clips[ui.clipId]) stepSeqUi.close()
-  }, [ui.clipId, state.clips])
+    if (!projectStore.state.clips[openClipId]) editorUi.close()
+  }, [openClipId, state.clips])
 
   const clipNotes = useMemo(() => {
     if (!clipId) return []
@@ -127,7 +128,7 @@ export function StepSequencer(): React.JSX.Element {
   if (!clip || !track) {
     return (
       <div className="steps-panel">
-        <div className="bay-empty">Select a MIDI clip and open Steps to program a beat</div>
+        <div className="bay-empty">Select a MIDI clip to program a beat</div>
       </div>
     )
   }
@@ -196,6 +197,7 @@ export function StepSequencer(): React.JSX.Element {
         <span className="statusbar-dim">
           {track.name} · {Math.ceil(cols / (beatsPerBar * stepsPerBeat))} bars
         </span>
+        <EditorFormSwitch />
         <div className="fx-waves">
           <button
             className={`fx-wave fx-inst-kind ${stepsPerBeat === 4 ? 'fx-wave-active' : ''}`}
@@ -212,6 +214,9 @@ export function StepSequencer(): React.JSX.Element {
             1/8
           </button>
         </div>
+        <button className="proll-close steps-close" title="Close" onClick={() => editorUi.close()}>
+          ×
+        </button>
       </div>
       <div className="steps-scroll" data-pan>
         <div className="steps-grid" style={{ ['--step-cols' as string]: cols }}>
