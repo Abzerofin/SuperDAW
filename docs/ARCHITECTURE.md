@@ -216,8 +216,21 @@ plugin's parameters (see "Parameter editing without the plugin" below).
   host restores `stateBlob` and then applies `params` over it, so an
   accurate snapshot is a no-op rather than a preset-clobbering overwrite —
   which is precisely why params must never be eagerly filled with defaults.
-  KNOWN GAP: a preset loaded while a docked editor stays open is not seen
-  until that editor closes.
+- **Preset loads mid-session.** Open/close alone would leave a preset
+  loaded from the plugin's own browser invisible until the editor closed —
+  and since VST3s auto-dock, that can be the whole time a track is
+  selected. VST3 already has the notification for this: a plugin reporting
+  a wholesale change calls `IComponentHandler::restartComponent` with
+  `kParamValuesChanged` ("as result of a program change… the host
+  invalidates all caches of parameter values and asks the edit controller
+  for the current values"). `EditorHost` used to swallow it; it now emits a
+  `restart` event and main answers by re-reading and publishing, so the gap
+  closes on the plugin's own signal rather than a poll. Only a nudge
+  crosses the boundary — never values — because it can arrive on the
+  plugin's UI thread mid-restart, so the queued call reads a settled
+  controller. A plugin is right to stay SILENT when the host set the state
+  (it already knows), so only changes the plugin makes itself notify;
+  `native/vst3host/restartnotifytest.js` is the interactive probe.
 - **Declining, scoped to non-owners.** Settings ▸ Collaboration →
   `acceptCollaboratorParamEdits` (default on) announces `acceptsParamEdits`
   through `PresenceData`; `collab.paramEditsPermitted()` reports it and the

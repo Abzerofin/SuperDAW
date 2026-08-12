@@ -724,7 +724,23 @@ class EditorHost : public IComponentHandler, public IPlugFrame {
     emit("end", static_cast<double>(id), 0);
     return kResultOk;
   }
-  tresult PLUGIN_API restartComponent(int32) override { return kResultOk; }
+  /**
+   * The plugin telling the host something about it changed wholesale. With
+   * kParamValuesChanged it means "re-read my parameters" — which is how a
+   * plugin reports a change that produced no per-parameter performEdit.
+   * Loading a preset from the plugin's OWN browser is the everyday case,
+   * and swallowing this notification is why those settings used to stay
+   * invisible to the document (and so to collaborators without the plugin)
+   * until the editor was closed.
+   *
+   * Only a nudge is emitted, never values: this can arrive on the plugin's
+   * UI thread mid-restart, so JS comes back through getEditorParams once
+   * the queued call runs and reads a settled controller.
+   */
+  tresult PLUGIN_API restartComponent(int32 flags) override {
+    if (flags & kParamValuesChanged) emit("restart", static_cast<double>(flags), 0);
+    return kResultOk;
+  }
 
   tresult PLUGIN_API resizeView(IPlugView* view, ViewRect* rect) override {
     if (!rect) return kInvalidArgument;

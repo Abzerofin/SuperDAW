@@ -319,6 +319,43 @@ function finalizeEditor(host: Vst3Addon, instanceId: string, sender: WebContents
   }
 }
 
+/**
+ * The editor event handler both open paths (windowed and docked) share.
+ */
+function editorEventHandler(
+  host: Vst3Addon,
+  instanceId: string,
+  sender: WebContents
+): (e: { type: string; a: number; b: number }) => void {
+  return (e) => {
+    // The user closed the editor window: capture state, then die.
+    if (e.type === 'close') {
+      finalizeEditor(host, instanceId, sender)
+      return
+    }
+    // The plugin reporting that its parameters changed wholesale, with no
+    // per-parameter gesture to forward — loading a preset from its own
+    // browser. Re-read and publish so the document learns values that
+    // would otherwise stay invisible until the editor closed, which for a
+    // DOCKED editor can be the entire time the track is selected.
+    if (e.type === 'restart') {
+      const handle = editors.get(instanceId)
+      if (handle !== undefined) announceEditorParams(host, instanceId, handle, sender)
+      return
+    }
+    // begin/edit/end knob gestures → the renderer turns them into ops
+    // (one per gesture, on 'end').
+    if (!sender.isDestroyed()) {
+      sender.send('vst3:editor-event', {
+        instanceId,
+        kind: e.type,
+        paramId: e.a,
+        value: e.b
+      })
+    }
+  }
+}
+
 export function registerVst3Ipc(): void {
   ipcMain.handle(
     'vst3:open-editor',
@@ -339,23 +376,7 @@ export function registerVst3Ipc(): void {
           title: args.title ?? plugin.name,
           state: chunkFromBlob(args.stateBlob),
           ...(remembered ?? {}),
-          onEvent: (e) => {
-            // The user closed the editor window: capture state, then die.
-            if (e.type === 'close') {
-              finalizeEditor(host, args.instanceId, sender)
-              return
-            }
-            // begin/edit/end knob gestures → the renderer turns them into
-            // ops (one per gesture, on 'end').
-            if (!sender.isDestroyed()) {
-              sender.send('vst3:editor-event', {
-                instanceId: args.instanceId,
-                kind: e.type,
-                paramId: e.a,
-                value: e.b
-              })
-            }
-          }
+          onEvent: editorEventHandler(host, args.instanceId, sender)
         })
         if (opened.error || opened.editor === undefined) {
           return { error: opened.error ?? 'could not open editor' }
@@ -436,20 +457,7 @@ export function registerVst3Ipc(): void {
             borderless: true,
             owner: win.getNativeWindowHandle(),
             state: chunkFromBlob(args.stateBlob),
-            onEvent: (e) => {
-              if (e.type === 'close') {
-                finalizeEditor(host, args.instanceId, sender)
-                return
-              }
-              if (!sender.isDestroyed()) {
-                sender.send('vst3:editor-event', {
-                  instanceId: args.instanceId,
-                  kind: e.type,
-                  paramId: e.a,
-                  value: e.b
-                })
-              }
-            }
+            onEvent: editorEventHandler(host, args.instanceId, sender)
           })
           if (opened.error || opened.editor === undefined) {
             return { error: opened.error ?? 'could not open editor' }
