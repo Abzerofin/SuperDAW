@@ -3750,6 +3750,12 @@ body.middle-panning * {
   gap: 6px;
 }
 
+.settings-error {
+  font-size: 11px;
+  color: var(--danger);
+  margin: 0;
+}
+
 .settings-trim-row input {
   width: 80px;
 }

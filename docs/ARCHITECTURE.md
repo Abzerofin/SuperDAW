@@ -99,9 +99,20 @@ and asset store through narrow structural interfaces.
   land) lags the raw clock by the reported output-path latency
   (baseLatency + outputLatency, refreshed live), and recorded takes are
   placed by their first captured sample's clock time — announced by the
-  capture worklet — minus that latency, plus a manual input trim
-  (Settings ▸ Audio) for the unreported mic→buffer path. Scheduling always
-  stays on the raw clock.
+  capture worklet — minus that latency, plus the input-path latency the
+  platform does not report. That input number comes from loopback
+  calibration (Settings ▸ Audio ▸ Measure round-trip latency): a chirp
+  played at a known clock time, captured back through a cable or
+  speaker→mic, located by FFT matched filter (`audio/calibration.ts`,
+  pure + unit-tested; runtime in `calibrationRun.ts`, policy/persistence
+  in `state/latencyCalibration.ts`). The stored ROUND TRIP is keyed by
+  (input device, output device, sample rate, buffer preference) and reads
+  as unmeasured when any change; the applied trim is derived live as
+  `roundTrip − currentReportedOutputLatency`, and the manual trim
+  (Settings ▸ Audio) survives as an offset on top. Confidence-gated: a
+  detection without a clear correlation peak (or unstable across the three
+  repeats) is refused, never stored. Scheduling always stays on the raw
+  clock.
 - **Scheduling** (`scheduling.ts`) is pure math — (state, anchor) → list of
   `(when, offset, duration)` — and fully unit-tested. Playback is
   windowed: a pass queues only sources STARTING inside a ~4 s lookahead
@@ -979,8 +990,19 @@ anyone raises the comfortable ~100-200-track ceiling.
     app version sits under the brand on the home screen and in the
     transport bar (`__APP_VERSION__`, a build-time define).
 
-Roadmap beyond: loopback latency calibration then the native backend
-phases (docs/NATIVE_AUDIO_BACKEND.md), collaborator audio streaming +
+30. ✅ **Loopback latency calibration** (NATIVE_AUDIO_BACKEND.md phase 1)
+    — Settings ▸ Audio measures the true round-trip: three exponential
+    chirps played at known clock times, captured through the recording
+    worklet, located by FFT matched filter with peak-to-sidelobe
+    confidence gating and median-of-3 + spread refusal. Result keyed to
+    the device setup that produced it, invalidates itself on any change,
+    feeds recorded-take placement automatically (manual trim demoted to
+    an offset on top). Pure DSP in `audio/calibration.ts` (unit-tested);
+    the runner takes an injectable stimulus sink so the loop verifies
+    hardware-free (an in-context DelayNode reads back exactly).
+
+Roadmap beyond: the native backend phases
+(docs/NATIVE_AUDIO_BACKEND.md), collaborator audio streaming +
 proxy renders for remote/missing plugins, live VST3-in-callback + PDC
 (door opened by the backend design), autotune/pitch correction (dedicated
 AudioWorklet DSP milestone: pitch detection + PSOLA resynthesis),

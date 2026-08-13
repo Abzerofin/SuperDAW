@@ -1,6 +1,8 @@
 import { useEffect, useState } from 'react'
 import { audioEngine } from '@/state/audioInstance'
 import { audioDevices, useAudioDevices } from '@/state/audioDevices'
+import { latencyCalibration, useLatencyCalibration } from '@/state/latencyCalibration'
+import { useRecording } from '@/state/recording'
 import { midiInputs, useMidiInputs } from '@/state/midiInputs'
 import { collab, useCollab } from '@/state/collab'
 import {
@@ -319,6 +321,8 @@ function GeneralPane(): React.JSX.Element {
 function AudioPane(): React.JSX.Element {
   const devices = useAudioDevices()
   const midi = useMidiInputs()
+  const calibration = useLatencyCalibration()
+  const rec = useRecording()
   usePreferences()
   // The context reports the live sample rate / channel layout; creating it
   // here is safe (it starts suspended until the first transport gesture).
@@ -431,6 +435,58 @@ function AudioPane(): React.JSX.Element {
       </div>
 
       <div className="settings-field">
+        <label>Round-trip latency</label>
+        {calibration.measuring ? (
+          <p className="settings-dim">Playing test sweep {calibration.step} of 3…</p>
+        ) : (
+          <div className="settings-trim-row">
+            <button
+              className="corner-btn"
+              disabled={rec.recording || rec.countingIn}
+              onClick={() => void latencyCalibration.measure()}
+            >
+              {calibration.stored ? 'Re-measure' : 'Measure round-trip latency'}
+            </button>
+            {calibration.stored && (
+              <button className="corner-btn" onClick={() => latencyCalibration.clear()}>
+                Clear
+              </button>
+            )}
+          </div>
+        )}
+        {calibration.lastError && <p className="settings-error">{calibration.lastError}</p>}
+        {calibration.stored && calibration.isCurrent() && (
+          <div className="settings-info mono">
+            <span>Round trip</span>
+            <span>{ms(calibration.stored.roundTripMs / 1000)}</span>
+            <span>Input path</span>
+            <span>≈ {ms(Math.max(0, latencyCalibration.autoTrimSec() ?? 0))} — applied to recordings</span>
+            <span>Measured</span>
+            <span>
+              {new Date(calibration.stored.measuredAt).toLocaleDateString()} ·{' '}
+              {calibration.stored.confidence >= 10
+                ? 'strong'
+                : calibration.stored.confidence >= 5
+                  ? 'good'
+                  : 'usable'}{' '}
+              signal
+            </span>
+          </div>
+        )}
+        {calibration.stored && !calibration.isCurrent() && (
+          <p className="settings-dim">
+            The stored measurement is from a different device setup — re-measure to apply it.
+          </p>
+        )}
+        <p className="settings-dim">
+          Connect an output of your interface to an input with a cable (or point the mic at the
+          speaker — less exact), then measure: three short sweeps are played and timed on their
+          way back. The measured input latency is compensated on recorded takes automatically
+          and invalidates itself when devices, sample rate or buffer size change.
+        </p>
+      </div>
+
+      <div className="settings-field">
         <label htmlFor="settings-latency-trim">Recording latency trim</label>
         <div className="settings-trim-row">
           <input
@@ -449,9 +505,10 @@ function AudioPane(): React.JSX.Element {
           <span className="settings-dim">ms</span>
         </div>
         <p className="settings-dim">
-          Output latency is compensated automatically; this absorbs your interface's INPUT
-          latency, which the system cannot measure. If takes land late, raise it — record a
-          click through a loopback cable to dial it in exactly.
+          {calibration.stored && calibration.isCurrent()
+            ? 'An extra offset on top of the measured compensation above — normally 0 once measured.'
+            : "Output latency is compensated automatically; this absorbs your interface's INPUT latency, which the system cannot report. Measuring above replaces the guesswork."}{' '}
+          Positive pulls takes earlier on the timeline.
         </p>
       </div>
 

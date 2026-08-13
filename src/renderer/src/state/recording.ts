@@ -14,6 +14,7 @@ import { audioEngine, assetStore } from './audioInstance'
 import { trackInputs } from './trackInputs'
 import { midiInputs } from './midiInputs'
 import { preferences } from './preferences'
+import { latencyCalibration } from './latencyCalibration'
 
 /**
  * Recording session state (all ephemeral, per-user): which tracks are
@@ -333,10 +334,14 @@ class RecordingStore {
   ): Promise<void> {
     // Latency compensation. The performer played along with audio they
     // heard an output-latency LATE, so everything they did sits late in
-    // the take by that amount; the manual trim absorbs the input path
-    // (mic → buffers → worklet), which the platform does not report.
+    // the take by that amount. The input path (mic → buffers → worklet) is
+    // unreported by the platform: the measured loopback calibration covers
+    // it when one exists for the current device setup, and the manual trim
+    // rides on top (it is the whole input estimate only when unmeasured).
     const compensationSec =
-      audioEngine.outputLatencySec() + preferences.recordLatencyTrimMs / 1000
+      audioEngine.outputLatencySec() +
+      (latencyCalibration.autoTrimSec() ?? 0) +
+      preferences.recordLatencyTrimMs / 1000
     const tps = ticksPerSecond(projectStore.state.tempo)
     for (const { capture, take } of takes) {
       if (!take || take.seconds < 0.05) continue
