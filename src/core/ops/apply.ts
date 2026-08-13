@@ -85,6 +85,50 @@ function sanitizeParams(
 import type { Operation } from './operations'
 
 /**
+ * The audio-clip offset changes a `project/setTempo` op produces — shared
+ * by the reducer (to apply them) and invert (to list exact pre-values).
+ *
+ * An audio clip's `offset` is ticks of trim into its SOURCE, and ticks
+ * are tempo-relative — so a tempo change alone used to move where trimmed
+ * audio starts in its recording (the limitation ARCHITECTURE.md carried
+ * for years). The trim point is a physical spot in the source and must
+ * not move: un-conformed audio clips get `offset` rescaled by
+ * newTempo/oldTempo, which keeps `(offset / ticksPerSecond) * rate`
+ * — the buffer-seconds trim — exactly invariant. Clips the op CONFORMS
+ * are left alone: their `rate` scales with the tempo, which already
+ * cancels the tick rescale (the same physical invariance, via stretch).
+ * MIDI clips (assetId null) are musical material and correctly follow
+ * ticks. Explicit `offsets` entries (undo's exact restoration — derived
+ * rescaling rounds to integer ticks, so the reverse derivation may be
+ * off by one) override the derivation per clip.
+ */
+export function setTempoOffsetChanges(
+  state: ProjectState,
+  op: Extract<Operation, { type: 'project/setTempo' }>
+): Array<{ clipId: ClipId; offset: number }> {
+  const tempo = clamp(op.tempo, 20, 400)
+  if (tempo === state.tempo) return []
+  const explicit = new Map<ClipId, number>()
+  for (const entry of op.offsets ?? []) {
+    if (state.clips[entry.clipId] && Number.isFinite(entry.offset)) {
+      explicit.set(entry.clipId, Math.max(0, Math.round(entry.offset)))
+    }
+  }
+  const conformed = new Set((op.conform ?? []).map((entry) => entry.clipId))
+  const scale = tempo / state.tempo
+  const out: Array<{ clipId: ClipId; offset: number }> = []
+  for (const clip of Object.values(state.clips)) {
+    const target = explicit.has(clip.id)
+      ? explicit.get(clip.id)!
+      : clip.assetId !== null && !conformed.has(clip.id) && clip.offset > 0
+        ? Math.max(0, Math.round(clip.offset * scale))
+        : clip.offset
+    if (target !== clip.offset) out.push({ clipId: clip.id, offset: target })
+  }
+  return out
+}
+
+/**
  * Pure reducer: (state, operation) -> state. Never mutates.
  *
  * Operations targeting entities that no longer exist return the state
@@ -106,6 +150,16 @@ export function apply(state: ProjectState, op: Operation): ProjectState {
       const tempo = clamp(op.tempo, 20, 400)
       let clips = state.clips
       let clipsChanged = false
+      // Trim-point preservation first (computed against the PRE-state
+      // tempo; see setTempoOffsetChanges) — idempotent on re-delivery
+      // because a matching tempo derives no changes.
+      for (const entry of setTempoOffsetChanges(state, op)) {
+        const clip = clips[entry.clipId]
+        if (!clip) continue
+        if (!clipsChanged) clips = { ...clips }
+        ;(clips as Record<ClipId, Clip>)[entry.clipId] = { ...clip, offset: entry.offset }
+        clipsChanged = true
+      }
       for (const entry of op.conform ?? []) {
         const clip = clips[entry.clipId]
         if (!clip) continue

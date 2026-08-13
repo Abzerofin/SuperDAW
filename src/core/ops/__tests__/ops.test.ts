@@ -1394,3 +1394,72 @@ suite('op log & lineage', () => {
   })
 })
 
+suite('project/setTempo trim-point preservation', () => {
+  /** baseState plus one audio clip trimmed `offset` ticks into its source. */
+  function withAudioClip(offset: number, extra: Partial<Clip> = {}): ProjectState {
+    return apply(baseState(), {
+      type: 'clip/create',
+      clip: { ...clip('ca', 't1', 0, 960), assetId: 'ast_a', offset, ...extra },
+      notes: []
+    })
+  }
+
+  test('un-conformed audio offsets rescale so the source trim point holds', () => {
+    const s = withAudioClip(480)
+    const applied = apply(s, { type: 'project/setTempo', tempo: 240 })
+    expect(applied.clips['ca'].offset).toBe(960) // 480 · 240/120
+    // The physical trim — offset ticks / ticksPerSecond — is invariant.
+    expect(applied.clips['ca'].offset / 240).toBeCloseTo(s.clips['ca'].offset / 120, 10)
+  })
+
+  test('MIDI clips keep their musical offsets', () => {
+    const s = withAudioClip(480)
+    const applied = apply(s, { type: 'project/setTempo', tempo: 240 })
+    expect(applied.clips['c1'].offset).toBe(s.clips['c1'].offset)
+    expect(applied.clips['c2'].offset).toBe(s.clips['c2'].offset)
+  })
+
+  test('conformed clips are left alone — their stretch already preserves the trim', () => {
+    const s = withAudioClip(480)
+    const applied = apply(s, {
+      type: 'project/setTempo',
+      tempo: 240,
+      conform: [{ clipId: 'ca', stretch: 0.5 }]
+    })
+    expect(applied.clips['ca'].offset).toBe(480)
+    expect(applied.clips['ca'].stretch).toBe(0.5)
+  })
+
+  test('re-delivery is a no-op (at-least-once safety)', () => {
+    const s = withAudioClip(480)
+    const op: Operation = { type: 'project/setTempo', tempo: 240 }
+    const once = apply(s, op)
+    expect(apply(once, op)).toBe(once)
+  })
+
+  test('explicit offsets entries override the derivation', () => {
+    const s = withAudioClip(480)
+    const applied = apply(s, {
+      type: 'project/setTempo',
+      tempo: 240,
+      offsets: [{ clipId: 'ca', offset: 5 }]
+    })
+    expect(applied.clips['ca'].offset).toBe(5)
+  })
+
+  test('undo restores exact offsets where reverse derivation would round wrong', () => {
+    // 120 → 80 with offset 100: forward rounds 66.67 → 67; deriving the
+    // undo would give round(67 · 120/80) = round(100.5) = 101. The invert
+    // op's explicit `offsets` list is what makes undo exact.
+    const s = withAudioClip(100)
+    const op: Operation = { type: 'project/setTempo', tempo: 80 }
+    const inverse = invert(s, op)
+    const applied = apply(s, op)
+    expect(applied.clips['ca'].offset).toBe(67)
+    expect(inverse).not.toBeNull()
+    const undone = apply(applied, inverse!)
+    expect(undone.clips['ca'].offset).toBe(100)
+    expect(undone).toEqual(s)
+  })
+})
+

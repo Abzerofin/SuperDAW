@@ -24,6 +24,7 @@ function notesOfTrack(state: ProjectState, trackId: string): Note[] {
   )
 }
 import type { Operation } from './operations'
+import { setTempoOffsetChanges } from './apply'
 
 /**
  * Derives the inverse of an operation given the state *before* it is applied.
@@ -39,14 +40,22 @@ export function invert(state: ProjectState, op: Operation): Operation | null {
       return { type: 'project/setLyrics', lyrics: state.lyrics }
 
     case 'project/setTempo': {
-      // Undo restores the previous stretch of every clip the op conforms.
+      // Undo restores the previous stretch of every clip the op conforms,
+      // and the EXACT previous offset of every clip whose trim point the
+      // reducer rescales — the derivation rounds to integer ticks, so
+      // deriving backwards could land one tick off.
       const conform = (op.conform ?? [])
         .filter((entry) => state.clips[entry.clipId])
         .map((entry) => ({ clipId: entry.clipId, stretch: state.clips[entry.clipId].stretch }))
+      const offsets = setTempoOffsetChanges(state, op).map((entry) => ({
+        clipId: entry.clipId,
+        offset: state.clips[entry.clipId].offset
+      }))
       return {
         type: 'project/setTempo',
         tempo: state.tempo,
-        ...(conform.length > 0 ? { conform } : {})
+        ...(conform.length > 0 ? { conform } : {}),
+        ...(offsets.length > 0 ? { offsets } : {})
       }
     }
 

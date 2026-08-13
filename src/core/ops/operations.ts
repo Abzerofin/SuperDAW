@@ -37,11 +37,20 @@ export type Operation =
    * material keeps filling the same bars at the new tempo (tape-style
    * resampling). Absolute stretch factors — re-delivery is idempotent —
    * and entries whose clip is gone are skipped individually.
+   *
+   * The reducer also preserves every un-conformed audio clip's trim
+   * point: `offset` ticks are tempo-relative, so they rescale by
+   * newTempo/oldTempo or the trim would move within the source
+   * (setTempoOffsetChanges in apply.ts). `offsets` carries ABSOLUTE
+   * overrides for that derivation — undo uses it to restore the exact
+   * pre-op values, since the derived rescale rounds to integer ticks.
+   * Forward ops omit it and let every peer derive identically.
    */
   | {
       type: 'project/setTempo'
       tempo: number
       conform?: Array<{ clipId: ClipId; stretch: number }>
+      offsets?: Array<{ clipId: ClipId; offset: number }>
     }
   | { type: 'project/setTimeSignature'; timeSignature: TimeSignature }
   /**

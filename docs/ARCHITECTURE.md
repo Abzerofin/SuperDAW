@@ -167,8 +167,14 @@ and asset store through narrow structural interfaces.
   the right primitives for clip playback. Worklets arrive with custom DSP
   (mixing/metering) needs.
 
-Known limitation (accepted until tempo maps/warping): clip `offset` is in
-ticks, so a tempo change rescales where trimmed audio starts in its source.
+A long-standing limitation was closed in the `project/setTempo` reducer:
+clip `offset` is ticks (tempo-relative), so a tempo change used to move
+where trimmed audio starts in its source. The reducer now rescales
+un-conformed audio clips' offsets by newTempo/oldTempo (the buffer-second
+trim point is exactly invariant; conformed clips already cancel via their
+stretch, and MIDI clips correctly stay musical), with the op's `offsets`
+list carrying undo's exact pre-values since the derivation rounds to
+integer ticks (`setTempoOffsetChanges` in core/ops/apply.ts).
 
 ## Plugin architecture (`src/core/plugins` + `src/audio/pluginRegistry.ts`)
 
