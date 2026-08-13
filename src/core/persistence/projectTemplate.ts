@@ -5,7 +5,13 @@ import type {
   Track,
   TrackKind
 } from '../model/types'
-import { createEmptyProject, MAX_GAIN, pluginsOfTrack, routesOfTrack } from '../model/types'
+import {
+  createEmptyProject,
+  isNoteTrackKind,
+  MAX_GAIN,
+  pluginsOfTrack,
+  routesOfTrack
+} from '../model/types'
 import { newId } from '../model/ids'
 import { SYNTH_DEFS, clampParam, synthDefaults } from '../model/effects'
 import type { PluginDescriptor } from '../plugins/descriptor'
@@ -187,13 +193,13 @@ export function parseProjectTemplate(text: string): ProjectTemplateJson {
         typeof track === 'object' &&
         track !== null &&
         typeof track.id === 'string' &&
-        ['audio', 'midi', 'folder'].includes(track.kind as string)
+        ['audio', 'midi', 'drum', 'folder'].includes(track.kind as string)
       )
     })
     .map((entry: Record<string, unknown>, i: number) => {
       const kind = entry.kind as TrackKind
       const synth: Record<string, number> = {}
-      if (kind === 'midi') {
+      if (isNoteTrackKind(kind)) {
         const rawSynth = sanitizeNumbers(entry.synth)
         for (const [key, def] of Object.entries(SYNTH_DEFS)) {
           synth[key] = clampParam(def, rawSynth[key] ?? def.default)
@@ -333,7 +339,7 @@ export function projectFromTemplate(
       frozenAssetId: null,
       volume: track.volume,
       pan: track.pan,
-      synth: track.kind === 'midi' ? { ...synthDefaults(), ...track.synth } : {}
+      synth: isNoteTrackKind(track.kind) ? { ...synthDefaults(), ...track.synth } : {}
     }
     trackOrder.push(id)
   }

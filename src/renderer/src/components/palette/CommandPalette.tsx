@@ -78,6 +78,7 @@ export function CommandPalette(): React.JSX.Element | null {
     cmd('Redo', () => projectStore.redo(), 'Ctrl+Y')
     cmd('New audio track', () => createTrack('audio'))
     cmd('New MIDI track', () => createTrack('midi'))
+    cmd('New drum track', () => createTrack('drum'))
     cmd('New folder track', () => createTrack('folder'))
     cmd('Load track preset…', () => void loadTrackPreset())
     cmd('Save project', () => void saveProject(), 'Ctrl+S')

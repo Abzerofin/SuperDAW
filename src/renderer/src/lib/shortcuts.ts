@@ -21,6 +21,7 @@ import {
   splitSelectedClipAtEditPoint
 } from './clipActions'
 import { DEFAULT_QUANTIZE_TICKS, humanizeNotes, quantizeNotes } from './noteActions'
+import { panic } from './audition'
 
 /** Notes living on the selected clips (for timeline-level quantize/humanize). */
 function selectedClipNoteIds(): string[] {
@@ -97,6 +98,13 @@ export function useGlobalShortcuts(): void {
           e.preventDefault()
           // Key auto-repeat must not toggle a take on and off.
           if (!e.repeat) void recording.toggle()
+          return
+        case 'transport.panic':
+          // The escape hatch for a note that will not stop: every held
+          // voice, every held pad, every note-off still owed by a MIDI
+          // route that went away.
+          e.preventDefault()
+          panic()
           return
         case 'project.save':
           e.preventDefault()

@@ -231,6 +231,13 @@ export function describe(state: ProjectState, op: Operation): string | null {
         ? `Looped clip "${clipName(state, op.clipId)}"`
         : `Unlooped clip "${clipName(state, op.clipId)}"`
     }
+    case 'clip/resizeWithNotes': {
+      const name = clipName(state, op.clipId)
+      if (op.notes.length === 0) return `Resized clip "${name}"`
+      return op.notes.length === 1
+        ? `Programmed a step past the end of "${name}"`
+        : `Programmed ${op.notes.length} steps past the end of "${name}"`
+    }
     case 'clip/deleteMany': {
       if (op.clipIds.length === 0) return null
       if (op.clipIds.length === 1) return `Deleted clip "${clipName(state, op.clipIds[0])}"`

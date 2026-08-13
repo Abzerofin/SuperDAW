@@ -1,5 +1,6 @@
 import { useSyncExternalStore } from 'react'
 import type { TrackId } from '@core/model/types'
+import { isNoteTrackKind } from '@core/model/types'
 import { parseMidiNoteMessage } from '@audio/midiCapture'
 import { audioEngine } from './audioInstance'
 import { projectStore } from './projectStore'
@@ -19,9 +20,9 @@ import { appStorageGet, appStorageSet } from './appStorage'
  * Access is lazy: nothing touches navigator.requestMIDIAccess until a MIDI
  * surface asks (Settings, a MIDI track's input panel, record start), so a
  * plain browser without the API — or a user who denies it — boots and runs
- * untouched. Note events route to every ARMED MIDI track; with none armed,
- * to the SELECTED track when it is a MIDI track — select and play, no
- * ceremony. Live audition goes through audioEngine.liveNoteOn/Off; capture
+ * untouched. Note events route to every ARMED note track (MIDI or drum —
+ * a kit is played from a keyboard like anything else); with none armed, to
+ * the SELECTED track when it is one — select and play, no ceremony. Live audition goes through audioEngine.liveNoteOn/Off; capture
  * (while recording rolls) through recording.captureMidiEvent — both fed by
  * ONE code path that `inject()` shares, so tests and the dev handle
  * exercise exactly what hardware does.
@@ -125,6 +126,9 @@ class MidiInputStore {
   private refreshPorts(): void {
     const access = this.access
     if (!access) return
+    // A device that vanishes mid-hold never sends its note-offs. Any
+    // re-enumeration is a hot-plug, so close what is open first.
+    this.allNotesOff()
     const inputs: MidiInputInfo[] = []
     let index = 0
     for (const input of access.inputs.values()) {
@@ -178,7 +182,32 @@ class MidiInputStore {
   setPadSink(
     sink: ((kind: 'on' | 'off', pitch: number, velocity: number) => boolean) | null
   ): void {
+    // Held notes routed under the old arrangement would have their
+    // note-off swallowed by (or diverted from) the sink — close them now.
+    this.allNotesOff()
     this.padSink = sink
+  }
+
+  /**
+   * Deliver the note-offs that are never coming. A note-on remembers the
+   * tracks it opened; if the route can no longer carry its off — the device
+   * was unplugged, pad mode was toggled, the window lost focus mid-hold —
+   * those voices sound forever. This closes them on exactly the tracks they
+   * opened on, so capture and audition end together, like a real key-up.
+   */
+  allNotesOff(): void {
+    if (this.openNoteRoutes.size === 0) return
+    const open = [...this.openNoteRoutes]
+    this.openNoteRoutes.clear()
+    const now = performance.now()
+    for (const [routeKey, targets] of open) {
+      const pitch = Number(routeKey.slice(routeKey.lastIndexOf(':') + 1))
+      if (!Number.isFinite(pitch)) continue
+      for (const trackId of targets) {
+        audioEngine.liveNoteOff(trackId, pitch)
+        recording.captureMidiEvent(trackId, 'off', pitch, 0, now)
+      }
+    }
   }
 
   /**
@@ -219,7 +248,7 @@ class MidiInputStore {
     const state = projectStore.state
     const playable = (id: TrackId): boolean => {
       const track = state.tracks[id]
-      return track !== undefined && track.kind === 'midi' && track.frozenAssetId === null
+      return track !== undefined && isNoteTrackKind(track.kind) && track.frozenAssetId === null
     }
     const armed = recording.armedIds().filter(playable)
     if (armed.length > 0) return armed

@@ -1,5 +1,6 @@
 import { useEffect, useReducer, useRef, useState, useSyncExternalStore } from 'react'
-import { formatPosition, type TimeSignature } from '@core/model/timebase'
+import { formatClock, formatPosition, type TimeSignature } from '@core/model/timebase'
+import { ticksPerSecond } from '@audio/scheduling'
 import { useProjectState, useCanUndo, useCanRedo } from '@/state/hooks'
 import { projectStore } from '@/state/projectStore'
 import { transport } from '@/state/transport'
@@ -702,11 +703,37 @@ function Meter(): React.JSX.Element {
   return <canvas ref={canvasRef} className="meter" width={72} height={8} title="Master level" />
 }
 
+/**
+ * The transport counter. It reads in whatever unit the ruler is set to —
+ * bars/beats, minutes:seconds or samples — so the number under the playhead
+ * and the number in the transport always speak the same language.
+ */
 function PositionDisplay(): React.JSX.Element {
   const [, force] = useReducer((c: number) => c + 1, 0)
   useEffect(() => transport.subscribe(force), [])
-  const sig = useProjectState().timeSignature
-  return <div className="transport-pos mono">{formatPosition(transport.displayTicks(), sig)}</div>
+  const state = useProjectState()
+  const mode = useRulerMode()
+  const ticks = transport.displayTicks()
+
+  let text: string
+  if (mode === 'bars') {
+    text = formatPosition(ticks, state.timeSignature)
+  } else {
+    const seconds = Math.max(0, ticks) / ticksPerSecond(state.tempo)
+    text =
+      mode === 'time'
+        ? formatClock(seconds)
+        : Math.round(seconds * (audioEngine.contextInfo()?.sampleRate ?? 48000)).toLocaleString()
+  }
+
+  return (
+    <div
+      className="transport-pos mono"
+      title={`Position in ${RULER_MODES.find((m) => m.value === mode)?.label ?? 'bars'} — follows the ruler`}
+    >
+      {text}
+    </div>
+  )
 }
 
 function TempoField({ tempo }: { tempo: number }): React.JSX.Element {

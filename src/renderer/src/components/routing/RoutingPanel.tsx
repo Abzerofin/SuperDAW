@@ -94,7 +94,10 @@ export function RoutingPanel(): React.JSX.Element | null {
     nodes.push(
       track.kind === 'audio'
         ? node('Clips', `${clips.length} audio clip${clips.length === 1 ? '' : 's'}`)
-        : node('Built-in synth', `${noteCount} note${noteCount === 1 ? '' : 's'} in ${clips.length} clip${clips.length === 1 ? '' : 's'}`)
+        : node(
+            track.kind === 'drum' ? 'Built-in drum kit' : 'Built-in synth',
+            `${noteCount} note${noteCount === 1 ? '' : 's'} in ${clips.length} clip${clips.length === 1 ? '' : 's'}`
+          )
     )
   }
   if (!frozen) {

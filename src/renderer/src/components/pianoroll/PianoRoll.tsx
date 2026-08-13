@@ -1,16 +1,17 @@
 import { useEffect, useMemo, useReducer, useRef, useState } from 'react'
 import type { Clip, Note, NoteId } from '@core/model/types'
-import { notesOfClip } from '@core/model/types'
+import { noteSourceOf, notesOfClip } from '@core/model/types'
 import { PPQ, snapTicks, ticksPerBar } from '@core/model/timebase'
 import { newId } from '@core/model/ids'
 import { projectStore } from '@/state/projectStore'
 import { useProjectState } from '@/state/hooks'
-import { audioEngine } from '@/state/audioInstance'
+import { auditionDown, auditionUp } from '@/lib/audition'
 import { transport } from '@/state/transport'
 import { editorUi } from '@/state/editorUi'
 import { keymap } from '@/state/keymap'
 import { capturePointer } from '@/lib/pointer'
 import { humanizeNotes, quantizeNotes } from '@/lib/noteActions'
+import { createPattern } from '@/lib/patternActions'
 import { parseNumberIn } from '@/lib/valueParse'
 import {
   CHORD_TYPES,
@@ -20,7 +21,6 @@ import {
   type ChordType
 } from '@/lib/chords'
 import { EditableValue } from '../controls/EditableValue'
-import { EditorFormSwitch } from '../editor/EditorFormSwitch'
 
 const ROW_H = 12
 const KEYS_W = 56
@@ -82,7 +82,18 @@ interface MarqueeState {
  * belongs to its own clip, and double-clicking empty space adds a note to
  * whichever clip covers that spot.
  */
-export function PianoRoll({ clipId }: { clipId: string }): React.JSX.Element | null {
+export function PianoRoll({
+  clipId,
+  trackId: pendingTrackId = null
+}: {
+  clipId: string | null
+  /**
+   * Set instead of `clipId` when the roll opens on a note track that has
+   * nothing on it yet: the grid is live and empty, and the first note
+   * placed creates the clip under it (see lib/patternActions).
+   */
+  trackId?: string | null
+}): React.JSX.Element | null {
   const state = useProjectState()
   const [pxPerBeat, setPxPerBeat] = useState(48)
   const [selected, setSelected] = useState<ReadonlySet<NoteId>>(new Set())
@@ -110,8 +121,8 @@ export function PianoRoll({ clipId }: { clipId: string }): React.JSX.Element | n
   const scrollRef = useRef<HTMLDivElement>(null)
   const laneRef = useRef<HTMLDivElement>(null)
 
-  const clip = state.clips[clipId]
-  const track = clip ? state.tracks[clip.trackId] : undefined
+  const clip = clipId !== null ? state.clips[clipId] : undefined
+  const track = clip ? state.tracks[clip.trackId] : (pendingTrackId ? state.tracks[pendingTrackId] : undefined)
 
   // Note and clip indexes, rebuilt only when the underlying records change
   // — notesOfClip per clip per render is O(clips × notes) and dominates
@@ -133,10 +144,11 @@ export function PianoRoll({ clipId }: { clipId: string }): React.JSX.Element | n
       .sort((a, b) => a.start - b.start)
   }, [state.clips, track])
 
-  // Close if the clip vanishes (deleted locally or by a peer).
+  // Close if the clip vanishes (deleted locally or by a peer) — unless the
+  // roll is deliberately open on a track with no clip yet.
   useEffect(() => {
-    if (!clip) editorUi.close()
-  }, [clip])
+    if (!clip && pendingTrackId === null) editorUi.close()
+  }, [clip, pendingTrackId])
 
   // On open: take keyboard focus (Delete must edit notes, not the timeline
   // selection), center the view around the notes, and scroll to the clip.
@@ -144,8 +156,8 @@ export function PianoRoll({ clipId }: { clipId: string }): React.JSX.Element | n
     rootRef.current?.focus()
     const el = scrollRef.current
     if (!el) return
-    const opened = projectStore.state.clips[clipId]
-    const notes = notesOfClip(projectStore.state, clipId)
+    const opened = clipId !== null ? projectStore.state.clips[clipId] : undefined
+    const notes = clipId !== null ? notesOfClip(projectStore.state, clipId) : []
     const focusPitch =
       notes.length > 0
         ? Math.round(notes.reduce((sum, n) => sum + n.pitch, 0) / notes.length)
@@ -154,7 +166,7 @@ export function PianoRoll({ clipId }: { clipId: string }): React.JSX.Element | n
     if (opened) el.scrollLeft = Math.max(0, opened.start * (48 / PPQ) - 40)
     setSelected(new Set())
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [clipId])
+  }, [clipId, pendingTrackId])
 
   // Ctrl+wheel zoom (native listener — React wheel events are passive).
   // NOTE: all hooks stay above the early return below (rules of hooks).
@@ -170,7 +182,68 @@ export function PianoRoll({ clipId }: { clipId: string }): React.JSX.Element | n
     return () => el.removeEventListener('wheel', onWheel)
   }, [clip !== undefined])
 
-  if (!clip || !track) return null
+  /**
+   * The roll has no end. It used to stop just past the last note, so
+   * scrolling right — or playing on past the clip — ran the cursor off the
+   * grid into grey nothing. Instead the content stays a screenful ahead of
+   * wherever you have reached; it only grows, and only in screenful jumps,
+   * so scrolling never thrashes the layout. Zoom still stops at its limits.
+   */
+  const [reachTicks, setReachTicks] = useState(0)
+  /**
+   * The reach mirrored in a ref. These two feeds run per scroll frame and
+   * per playback frame; calling setState from them 60 times a second —
+   * even when the value is unchanged — re-renders the roll continuously
+   * and makes the scrollbars flicker. The ref answers "did it actually
+   * grow?" without React being involved at all.
+   */
+  const reachRef = useRef(0)
+  const growReach = (to: number): void => {
+    if (to <= reachRef.current) return
+    reachRef.current = to
+    setReachTicks(to)
+  }
+
+  useEffect(() => {
+    const el = scrollRef.current
+    if (!el) return
+    const pxPerTickNow = pxPerBeat / PPQ
+    let raf = 0
+    const grow = (): void => {
+      raf = 0
+      const usableW = Math.max(1, el.clientWidth - KEYS_W)
+      const rightTicks = (el.scrollLeft + usableW) / pxPerTickNow
+      if (rightTicks > reachRef.current) growReach(rightTicks + usableW / pxPerTickNow)
+    }
+    const schedule = (): void => {
+      if (!raf) raf = requestAnimationFrame(grow)
+    }
+    grow()
+    el.addEventListener('scroll', schedule, { passive: true })
+    const ro = new ResizeObserver(schedule)
+    ro.observe(el)
+    return () => {
+      el.removeEventListener('scroll', schedule)
+      ro.disconnect()
+      if (raf) cancelAnimationFrame(raf)
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [pxPerBeat, clip !== undefined])
+
+  // The playhead runs on past every note; the grid follows it.
+  const barTicksForReach = ticksPerBar(state.timeSignature)
+  useEffect(
+    () =>
+      transport.subscribe(() => {
+        const ticks = transport.positionTicks()
+        if (ticks > reachRef.current) growReach(ticks + barTicksForReach * 2)
+      }),
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [barTicksForReach]
+  )
+
+  // The roll is a TRACK view — it needs a track, not necessarily a clip.
+  if (!track) return null
 
   const pxPerTick = pxPerBeat / PPQ
   const gridTicks = pxPerBeat >= 36 ? PPQ / 4 : PPQ / 2
@@ -191,8 +264,11 @@ export function PianoRoll({ clipId }: { clipId: string }): React.JSX.Element | n
     endPreview?.clipId === c.id ? endPreview.duration : c.duration
 
   /** All notes on the track, each with its owning clip. */
+  // A STAMP has no notes of its own: it draws the loop it was stamped
+  // from, so the roll shows the same phrase at every stamp's position and
+  // an edit made at one is seen at all of them.
   const laid = trackClips.flatMap((c) =>
-    (notesByClip.get(c.id) ?? []).map((note) => ({ note, clip: c }))
+    (notesByClip.get(noteSourceOf(state, c.id)) ?? []).map((note) => ({ note, clip: c }))
   )
   const clipOf = new Map(laid.map(({ note, clip: c }) => [note.id, c]))
 
@@ -201,7 +277,7 @@ export function PianoRoll({ clipId }: { clipId: string }): React.JSX.Element | n
     (max, { note, clip: c }) => Math.max(max, c.start + note.start + note.duration),
     0
   )
-  const contentTicks = Math.max(clipsEnd, notesEnd) + barTicks * 2
+  const contentTicks = Math.max(clipsEnd, notesEnd, reachTicks) + barTicks * 2
   const contentW = Math.ceil(contentTicks * pxPerTick)
   const selectedNote = selected.size === 1 ? state.notes[[...selected][0]] : undefined
 
@@ -232,17 +308,38 @@ export function PianoRoll({ clipId }: { clipId: string }): React.JSX.Element | n
   const addNote = (e: React.MouseEvent): void => {
     const rect = (e.currentTarget as HTMLElement).getBoundingClientRect()
     const absTicks = Math.max(0, e.clientX - rect.left) / pxPerTick
-    // The note goes into whichever clip covers this spot; empty space
-    // between clips takes nothing (there is no clip to hold the note).
+    const snappedAbs = Math.floor(absTicks / gridTicks) * gridTicks
+    const pitch = yToPitch(e.clientY - rect.top)
+    // The note goes into whichever clip covers this spot. Empty space used
+    // to take nothing at all; instead the clip to hold the note is created
+    // under it — one op, so undo takes back the clip and the note together.
     const home = trackClips.find(
       (c) => absTicks >= c.start && absTicks < c.start + shownDuration(c)
     )
-    if (!home) return
-    const snappedAbs = Math.floor(absTicks / gridTicks) * gridTicks
+    if (!home) {
+      const barTicksHere = ticksPerBar(state.timeSignature)
+      const clipStart = Math.floor(absTicks / barTicksHere) * barTicksHere
+      createPattern(track.id, {
+        start: clipStart,
+        notes: [
+          {
+            id: newId('not'),
+            clipId: '', // filled in by createPattern
+            pitch,
+            start: Math.max(0, snappedAbs - clipStart),
+            duration: DEFAULT_NOTE_TICKS,
+            velocity: 100
+          }
+        ]
+      })
+      return
+    }
     const note: Note = {
       id: newId('not'),
-      clipId: home.id,
-      pitch: yToPitch(e.clientY - rect.top),
+      // Drawing on a stamp writes into the loop it stamps — that is what
+      // makes the new note appear at every stamp of it.
+      clipId: noteSourceOf(state, home.id),
+      pitch,
       start: Math.max(0, snappedAbs - home.start),
       duration: DEFAULT_NOTE_TICKS,
       velocity: 100
@@ -531,7 +628,6 @@ export function PianoRoll({ clipId }: { clipId: string }): React.JSX.Element | n
             <span className="statusbar-dim"> · {trackClips.length} clips</span>
           )}
         </span>
-        <EditorFormSwitch />
         <ChordPicker chord={chord} onPick={setChord} />
         {selectedNote && <VelocityControl key={selectedNote.id} note={selectedNote} />}
         {selected.size > 1 && <span className="proll-hint">{selected.size} notes selected</span>}
@@ -570,11 +666,11 @@ export function PianoRoll({ clipId }: { clipId: string }): React.JSX.Element | n
                   // instrument — same audition the step labels give.
                   onPointerDown={(e) => {
                     if (e.button !== 0) return
-                    audioEngine.liveNoteOn(track.id, pitch, 0.85)
+                    auditionDown(track.id, pitch)
                   }}
-                  onPointerUp={() => audioEngine.liveNoteOff(track.id, pitch)}
+                  onPointerUp={() => auditionUp(track.id, pitch)}
                   onPointerLeave={(e) => {
-                    if (e.buttons !== 0) audioEngine.liveNoteOff(track.id, pitch)
+                    if (e.buttons !== 0) auditionUp(track.id, pitch)
                   }}
                 >
                   {pitch % 12 === 0 && (

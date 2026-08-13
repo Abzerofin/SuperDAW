@@ -2,6 +2,7 @@ import { useState } from 'react'
 import { createPortal } from 'react-dom'
 import type { PerformancePad, ProjectState, Track } from '@core/model/types'
 import {
+  isNoteTrackKind,
   PAD_GRID_COLS,
   PAD_GRID_ROWS,
   padIdAt
@@ -382,7 +383,7 @@ function PadEditor({
   }
   const midiTracks = state.trackOrder
     .map((id) => state.tracks[id])
-    .filter((t): t is Track => t !== undefined && t.kind === 'midi')
+    .filter((t): t is Track => t !== undefined && isNoteTrackKind(t.kind))
   const clips = Object.values(state.clips).sort((a, b) => a.start - b.start)
 
   return (

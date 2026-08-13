@@ -1,5 +1,5 @@
 import type { Clip, Note, ProjectState, TrackId } from '../model/types'
-import { clipsOfTrack } from '../model/types'
+import { clipsOfTrack, isNoteTrackKind } from '../model/types'
 import { ticksPerBar } from '../model/timebase'
 import { newId } from '../model/ids'
 import type { Operation } from './operations'
@@ -55,7 +55,7 @@ export function buildMidiTakeOp(
 
   for (const take of takes) {
     const track = state.tracks[take.trackId]
-    if (!track || track.kind !== 'midi' || take.notes.length === 0) continue
+    if (!track || !isNoteTrackKind(track.kind) || take.notes.length === 0) continue
 
     const clipId = newId('clp')
     const clipStart = Math.max(0, Math.round(take.startTicks))

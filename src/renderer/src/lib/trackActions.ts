@@ -1,7 +1,7 @@
 import type { ProjectState, Track, TrackId, TrackKind } from '@core/model/types'
-import { pluginsOfTrack } from '@core/model/types'
+import { isNoteTrackKind, pluginsOfTrack, TRACK_KIND_LABELS } from '@core/model/types'
 import { newId } from '@core/model/ids'
-import { synthDefaults } from '@core/model/effects'
+import { DRUM_INSTRUMENT_INDEX, synthDefaults } from '@core/model/effects'
 import { nextTrackColor } from './colors'
 import {
   TRACK_PRESET_EXTENSION,
@@ -24,13 +24,19 @@ import { selection } from '@/state/selection'
  */
 
 /**
- * Create an empty track (audio, MIDI, or a folder bus) at the end.
+ * Create an empty track (audio, MIDI, drum, or a folder bus) at the end.
  * Returns it so callers that follow up with clip ops (file import) can
  * reference the track they just made.
+ *
+ * A drum track is a note track that arrives on the drum instrument — the
+ * one thing that makes it a KIT rather than an empty MIDI track the user
+ * has to configure. Every drum param stays editable afterwards, and
+ * switching its instrument is allowed: the kind decides what the track is
+ * FOR, not what it is permanently locked to.
  */
 export function createTrack(kind: TrackKind, name?: string): Track {
   const count = projectStore.state.trackOrder.length
-  const label = kind === 'audio' ? 'Audio' : kind === 'midi' ? 'MIDI' : 'Folder'
+  const label = TRACK_KIND_LABELS[kind]
   const track: Track = {
     id: newId('trk'),
     kind,
@@ -42,7 +48,9 @@ export function createTrack(kind: TrackKind, name?: string): Track {
     frozenAssetId: null,
     volume: 1,
     pan: 0,
-    synth: kind === 'midi' ? synthDefaults() : {}
+    synth: isNoteTrackKind(kind)
+      ? { ...synthDefaults(), ...(kind === 'drum' ? { instrument: DRUM_INSTRUMENT_INDEX } : {}) }
+      : {}
   }
   projectStore.dispatch({
     type: 'track/create',

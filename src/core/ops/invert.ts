@@ -541,6 +541,30 @@ export function invert(state: ProjectState, op: Operation): Operation | null {
       }
     }
 
+    case 'clip/resizeWithNotes': {
+      const clip = state.clips[op.clipId]
+      if (!clip) return null
+      // The same op pointing the other way: the length it had, the notes it
+      // is about to add taken back out, and anything it removed put back
+      // exactly as it stands right now.
+      const restored = (op.removeNoteIds ?? [])
+        .map((id) => state.notes[id])
+        .filter((note): note is Note => note !== undefined)
+      // Followers go back to the lengths they have right now — carried
+      // explicitly so undo restores every stamp the grow took with it.
+      const followers = (op.followers ?? [])
+        .filter((f) => state.clips[f.clipId])
+        .map((f) => ({ clipId: f.clipId, duration: state.clips[f.clipId].duration }))
+      return {
+        type: 'clip/resizeWithNotes',
+        clipId: op.clipId,
+        duration: clip.duration,
+        notes: restored,
+        removeNoteIds: op.notes.map((note) => note.id),
+        ...(followers.length > 0 ? { followers } : {})
+      }
+    }
+
     case 'clip/rename': {
       const clip = state.clips[op.clipId]
       if (!clip) return null

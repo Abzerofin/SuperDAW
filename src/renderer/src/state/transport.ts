@@ -53,7 +53,8 @@ function songEndTicks(): number {
     // it once per track rather than once per clip.
     const audible = new Map<string, boolean>()
     let end = 0
-    for (const clip of Object.values(clips)) {
+    // Patterns are bank material, not arrangement: they never extend the song.
+    for (const clip of Object.values(clips).filter((c) => !c.isPattern)) {
       let ok = audible.get(clip.trackId)
       if (ok === undefined) {
         ok = isTrackEffectivelyAudible(state, clip.trackId)

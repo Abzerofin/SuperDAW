@@ -2,11 +2,15 @@
 import type { ClipId, Note, Track, TrackId, TrackKind } from '@core/model/types'
 import {
   childTracksOf,
+  isNoteTrackKind,
   isTrackEffectivelyAudible,
   isTrackSelfOrDescendant,
+  timelineClips,
   trackSubtreeOf,
+  CREATABLE_TRACK_KINDS,
   MAX_STRETCH,
-  MIN_STRETCH
+  MIN_STRETCH,
+  TRACK_KIND_LABELS
 } from '@core/model/types'
 import { PPQ, barsToTicks, snapTicks, ticksPerBar } from '@core/model/timebase'
 import { newId } from '@core/model/ids'
@@ -379,10 +383,36 @@ export function TimelineView(): React.JSX.Element {
   // Content extends past the last clip so there is always room to work.
   const lastClipEnd = useMemo(
     () =>
-      Object.values(state.clips).reduce((max, c) => Math.max(max, c.start + c.duration), 0),
+      timelineClips(state).reduce((max, c) => Math.max(max, c.start + c.duration), 0),
     [state.clips]
   )
-  const contentTicks = Math.max(lastClipEnd + barsToTicks(16, sig), barsToTicks(64, sig))
+  /**
+   * The timeline has NO end. Scrolling to the right edge, or playing past
+   * the last clip, used to run the cursor off the grid into grey nothing;
+   * instead the content grows to stay ahead of wherever you have reached.
+   * It only ever grows within a session, and only in screenful-sized
+   * jumps, so scrolling and playback never thrash the layout. (Zoom-out
+   * still stops at MIN_PX_PER_BEAT — the limit is on how small a bar gets,
+   * not on how far the song can run.)
+   */
+  const [reachTicks, setReachTicks] = useState(0)
+  /**
+   * The reach mirrored in a ref. Both feeds below run per frame; calling
+   * setState from them every frame — even with an unchanged value — keeps
+   * the timeline re-rendering and makes scrollbars flicker. The ref
+   * answers "did it actually grow?" with React uninvolved.
+   */
+  const reachRef = useRef(0)
+  const growReach = (to: number): void => {
+    if (to <= reachRef.current) return
+    reachRef.current = to
+    setReachTicks(to)
+  }
+  const contentTicks = Math.max(
+    lastClipEnd + barsToTicks(16, sig),
+    barsToTicks(64, sig),
+    reachTicks
+  )
   const contentW = Math.ceil(contentTicks * pxPerTick)
 
   // Viewport window for culling: only clips near the visible rectangle are
@@ -424,6 +454,30 @@ export function TimelineView(): React.JSX.Element {
       if (raf) cancelAnimationFrame(raf)
     }
   }, [])
+
+  // Grow the content to stay a screenful ahead of the right edge of the
+  // view. Runs off `view`, so it covers scrolling, resizing and zooming
+  // out alike; growing does not move the scroll position, so it is
+  // invisible apart from the grid simply continuing.
+  useEffect(() => {
+    const screenful = view.w / pxPerTick
+    const rightTicks = (view.left + view.w) / pxPerTick
+    if (rightTicks > reachRef.current) growReach(rightTicks + screenful)
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [view, pxPerTick])
+
+  // …and ahead of the playhead, which keeps running long after the last
+  // clip. Per frame, but the comparison almost always bails out — React
+  // skips the re-render when the reducer returns the same value.
+  useEffect(
+    () =>
+      transport.subscribe(() => {
+        const ticks = transport.positionTicks()
+        if (ticks > reachRef.current) growReach(ticks + barsToTicks(16, sig))
+      }),
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [sig]
+  )
 
   // Ctrl+wheel zoom, anchored at the cursor. Native listener because React's
   // wheel events are passive and can't preventDefault the browser page zoom.
@@ -603,7 +657,7 @@ export function TimelineView(): React.JSX.Element {
     const top = Math.min(box.originY, box.y)
     const bottom = Math.max(box.originY, box.y)
     const hits: ClipId[] = []
-    for (const clip of Object.values(state.clips)) {
+    for (const clip of timelineClips(state)) {
       const index = rowIndexOfTrack.get(clip.trackId)
       if (index === undefined) continue // hidden inside a collapsed folder
       const clipTop = trackTops[index]
@@ -671,7 +725,7 @@ export function TimelineView(): React.JSX.Element {
     const trackIndex = trackIndexAtY(y - RULER_H)
     const track = tracks[trackIndex]
     if (!track) return true
-    const clip = Object.values(state.clips).find(
+    const clip = timelineClips(state).find(
       (c) => c.trackId === track.id && c.start <= ticks && ticks < c.start + c.duration
     )
     collab.ping(ticks, trackIndex, clip ? `clip "${clip.name}"` : `"${track.name}" · bar ${bar}`)
@@ -1033,7 +1087,7 @@ export function TimelineView(): React.JSX.Element {
     const clip = {
       id: newId('clp'),
       trackId: track.id,
-      name: track.kind === 'audio' ? 'Audio Clip' : 'MIDI Clip',
+      name: `${TRACK_KIND_LABELS[track.kind]} Clip`,
       start,
       duration: barTicks,
       assetId: null,
@@ -1298,7 +1352,7 @@ export function TimelineView(): React.JSX.Element {
     const topPx = view.top - RULER_H - OVERSCAN_Y
     const bottomPx = view.top - RULER_H + view.h + OVERSCAN_Y
     const result: Array<(typeof state.clips)[string]> = []
-    for (const clip of Object.values(state.clips)) {
+    for (const clip of timelineClips(state)) {
       // Hidden (collapsed-folder) tracks render no clips.
       const trackIndex = rowIndexOfTrack.get(clip.trackId)
       if (trackIndex === undefined) continue
@@ -1361,6 +1415,13 @@ export function TimelineView(): React.JSX.Element {
           </button>
           <button className="corner-btn" onClick={() => addTrack('midi')}>
             + MIDI
+          </button>
+          <button
+            className="corner-btn"
+            title="Drum track — notes on the step grid, playing the built-in kit"
+            onClick={() => addTrack('drum')}
+          >
+            + Drum
           </button>
           <button className="corner-btn" title="Folder track (a bus — drag tracks into it)" onClick={() => addTrack('folder')}>
             + Folder
@@ -1541,7 +1602,7 @@ export function TimelineView(): React.JSX.Element {
                   onPointerDown={onClipPointerDown}
                   onOpenComments={onClipOpenComments}
                   onContextMenu={onClipContextMenu}
-                  onOpenEditor={track.kind === 'midi' ? onClipOpenEditor : undefined}
+                  onOpenEditor={isNoteTrackKind(track.kind) ? onClipOpenEditor : undefined}
                 />
               )
             })}
@@ -1699,10 +1760,10 @@ export function TimelineView(): React.JSX.Element {
       {spaceMenu && (
         <div
           className="menu-panel space-menu"
-          style={contextMenuStyle(spaceMenu.x, spaceMenu.y, 208, 130)}
+          style={contextMenuStyle(spaceMenu.x, spaceMenu.y, 208, 168)}
           onPointerDown={(e) => e.stopPropagation()}
         >
-          {(['audio', 'midi', 'folder'] as const).map((kind) => (
+          {CREATABLE_TRACK_KINDS.map((kind) => (
             <button
               key={kind}
               className="menu-item"
@@ -1711,9 +1772,7 @@ export function TimelineView(): React.JSX.Element {
                 addTrack(kind)
               }}
             >
-              <span>
-                New {kind === 'audio' ? 'Audio' : kind === 'midi' ? 'MIDI' : 'Folder'} Track
-              </span>
+              <span>New {TRACK_KIND_LABELS[kind]} Track</span>
             </button>
           ))}
         </div>

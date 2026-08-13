@@ -1,6 +1,11 @@
 import { memo, useState, useSyncExternalStore } from 'react'
 import type { Track } from '@core/model/types'
-import { childTracksOf } from '@core/model/types'
+import {
+  childTracksOf,
+  isNoteTrackKind,
+  TRACK_KIND_BADGES,
+  TRACK_KIND_LABELS
+} from '@core/model/types'
 import { projectStore } from '@/state/projectStore'
 import { useProjectSelector } from '@/state/hooks'
 import { commentUi } from '@/state/commentUi'
@@ -62,7 +67,7 @@ export const TrackHeader = memo(function TrackHeader({
   const isFolder = track.kind === 'folder'
   const frozen = track.frozenAssetId !== null
   /** Arm is for audio AND MIDI tracks; monitoring (a mic feed) audio only. */
-  const canRecord = (track.kind === 'audio' || track.kind === 'midi') && !frozen
+  const canRecord = (track.kind === 'audio' || isNoteTrackKind(track.kind)) && !frozen
   const canMonitor = track.kind === 'audio' && !frozen
   const inputOpen = useSyncExternalStore(
     trackInputUi.subscribe,
@@ -205,21 +210,21 @@ export const TrackHeader = memo(function TrackHeader({
       {!compact && (
       <div className="track-header-bottom">
         <span
-          className="track-kind"
-          title={
-            track.kind === 'audio' ? 'Audio track' : track.kind === 'midi' ? 'MIDI track' : 'Folder (bus)'
-          }
+          className={`track-kind track-kind-${track.kind}`}
+          title={isFolder ? 'Folder (bus)' : `${TRACK_KIND_LABELS[track.kind]} track`}
         >
-          {track.kind === 'audio' ? 'A' : track.kind === 'midi' ? 'M' : 'F'}
+          {TRACK_KIND_BADGES[track.kind]}
         </span>
         <button
-          className={`track-toggle track-fx ${hasFx || track.kind === 'midi' ? 'track-fx-has' : ''}`}
+          className={`track-toggle track-fx ${hasFx || isNoteTrackKind(track.kind) ? 'track-fx-has' : ''}`}
           title={
             isFolder
               ? 'Bus effects (opens the Effects tab)'
-              : track.kind === 'midi'
-                ? 'Instrument & effects — synth, EQ, compressor… (opens the Effects tab)'
-                : 'Effects — EQ, compressor, reverb… (opens the Effects tab)'
+              : track.kind === 'drum'
+                ? 'Kit & effects — drum voices, EQ, compressor… (opens the Effects tab)'
+                : track.kind === 'midi'
+                  ? 'Instrument & effects — synth, EQ, compressor… (opens the Effects tab)'
+                  : 'Effects — EQ, compressor, reverb… (opens the Effects tab)'
           }
           onClick={() => {
             selection.selectTrack(track.id)

@@ -1,5 +1,5 @@
 import type { PluginInstance, Track, TrackKind } from '../model/types'
-import { MAX_GAIN } from '../model/types'
+import { isNoteTrackKind, MAX_GAIN } from '../model/types'
 import { newId } from '../model/ids'
 import { SYNTH_DEFS, clampParam, synthDefaults } from '../model/effects'
 import type { PluginDescriptor } from '../plugins/descriptor'
@@ -98,13 +98,13 @@ export function parseTrackPreset(text: string): TrackPresetJson {
     throw new Error('This preset was saved by a newer version of SuperDAW')
   }
   const track = p.track as Record<string, unknown> | undefined
-  if (!track || !['audio', 'midi', 'folder'].includes(track.kind as string)) {
+  if (!track || !['audio', 'midi', 'drum', 'folder'].includes(track.kind as string)) {
     throw new Error('Preset file is corrupted (bad track section)')
   }
   const kind = track.kind as TrackKind
 
   const synth: Record<string, number> = {}
-  if (kind === 'midi') {
+  if (isNoteTrackKind(kind)) {
     const rawSynth = sanitizeNumbers(track.synth)
     for (const [key, def] of Object.entries(SYNTH_DEFS)) {
       synth[key] = clampParam(def, rawSynth[key] ?? def.default)
@@ -169,7 +169,7 @@ export function trackFromPreset(
     frozenAssetId: null,
     volume: preset.track.volume,
     pan: preset.track.pan,
-    synth: preset.track.kind === 'midi' ? { ...synthDefaults(), ...preset.track.synth } : {}
+    synth: isNoteTrackKind(preset.track.kind) ? { ...synthDefaults(), ...preset.track.synth } : {}
   }
   const plugins: PluginInstance[] = preset.plugins.map((p) => ({
     id: newId('plg'),

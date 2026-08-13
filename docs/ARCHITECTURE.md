@@ -496,9 +496,23 @@ Formant-preserving independent stretch needs the PSOLA/phase-vocoder
 worklet the roadmap defers to its own DSP milestone; the UI says so rather
 than implying otherwise. Slicing is the existing `clip/split`.
 
+## Track kinds (audio · midi · drum · folder)
+
+`TrackKind` separates DRUM tracks from melodic MIDI ones. Both are NOTE
+tracks — identical clips, notes, `Track.synth` and instrument slot — so
+every piece of note logic tests `isNoteTrackKind(track.kind)`, never
+`kind === 'midi'`; testing for `'midi'` silently drops drum notes from
+scheduling, recording, MIDI routing and the reducer. The kind describes
+the MATERIAL, not the controller: a drum track is played perfectly well
+by a keyboard or an electronic kit. What the kind actually decides is
+where a track starts and how it reads — a drum track is created on the
+drum instrument (`DRUM_INSTRUMENT_INDEX`), opens on the step grid, and
+carries its own badge and menu wording. Every parameter stays editable
+afterwards, including its instrument.
+
 ## Built-in instruments (analog · sampler · drum kit)
 
-A MIDI track's instrument is selected by the `instrument` synth param —
+A note track's instrument is selected by the `instrument` synth param —
 all three instruments' params coexist in the one flat `Track.synth`
 record (`SYNTH_DEFS`), so switching never loses a knob position and every
 control is the existing `track/setSynthParam` op (clamped in the reducer,

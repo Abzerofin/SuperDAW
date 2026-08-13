@@ -40,12 +40,20 @@ export function buildDuplicateTrackOp(state: ProjectState, trackId: TrackId): Op
   const plugins: ReturnType<typeof pluginsOfTrack> = []
   const routes: ReturnType<typeof routesOfTrack> = []
   const pluginIdMap = new Map<string, string>()
+  /**
+   * A duplicate is independent: its stamps point at the COPY's loop, not
+   * the original's, so editing the copy never reaches back into the track
+   * it came from.
+   */
+  const clipIdMap = new Map<string, string>()
   for (const t of subtree) {
     const newTrackId = trackIdMap.get(t.id)!
     for (const clip of clipsOfTrack(state, t.id)) {
       const newClipId = newId('clp')
+      clipIdMap.set(clip.id, newClipId)
       clips.push({ ...clip, id: newClipId, trackId: newTrackId })
-      for (const note of notesOfClip(state, clip.id)) {
+      for (const note of Object.values(state.notes)) {
+        if (note.clipId !== clip.id) continue
         notes.push({ ...note, id: newId('nte'), clipId: newClipId })
       }
     }
@@ -85,7 +93,9 @@ export function buildDuplicateTrackOp(state: ProjectState, trackId: TrackId): Op
     type: 'track/create',
     track: cloneTrack(source),
     index: subtreeEnd + 1,
-    clips,
+    clips: clips.map((c) =>
+      c.sourceClipId ? { ...c, sourceClipId: clipIdMap.get(c.sourceClipId) ?? c.sourceClipId } : c
+    ),
     automation,
     notes,
     plugins,

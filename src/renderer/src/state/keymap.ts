@@ -24,6 +24,7 @@ export type ShortcutId =
   | 'transport.playPause'
   | 'transport.returnToStart'
   | 'transport.record'
+  | 'transport.panic'
   | 'edit.undo'
   | 'edit.redo'
   | 'clip.copy'
@@ -55,6 +56,7 @@ export const SHORTCUT_DEFS: readonly ShortcutDef[] = [
   { id: 'transport.playPause', label: 'Play / stop (return to play start)', category: 'Transport', combo: 'Space' },
   { id: 'transport.returnToStart', label: 'Stop and return to the beginning', category: 'Transport', combo: 'Shift+Space' },
   { id: 'transport.record', label: 'Record / stop recording', category: 'Transport', combo: 'R' },
+  { id: 'transport.panic', label: 'All notes off (panic)', category: 'Transport', combo: 'Ctrl+.' },
 
   { id: 'project.save', label: 'Save project', category: 'Project', combo: 'Ctrl+S' },
   { id: 'project.saveAs', label: 'Save project as…', category: 'Project', combo: 'Ctrl+Shift+S' },

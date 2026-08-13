@@ -201,6 +201,9 @@ export function instrumentKindOf(synth: Readonly<Record<string, number>>): Instr
   return INSTRUMENT_KINDS[Math.round(synth.instrument ?? 0)] ?? 'analog'
 }
 
+/** The `instrument` value a drum track starts on (see TrackKind 'drum'). */
+export const DRUM_INSTRUMENT_INDEX = INSTRUMENT_KINDS.indexOf('drums')
+
 /**
  * Sliced-sampler keyboard mapping: slice 0 plays on this MIDI pitch,
  * slice N on SLICE_BASE_PITCH + N (capped at MAX_SLICES). Shared by the

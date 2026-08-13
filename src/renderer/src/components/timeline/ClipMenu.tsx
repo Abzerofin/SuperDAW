@@ -149,13 +149,16 @@ export function ClipMenu({
       {!isAudio && (
         <button
           className="menu-item"
-          title="Program this clip as a beat grid — rows are the drum pads (or pitches), columns are steps"
+          // Which editor opens is the TRACK's business: a drum track gets
+          // the step grid, a MIDI track the piano roll. One entry, because
+          // there is no longer a choice to offer here.
+          title="Edit this clip's notes"
           onClick={() => {
-            editorUi.open(clip.id, 'steps')
+            editorUi.open(clip.id)
             onClose()
           }}
         >
-          <span>Step sequencer</span>
+          <span>Edit notes</span>
         </button>
       )}
 

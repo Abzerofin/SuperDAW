@@ -1,5 +1,6 @@
 import { useEffect, useRef } from 'react'
 import type { Track } from '@core/model/types'
+import { isNoteTrackKind } from '@core/model/types'
 import type { InputChannelMode } from '@audio/input'
 import { useAudioDevices, audioDevices } from '@/state/audioDevices'
 import { trackInputs, useTrackInputs, type MidiChannelChoice } from '@/state/trackInputs'
@@ -19,7 +20,7 @@ export function TrackInputPanel({ track }: { track: Track }): React.JSX.Element 
   const inputs = useTrackInputs()
   const midi = useMidiInputs()
   const rec = useRecording()
-  const isMidi = track.kind === 'midi'
+  const isMidi = isNoteTrackKind(track.kind)
   const config = inputs.configOf(track.id)
   const available = inputs.channelsAvailable(track.id)
   const rootRef = useRef<HTMLDivElement>(null)

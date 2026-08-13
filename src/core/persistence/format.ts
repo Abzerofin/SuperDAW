@@ -1,5 +1,5 @@
 import type { Clip, PerformancePad, PluginInstance, ProjectState, Track } from '../model/types'
-import { createEmptyProject, sanitizePad } from '../model/types'
+import { createEmptyProject, isNoteTrackKind, sanitizePad } from '../model/types'
 import { routeIsValid } from '../model/routing'
 import { clampParam, synthDefaults, EFFECT_DEFS, type EffectType } from '../model/effects'
 import { normalizeProjectSettings } from '../model/projectSettings'
@@ -165,7 +165,7 @@ function normalizeState(state: ProjectState): ProjectState {
       ...legacyRest,
       volume: legacyRest.volume ?? 1,
       pan: legacyRest.pan ?? 0,
-      synth: legacyRest.synth ?? (legacyRest.kind === 'midi' ? synthDefaults() : {}),
+      synth: legacyRest.synth ?? (isNoteTrackKind(legacyRest.kind) ? synthDefaults() : {}),
       // Pre-folder/freeze files: root-level, unfrozen.
       parentId: legacyRest.parentId ?? null,
       frozenAssetId: legacyRest.frozenAssetId ?? null,

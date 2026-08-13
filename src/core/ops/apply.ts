@@ -14,6 +14,7 @@ import type {
 import { routeIsValid } from '../model/routing'
 import {
   clipsOfTrack,
+  isNoteTrackKind,
   isSelfOrDescendant,
   isTrackSelfOrDescendant,
   subtreeOf,
@@ -564,7 +565,7 @@ export function apply(state: ProjectState, op: Operation): ProjectState {
 
     case 'track/setSynthParam': {
       const track = state.tracks[op.trackId]
-      if (!track || track.kind !== 'midi') return state
+      if (!track || !isNoteTrackKind(track.kind)) return state
       const def = SYNTH_DEFS[op.param]
       if (!def) return state
       const value = clampParam(def, op.value)
@@ -580,7 +581,7 @@ export function apply(state: ProjectState, op: Operation): ProjectState {
 
     case 'track/setSynthParams': {
       const track = state.tracks[op.trackId]
-      if (!track || track.kind !== 'midi') return state
+      if (!track || !isNoteTrackKind(track.kind)) return state
       let changed = false
       const synth = { ...track.synth }
       for (const [param, raw] of Object.entries(op.params)) {
@@ -597,7 +598,7 @@ export function apply(state: ProjectState, op: Operation): ProjectState {
 
     case 'track/setSampler': {
       const track = state.tracks[op.trackId]
-      if (!track || track.kind !== 'midi') return state
+      if (!track || !isNoteTrackKind(track.kind)) return state
       const assetId = typeof op.assetId === 'string' ? op.assetId : null
       let changed = (track.samplerAssetId ?? null) !== assetId
       const synth = { ...track.synth }
@@ -751,6 +752,39 @@ export function apply(state: ProjectState, op: Operation): ProjectState {
             : c.stretch
       }))
 
+    case 'clip/resizeWithNotes': {
+      const clip = state.clips[op.clipId]
+      if (!clip) return state
+      const duration = Math.max(1, Math.round(op.duration))
+      let clips: Readonly<Record<ClipId, Clip>> = state.clips
+      let next: Record<ClipId, Clip> | null = null
+      const edit = (): Record<ClipId, Clip> => {
+        if (!next) clips = next = { ...state.clips }
+        return next
+      }
+      if (duration !== clip.duration) edit()[op.clipId] = { ...clip, duration }
+      // Stamps of this loop grow with it, so a loop taken from one bar to
+      // two does not leave its copies playing half of it.
+      for (const follower of op.followers ?? []) {
+        const target = clips[follower.clipId]
+        if (!target) continue
+        const followerDuration = Math.max(1, Math.round(follower.duration))
+        if (target.duration === followerDuration) continue
+        edit()[follower.clipId] = { ...target, duration: followerDuration }
+      }
+      // Removals first: the invert deletes the notes the forward op added,
+      // and an id could otherwise be removed and re-added in one pass.
+      let notes: Readonly<Record<string, Note>> = state.notes
+      if (op.removeNoteIds && op.removeNoteIds.length > 0) {
+        const next = { ...notes }
+        for (const id of op.removeNoteIds) delete next[id]
+        notes = next
+      }
+      const added = withNotes(notes, clips, op.notes)
+      if (clips === state.clips && notes === state.notes && !added.changed) return state
+      return { ...state, clips, notes: added.notes }
+    }
+
     case 'clip/deleteMany': {
       let next = state
       for (const clipId of op.clipIds) next = apply(next, { type: 'clip/delete', clipId })
@@ -828,7 +862,7 @@ export function apply(state: ProjectState, op: Operation): ProjectState {
         soloed: op.track.soloed === true,
         volume: clamp(op.track.volume, 0, MAX_GAIN),
         pan: clamp(op.track.pan, -1, 1),
-        synth: track.kind === 'midi' ? synth : track.synth
+        synth: isNoteTrackKind(track.kind) ? synth : track.synth
       }
       const sameSynth =
         Object.keys(restored.synth).length === Object.keys(track.synth).length &&
@@ -931,14 +965,19 @@ export function apply(state: ProjectState, op: Operation): ProjectState {
         // its position WITHIN the pattern so audio is continuous at the cut
         // (its later repeats then cycle from that point, not the original
         // phase — the price of not storing a separate loop-phase field).
-        loopLength: clip.loopLength
+        loopLength: clip.loopLength,
+        // Cutting a stamp yields two stamps of the same loop: neither half
+        // owns notes, so both keep following the source.
+        ...(clip.sourceClipId ? { sourceClipId: clip.sourceClipId } : {}),
+        ...(clip.freeLength ? { freeLength: true } : {})
       }
       const clips = {
         ...state.clips,
         [clip.id]: { ...clip, duration: leftDuration, fadeOut: op.leftFadeOut ?? 0 },
         [right.id]: right
       }
-      // Notes at/after the cut move to the right clip, re-based to its start.
+      // Notes at/after the cut move to the right clip, re-based to its
+      // start. A stamp owns none, so this is a no-op for one.
       let notes = state.notes
       let notesChanged = false
       const nextNotes: Record<string, Note> = { ...state.notes }

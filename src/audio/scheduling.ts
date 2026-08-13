@@ -1,6 +1,6 @@
 import { PPQ, ticksPerBeat } from '@core/model/timebase'
 import type { Clip, ProjectState } from '@core/model/types'
-import { clipRate, isClipLooped } from '@core/model/types'
+import { clipRate, isClipLooped, isNoteTrackKind, noteSourceOf, timelineClips } from '@core/model/types'
 import { synthIsAudible } from '@core/model/effects'
 
 /**
@@ -138,7 +138,7 @@ export function scheduleClips(
   }
   const limitSec = anchorSec + (untilTicks - anchorTicks) / tps
 
-  for (const clip of Object.values(state.clips)) {
+  for (const clip of timelineClips(state)) {
     if (clip.assetId === null) continue
     const track = state.tracks[clip.trackId]
     if (!track || track.frozenAssetId !== null) continue // frozen: render replaces live clips
@@ -210,7 +210,7 @@ export interface TrackLoopSpan {
 export function trackLoopSpan(state: ProjectState, trackId: string): TrackLoopSpan | null {
   let start = Number.POSITIVE_INFINITY
   let end = 0
-  for (const clip of Object.values(state.clips)) {
+  for (const clip of timelineClips(state)) {
     if (clip.trackId !== trackId) continue
     start = Math.min(start, clip.start)
     end = Math.max(end, clip.start + clip.duration)
@@ -302,16 +302,28 @@ export function scheduleNotes(
   // busy looped MIDI track allocate segment lists in the hundreds of
   // thousands per scheduling pass.
   const segmentsByClip = new Map<string, ReturnType<typeof clipSegments>>()
-
+  // Which clip owns each clip's notes: itself, or the loop it was stamped
+  // from. Resolved once so a stamp costs no more than an ordinary clip.
+  const notesByOwner = new Map<string, typeof state.notes[string][]>()
   for (const note of Object.values(state.notes)) {
-    const clip = state.clips[note.clipId]
-    if (!clip) continue
+    const list = notesByOwner.get(note.clipId)
+    if (list) list.push(note)
+    else notesByOwner.set(note.clipId, [note])
+  }
+
+  for (const clip of timelineClips(state)) {
+    if (clip.assetId !== null) continue // an audio clip has no notes
     const track = state.tracks[clip.trackId]
-    if (!track || track.kind !== 'midi') continue
+    if (!track || !isNoteTrackKind(track.kind)) continue
     if (track.frozenAssetId !== null) continue // frozen: the render replaces the synth
     // Removed or bypassed instrument: the notes stay in the document, they
     // just make no sound. Gated here so playback and offline renders agree.
     if (!synthIsAudible(track.synth)) continue
+
+    // A STAMP plays the loop it was stamped from, so editing that loop is
+    // heard in every stamp of it.
+    const notes = notesByOwner.get(noteSourceOf(state, clip.id))
+    if (!notes || notes.length === 0) continue
 
     let segments = segmentsByClip.get(clip.id)
     if (!segments) segmentsByClip.set(clip.id, (segments = clipSegments(clip)))
@@ -319,30 +331,36 @@ export function scheduleNotes(
     // A looped clip plays its notes once per repeat; a note is cut at its
     // segment's end just as it is cut at an ordinary clip's end.
     for (const segment of segments) {
-      if (note.start >= segment.duration) continue // past this repeat's window
-      const absStart = segment.start + note.start
-      // Windowed pass: a note plays in the slice its START falls in, and
-      // rings to its natural end — never re-attacked at a horizon seam.
-      if (
-        window !== undefined &&
-        (absStart < (window.startFromTicks ?? Number.NEGATIVE_INFINITY) ||
-          absStart >= window.startBeforeTicks)
-      ) {
-        continue
-      }
-      const absEnd = Math.min(absStart + note.duration, segment.start + segment.duration, untilTicks)
-      if (absEnd <= absStart) continue // entirely past the segment end / window
-      if (absEnd <= anchorTicks) continue // in the past
-      if (absStart >= untilTicks) continue // starts beyond this pass's window
+      for (const note of notes) {
+        if (note.start >= segment.duration) continue // past this repeat's window
+        const absStart = segment.start + note.start
+        // Windowed pass: a note plays in the slice its START falls in, and
+        // rings to its natural end — never re-attacked at a horizon seam.
+        if (
+          window !== undefined &&
+          (absStart < (window.startFromTicks ?? Number.NEGATIVE_INFINITY) ||
+            absStart >= window.startBeforeTicks)
+        ) {
+          continue
+        }
+        const absEnd = Math.min(
+          absStart + note.duration,
+          segment.start + segment.duration,
+          untilTicks
+        )
+        if (absEnd <= absStart) continue // entirely past the segment end / window
+        if (absEnd <= anchorTicks) continue // in the past
+        if (absStart >= untilTicks) continue // starts beyond this pass's window
 
-      out.push({
-        trackId: track.id,
-        clipId: clip.id,
-        pitch: note.pitch,
-        velocity: note.velocity / 127,
-        startSec: anchorSec + (Math.max(absStart, anchorTicks) - anchorTicks) / tps,
-        endSec: anchorSec + (absEnd - anchorTicks) / tps
-      })
+        out.push({
+          trackId: track.id,
+          clipId: clip.id,
+          pitch: note.pitch,
+          velocity: note.velocity / 127,
+          startSec: anchorSec + (Math.max(absStart, anchorTicks) - anchorTicks) / tps,
+          endSec: anchorSec + (absEnd - anchorTicks) / tps
+        })
+      }
     }
   }
   return out.sort((a, b) => a.startSec - b.startSec)

@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from 'react'
 import type { PluginInstance, PluginInstanceId, Track } from '@core/model/types'
-import { pluginsOfTrack, routesOfTrack } from '@core/model/types'
+import { isNoteTrackKind, pluginsOfTrack, routesOfTrack } from '@core/model/types'
 import { synthDefaults } from '@core/model/effects'
 import { builtinTypeOf, isNormalizedParam, paramDefsOf, pluginDefaults } from '@core/plugins/builtin'
 import { pluginRegistry } from '@audio/pluginRegistry'
@@ -184,7 +184,13 @@ function TrackEffects({ track }: { track: Track }): React.JSX.Element {
         <span className="proll-dot" style={{ background: track.color }} />
         <span className="fx-dock-title">{track.name}</span>
         <span className="statusbar-dim">
-          {track.kind === 'folder' ? 'bus effects' : track.kind === 'midi' ? 'instrument & effects' : 'effects'}
+          {track.kind === 'folder'
+            ? 'bus effects'
+            : track.kind === 'drum'
+              ? 'kit & effects'
+              : track.kind === 'midi'
+                ? 'instrument & effects'
+                : 'effects'}
         </span>
         {track.frozenAssetId && (
           <span className="statusbar-dim">· frozen — inserts baked into the render</span>
@@ -214,7 +220,7 @@ function TrackEffects({ track }: { track: Track }): React.JSX.Element {
       {view === 'graph' && <RoutingGraph track={track} />}
       {view === 'rack' && (
       <div className="fx-dock-chain" ref={chainRef} data-pan>
-        {track.kind === 'midi' &&
+        {isNoteTrackKind(track.kind) &&
           ((track.synth.present ?? 1) >= 0.5 ? (
             <div className="fx-card">
               <InstrumentSection track={track} />

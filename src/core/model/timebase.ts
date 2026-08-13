@@ -27,6 +27,20 @@ export function snapTicks(ticks: number, gridTicks: number): number {
   return Math.round(ticks / gridTicks) * gridTicks
 }
 
+/**
+ * Formats seconds as "m:ss.mmm" — the transport readout in Min:Sec mode.
+ * Truncates rather than rounds, so a counter never shows a time the
+ * playhead has not reached yet.
+ */
+export function formatClock(seconds: number): string {
+  const total = Math.max(0, seconds)
+  const minutes = Math.floor(total / 60)
+  const rest = total - minutes * 60
+  const secs = Math.floor(rest)
+  const millis = Math.floor((rest - secs) * 1000)
+  return `${minutes}:${String(secs).padStart(2, '0')}.${String(millis).padStart(3, '0')}`
+}
+
 /** Formats a tick position as "bar.beat.tick", 1-based, e.g. "5.2.480". */
 export function formatPosition(ticks: number, timeSignature: TimeSignature): string {
   const perBeat = ticksPerBeat(timeSignature)

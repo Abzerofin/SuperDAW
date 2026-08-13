@@ -61,6 +61,13 @@ export function buildSynthVoice(
 /** A live (open-ended) synth voice: sounding until released or stolen. */
 export interface LiveVoiceHandle {
   /**
+   * True when the voice has NO end of its own — it holds its sustain level
+   * (or loops) until release()/stop() is called. Anything that triggers a
+   * voice without a note-off to follow (a one-shot pad) must schedule an
+   * end for these, or the note sounds until the app closes.
+   */
+  readonly sustains: boolean
+  /**
    * Note-off: cancel pending envelope events from `when`, ramp to silence
    * over the release param, stop the oscillators after. Idempotent; a
    * no-op after stop().
@@ -153,6 +160,8 @@ export function buildLiveSynthVoice(
   }
 
   return {
+    // Oscillators run until stopped: this voice never ends by itself.
+    sustains: true,
     release: (when = ctx.currentTime) => {
       if (phase !== 'held') return
       phase = 'released'

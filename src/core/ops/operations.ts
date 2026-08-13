@@ -88,6 +88,33 @@ export type Operation =
   | { type: 'automation/add'; point: AutomationPoint }
   | { type: 'automation/move'; pointId: AutomationPointId; ticks: number; value: number }
   | { type: 'automation/delete'; pointId: AutomationPointId }
+  /**
+   * Resize a clip AND change its notes in one operation — programming a
+   * step past the end of a drum loop grows the loop to hold it. Two
+   * effects, one op, because it is one gesture: undo takes back the new
+   * length and the new hits together.
+   *
+   * Absolute like `clip/resize`: `duration` is the clip's new length
+   * whichever direction that is, added notes are keyed by id, and
+   * `removeNoteIds` names notes to delete. That combination is what makes
+   * it self-inverting and idempotent under re-delivery.
+   */
+  | {
+      type: 'clip/resizeWithNotes'
+      clipId: ClipId
+      duration: number
+      notes: Note[]
+      removeNoteIds?: NoteId[]
+      /**
+       * Clips that follow this one's length — the STAMPS of a drum loop,
+       * which would otherwise keep playing only the first bar of a loop
+       * that just grew to two. Absolute durations like `duration`, so
+       * re-delivery is idempotent and the invert is simply their previous
+       * lengths. The caller decides which stamps qualify (a deliberately
+       * trimmed one keeps its own length); the reducer just applies them.
+       */
+      followers?: Array<{ clipId: ClipId; duration: number }>
+    }
   | { type: 'note/add'; note: Note }
   | { type: 'note/move'; noteId: NoteId; pitch: number; start: number }
   /** Move a whole multi-selection in one gesture = one op (absolute, idempotent). */

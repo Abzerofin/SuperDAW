@@ -366,6 +366,159 @@ suite('clip looping', () => {
     const n2First = notes[1]
     expect(n2First.endSec).toBeCloseTo(101) // cut at 2-beat boundary
   })
+
+  test('a stamp plays its source loop, and follows edits made to it', () => {
+    let s = createEmptyProject('Test')
+    s = { ...s, tempo: TEMPO }
+    s = apply(s, {
+      type: 'track/create',
+      track: {
+        id: 'm1',
+        kind: 'drum',
+        name: 'D',
+        color: '#fff',
+        muted: false,
+        soloed: false,
+        parentId: null,
+        frozenAssetId: null,
+        volume: 1,
+        pan: 0,
+        synth: {}
+      },
+      index: 0,
+      clips: [],
+      automation: [],
+      notes: [],
+      plugins: []
+    })
+    const loop: Clip = {
+      id: 'loopA',
+      trackId: 'm1',
+      name: 'A',
+      start: 0,
+      duration: PPQ * 4,
+      assetId: null,
+      offset: 0,
+      color: null,
+      fadeIn: 0,
+      fadeOut: 0,
+      reverse: false,
+      pitch: 0,
+      stretch: 1,
+      loopLength: 0
+    }
+    s = apply(s, {
+      type: 'clip/create',
+      clip: loop,
+      notes: [{ id: 'k1', clipId: 'loopA', pitch: 36, start: 0, duration: PPQ, velocity: 100 }]
+    })
+    // Stamped a bar later: no notes of its own, just a pointer at the loop.
+    s = apply(s, {
+      type: 'clip/create',
+      clip: { ...loop, id: 'stamp1', sourceClipId: 'loopA', start: PPQ * 4 },
+      notes: []
+    })
+
+    const first = scheduleNotes(s, 0, 100)
+    expect(first).toHaveLength(2) // the loop and its stamp both sound
+    expect(first[0].startSec).toBeCloseTo(100) // loop at bar 1
+    expect(first[1].startSec).toBeCloseTo(102) // stamp at bar 2 (4 beats = 2 s)
+    expect(first.map((n) => n.pitch)).toEqual([36, 36])
+
+    // Editing the LOOP is heard in the stamp — the point of stamping.
+    s = apply(s, {
+      type: 'note/add',
+      note: { id: 'k2', clipId: 'loopA', pitch: 42, start: PPQ * 2, duration: PPQ, velocity: 100 }
+    })
+    const after = scheduleNotes(s, 0, 100)
+    expect(after).toHaveLength(4)
+    expect(after.map((n) => [n.pitch, Math.round(n.startSec * 100) / 100])).toEqual([
+      [36, 100],
+      [42, 101],
+      [36, 102],
+      [42, 103]
+    ])
+
+    // A stamp whose source is deleted plays nothing, like a clip whose
+    // asset never arrived — no broken state to repair.
+    const orphaned = apply(s, { type: 'clip/delete', clipId: 'loopA' })
+    expect(scheduleNotes(orphaned, 0, 100)).toHaveLength(0)
+  })
+
+  test('a pattern is bank material: it never sounds, and outlives its clips', () => {
+    let s = createEmptyProject('Test')
+    s = { ...s, tempo: TEMPO }
+    s = apply(s, {
+      type: 'track/create',
+      track: {
+        id: 'm1',
+        kind: 'drum',
+        name: 'D',
+        color: '#fff',
+        muted: false,
+        soloed: false,
+        parentId: null,
+        frozenAssetId: null,
+        volume: 1,
+        pan: 0,
+        synth: {}
+      },
+      index: 0,
+      clips: [],
+      automation: [],
+      notes: [],
+      plugins: []
+    })
+    const pattern: Clip = {
+      id: 'patA',
+      trackId: 'm1',
+      name: 'A',
+      isPattern: true,
+      start: 0,
+      duration: PPQ * 4,
+      assetId: null,
+      offset: 0,
+      color: null,
+      fadeIn: 0,
+      fadeOut: 0,
+      reverse: false,
+      pitch: 0,
+      stretch: 1,
+      loopLength: 0
+    }
+    s = apply(s, {
+      type: 'clip/createMany',
+      clips: [
+        pattern,
+        { ...pattern, id: 'stampA', isPattern: false, sourceClipId: 'patA', start: PPQ * 4 }
+      ],
+      notes: [{ id: 'k1', clipId: 'patA', pitch: 36, start: 0, duration: PPQ, velocity: 100 }]
+    })
+
+    // Only the STAMP sounds — the pattern itself is nowhere on the timeline
+    // and must not play at its meaningless `start`.
+    const played = scheduleNotes(s, 0, 100)
+    expect(played).toHaveLength(1)
+    expect(played[0].startSec).toBeCloseTo(102)
+
+    // Deleting the clip on the track leaves the pattern and its notes
+    // intact — the dependency runs clip → pattern, never the other way.
+    const afterDelete = apply(s, { type: 'clip/delete', clipId: 'stampA' })
+    expect(afterDelete.clips['patA']).toBeDefined()
+    expect(afterDelete.notes['k1']).toBeDefined()
+    expect(scheduleNotes(afterDelete, 0, 100)).toHaveLength(0) // nothing placed
+
+    // …so it can simply be stamped again and plays exactly as before.
+    const restamped = apply(afterDelete, {
+      type: 'clip/create',
+      clip: { ...pattern, id: 'stampB', isPattern: false, sourceClipId: 'patA', start: PPQ * 8 },
+      notes: []
+    })
+    const again = scheduleNotes(restamped, 0, 100)
+    expect(again).toHaveLength(1)
+    expect(again[0].pitch).toBe(36)
+    expect(again[0].startSec).toBeCloseTo(104)
+  })
 })
 
 suite('loop-region bounded passes', () => {

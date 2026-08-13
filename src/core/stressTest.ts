@@ -150,6 +150,11 @@ export function stateInvariantViolations(state: ProjectState): string[] {
   for (const note of Object.values(state.notes)) {
     if (!state.clips[note.clipId]) v.push(`note ${note.id} references missing clip ${note.clipId}`)
   }
+  for (const clip of Object.values(state.clips)) {
+    if (clip.sourceClipId && !state.clips[clip.sourceClipId]) {
+      v.push(`clip ${clip.id} stamps missing source ${clip.sourceClipId}`)
+    }
+  }
   for (const plugin of Object.values(state.plugins)) {
     if (!state.tracks[plugin.trackId]) {
       v.push(`plugin ${plugin.id} references missing track ${plugin.trackId}`)

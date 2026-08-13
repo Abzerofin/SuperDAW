@@ -81,7 +81,9 @@ class PadPerformStore {
         if (!pad.trackId) return
         const prior = this.heldNotes.get(pad.id)
         if (prior) audioEngine.liveNoteOff(prior.trackId, prior.pitch)
-        audioEngine.liveNoteOn(pad.trackId, pad.pitch, velocity)
+        // A one-shot pad never sends a note-off — the engine ends a voice
+        // that would otherwise sustain forever (a synth, a looping sampler).
+        audioEngine.liveNoteOn(pad.trackId, pad.pitch, velocity, { oneShot: !pad.gate })
         this.heldNotes.set(pad.id, { trackId: pad.trackId, pitch: pad.pitch })
         return
       }
@@ -118,17 +120,39 @@ class PadPerformStore {
     }
   }
 
+  /**
+   * Let go of everything currently held. A trigger source disappearing
+   * mid-hold — MIDI or keyboard mode switched off, the window losing focus
+   * — leaves pads lit and gated voices sounding with no "up" ever coming.
+   * The straggler sweep catches notes whose pad was deleted while down,
+   * since those can no longer be released through the normal path.
+   */
+  releaseAllHeld(): void {
+    for (const padId of [...this.held]) this.trigger(padId, 'up', 0, true)
+    this.held.clear()
+    for (const [padId, open] of [...this.heldNotes]) {
+      this.heldNotes.delete(padId)
+      audioEngine.liveNoteOff(open.trackId, open.pitch)
+    }
+    this.emit()
+  }
+
   // ---------- computer keyboard ----------
 
   setKbdEnabled(enabled: boolean): void {
     if (this.kbdEnabled === enabled) return
     this.kbdEnabled = enabled
+    // Switching a trigger source off mid-hold strands whatever it opened.
+    this.releaseAllHeld()
     if (enabled) {
       window.addEventListener('keydown', this.onKeyDown, true)
       window.addEventListener('keyup', this.onKeyUp, true)
+      // Alt-tabbing with a pad key down means its keyup never arrives.
+      window.addEventListener('blur', this.onBlur)
     } else {
       window.removeEventListener('keydown', this.onKeyDown, true)
       window.removeEventListener('keyup', this.onKeyUp, true)
+      window.removeEventListener('blur', this.onBlur)
     }
     this.emit()
   }
@@ -156,6 +180,10 @@ class PadPerformStore {
     this.padDown(padId)
   }
 
+  private onBlur = (): void => {
+    this.releaseAllHeld()
+  }
+
   private onKeyUp = (e: KeyboardEvent): void => {
     const padId = this.padForKey(e)
     if (!padId || !projectStore.state.pads[padId]) return
@@ -169,6 +197,7 @@ class PadPerformStore {
   setMidiEnabled(enabled: boolean): void {
     if (this.midiEnabled === enabled) return
     this.midiEnabled = enabled
+    this.releaseAllHeld()
     if (enabled) {
       void midiInputs.ensure()
       midiInputs.setPadSink((kind, pitch, velocity) => {

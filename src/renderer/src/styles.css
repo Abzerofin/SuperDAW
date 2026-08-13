@@ -389,8 +389,8 @@ input {
   justify-content: space-between;
 }
 
-/* Single-letter kind chip (A / M / F) — the full name is in the tooltip;
-   the row has seven controls to fit in a 200px header. */
+/* Single-letter kind chip (A / M / D / F) — the full name is in the
+   tooltip; the row has seven controls to fit in a 200px header. */
 .track-kind {
   font-size: 9px;
   color: var(--text-dim);
@@ -398,6 +398,11 @@ input {
   border-radius: 3px;
   padding: 2px 4px;
   flex-shrink: 0;
+}
+
+/* Drum tracks read as their own family at a glance, next to MIDI. */
+.track-kind-drum {
+  color: #e0b25b;
 }
 
 .track-toggles {
@@ -2939,6 +2944,24 @@ body.middle-panning * {
   opacity: 0.4;
 }
 
+.chat-game-btn {
+  padding: 4px 8px;
+  border-radius: 4px;
+  background: var(--bg-1);
+  color: var(--text);
+  border: 1px solid var(--border);
+  font-weight: 600;
+  font-size: 16px;
+  cursor: pointer;
+  transition: all 0.2s;
+}
+
+.chat-game-btn:hover {
+  background: var(--accent);
+  color: #fff;
+  border-color: var(--accent);
+}
+
 /* ---------- Comments ---------- */
 .clip-comments {
   position: absolute;
@@ -5327,6 +5350,13 @@ body.middle-panning * {
   padding-left: 3px;
   line-height: 18px;
   user-select: none;
+  /* The ruler scrubs the transport, like the timeline's and the roll's. */
+  cursor: pointer;
+}
+
+.steps-ruler-cell:hover {
+  background: color-mix(in srgb, var(--accent) 20%, transparent);
+  color: var(--text);
 }
 
 .steps-label {
@@ -5371,6 +5401,72 @@ body.middle-panning * {
 
 .steps-cell:hover {
   background: color-mix(in srgb, var(--accent) 25%, var(--bg-2));
+}
+
+/* Pattern bank: A / B / C … / + across the step grid's head. */
+.steps-bank {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+}
+
+.steps-bank-btn {
+  min-width: 20px;
+  height: 20px;
+  padding: 0 5px;
+  border: 1px solid var(--border);
+  border-radius: 3px;
+  background: var(--bg-2);
+  color: var(--text-dim);
+  font-size: 11px;
+  font-weight: 600;
+  cursor: pointer;
+}
+
+.steps-bank-btn:hover {
+  color: var(--text);
+  border-color: var(--text-dim);
+}
+
+.steps-bank-btn-on {
+  background: color-mix(in srgb, var(--accent) 30%, var(--bg-2));
+  border-color: var(--accent);
+  color: var(--text);
+}
+
+.steps-bank-add {
+  color: var(--text-dim);
+  font-size: 13px;
+  line-height: 1;
+}
+
+/* Stamp the open loop further along the track. */
+.steps-bank-stamp {
+  color: var(--text-dim);
+  font-size: 12px;
+  line-height: 1;
+}
+
+/* A solo is not measure-shaped like its lettered neighbours — it reads
+   differently in the bank so you can see which is which at a glance. */
+.steps-bank-btn-solo {
+  border-style: dashed;
+  color: #e0b25b;
+}
+
+.steps-bank-menu {
+  min-width: 190px;
+}
+
+/* Columns past the end of the clip: the grid keeps going so the panel is
+   never half grid and half grey. They read as outside the pattern, but
+   programming one lengthens the pattern to reach it. */
+.steps-cell-outside {
+  background: var(--bg-1);
+}
+
+.steps-cell-outside:hover {
+  background: color-mix(in srgb, var(--accent) 14%, var(--bg-1));
 }
 
 .steps-cell-on {

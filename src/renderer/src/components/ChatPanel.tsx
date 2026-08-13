@@ -3,6 +3,7 @@ import { newId } from '@core/model/ids'
 import { useProjectState } from '@/state/hooks'
 import { projectStore } from '@/state/projectStore'
 import { useCollab } from '@/state/collab'
+import { gameState } from '@/state/gameState'
 
 export function ChatPanel(): React.JSX.Element {
   const chat = useProjectState().chat
@@ -62,6 +63,13 @@ export function ChatPanel(): React.JSX.Element {
             if (e.key === 'Enter') send()
           }}
         />
+        <button
+          className="chat-game-btn"
+          title="Invite to Space Invaders"
+          onClick={() => gameState.sendInvite(collab.displayName)}
+        >
+          ▶
+        </button>
         <button
           className="chat-send"
           disabled={!draft.trim()}

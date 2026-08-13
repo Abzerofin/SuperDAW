@@ -1,5 +1,6 @@
 import { useRef, useState } from 'react'
 import { createPortal } from 'react-dom'
+import { isNoteTrack } from '@core/model/types'
 import { useProjectState } from '@/state/hooks'
 import { useSelectedClipId, useSelectedTrackId } from '@/state/selection'
 import { panels, usePanels, PANEL_LABELS, type DockSide, type PanelId } from '@/state/panels'
@@ -29,9 +30,11 @@ export function Dock({ side }: { side: DockSide }): React.JSX.Element {
   const editorState = useEditorUi()
   const ids = panelState.layout.docks[side]
   const active = panelState.layout.active[side]
-  // The clip editor needs a target clip; a persisted layout can name it
-  // active with none (e.g. it was open at quit) — show no body then.
-  const showBody = active !== null && (active !== 'editor' || editorState.clipId !== null)
+  // The clip editor needs a target: a clip, or a note track it is waiting
+  // to write the first one on. A persisted layout can name it active with
+  // neither (e.g. it was open at quit) — show no body then.
+  const editorTarget = editorState.clipId ?? editorState.pendingTrackId
+  const showBody = active !== null && (active !== 'editor' || editorTarget !== null)
 
   if (side === 'bottom') {
     return (
@@ -44,7 +47,11 @@ export function Dock({ side }: { side: DockSide }): React.JSX.Element {
         {showBody && (
           <div className="dock-body" style={{ height: panelState.layout.bottomHeight }}>
             <DockResizer side="bottom" />
-            <PanelBody id={active} clipId={editorState.clipId} />
+            <PanelBody
+            id={active}
+            clipId={editorState.clipId}
+            trackId={editorState.pendingTrackId}
+          />
           </div>
         )}
       </div>
@@ -59,7 +66,11 @@ export function Dock({ side }: { side: DockSide }): React.JSX.Element {
           style={{ width: panelState.layout.rightWidth }}
         >
           <DockResizer side="right" />
-          <PanelBody id={active} clipId={editorState.clipId} />
+          <PanelBody
+            id={active}
+            clipId={editorState.clipId}
+            trackId={editorState.pendingTrackId}
+          />
         </div>
       )}
       <div className="dock-tabs dock-tabs-vertical" data-dock="right">
@@ -71,7 +82,16 @@ export function Dock({ side }: { side: DockSide }): React.JSX.Element {
   )
 }
 
-function PanelBody({ id, clipId }: { id: PanelId; clipId: string | null }): React.JSX.Element | null {
+function PanelBody({
+  id,
+  clipId,
+  trackId
+}: {
+  id: PanelId
+  clipId: string | null
+  /** Set instead of clipId when the editor is open on a track with no clip. */
+  trackId: string | null
+}): React.JSX.Element | null {
   switch (id) {
     case 'files':
       return <FileBay />
@@ -80,7 +100,7 @@ function PanelBody({ id, clipId }: { id: PanelId; clipId: string | null }): Reac
     case 'effects':
       return <EffectsDock />
     case 'editor':
-      return clipId ? <ClipEditor clipId={clipId} /> : null
+      return clipId || trackId ? <ClipEditor clipId={clipId} trackId={trackId} /> : null
     case 'pads':
       return <PadGrid />
     case 'activity':
@@ -93,18 +113,26 @@ function PanelBody({ id, clipId }: { id: PanelId; clipId: string | null }): Reac
 }
 
 /**
- * One clip editor in two forms: the step grid for drum kits, the piano
- * roll for everything else. Switching the track's instrument switches the
- * form under the same tab — no reopening, no second panel.
+ * The clip editor, in the form the TRACK asks for: the step grid on a drum
+ * track, the piano roll on a MIDI one. Same tab either way, and not a
+ * choice — the two surfaces suit two different kinds of material.
  */
-function ClipEditor({ clipId }: { clipId: string }): React.JSX.Element | null {
+function ClipEditor({
+  clipId,
+  trackId
+}: {
+  clipId: string | null
+  trackId: string | null
+}): React.JSX.Element | null {
   const state = useProjectState()
   useEditorUi()
-  if (!state.clips[clipId]) return null
-  return editorFormFor(state, clipId) === 'steps' ? (
-    <StepSequencer clipId={clipId} />
+  const openClipId = clipId !== null && state.clips[clipId] ? clipId : null
+  const openTrackId = openClipId !== null ? null : trackId
+  if (openClipId === null && (openTrackId === null || !state.tracks[openTrackId])) return null
+  return editorFormFor(state, openClipId, openTrackId) === 'steps' ? (
+    <StepSequencer clipId={openClipId} trackId={openTrackId} />
   ) : (
-    <PianoRoll clipId={clipId} />
+    <PianoRoll clipId={openClipId} trackId={openTrackId} />
   )
 }
 
@@ -177,11 +205,11 @@ function DockTab({ id, vertical = false }: { id: PanelId; vertical?: boolean }):
   // closed) count as no target instead of a tab that opens nothing.
   const selectedClip = selectedClipId ? state.clips[selectedClipId] : undefined
   const selectedMidiClipId =
-    selectedClip && state.tracks[selectedClip.trackId]?.kind === 'midi' ? selectedClip.id : null
+    selectedClip && isNoteTrack(state, selectedClip.trackId) ? selectedClip.id : null
   const selectedTrackMidiClipId =
     selectedMidiClipId === null &&
     selectedTrackId !== null &&
-    state.tracks[selectedTrackId]?.kind === 'midi'
+    isNoteTrack(state, selectedTrackId)
       ? (Object.values(state.clips)
           .filter((c) => c.trackId === selectedTrackId && c.assetId === null)
           .sort((a, b) => a.start - b.start)[0]?.id ?? null)
@@ -189,11 +217,25 @@ function DockTab({ id, vertical = false }: { id: PanelId; vertical?: boolean }):
   const editTarget = selectedMidiClipId ?? selectedTrackMidiClipId
   const editorClipId =
     editorState.clipId !== null && state.clips[editorState.clipId] ? editorState.clipId : null
+  // A note track with nothing on it yet is still editable: the editor
+  // opens empty on it and the first note (or +) makes the clip.
+  const emptyNoteTrackId =
+    editTarget === null && selectedTrackId !== null && isNoteTrack(state, selectedTrackId)
+      ? selectedTrackId
+      : null
+  const pendingTrackId =
+    editorState.pendingTrackId !== null && state.tracks[editorState.pendingTrackId]
+      ? editorState.pendingTrackId
+      : null
   const openable = editorClipId ?? editTarget
-  const disabled = id === 'editor' && openable === null
-  // The tab wears the form it would show: a drum track reads "Steps", a
-  // melodic one "Piano" — the same control either way.
-  const editorForm: EditorForm = editorFormFor(state, openable)
+  const disabled = id === 'editor' && openable === null && emptyNoteTrackId === null
+  // The tab wears the form its track calls for: a drum track reads
+  // "Steps", a MIDI one "Piano".
+  const editorForm: EditorForm = editorFormFor(
+    state,
+    openable,
+    pendingTrackId ?? emptyNoteTrackId
+  )
 
   const effectsTrack =
     id === 'effects' && selectedTrackId ? state.tracks[selectedTrackId] : undefined
@@ -202,8 +244,8 @@ function DockTab({ id, vertical = false }: { id: PanelId; vertical?: boolean }):
       ? disabled
         ? 'Clip editor — select or double-click a MIDI clip to edit it'
         : editorForm === 'steps'
-          ? 'Toggle the step grid (drum instrument — right-click for the piano roll)'
-          : 'Toggle the piano roll (right-click for the step grid)'
+          ? 'Toggle the step grid — this drum track’s loops'
+          : 'Toggle the piano roll — this MIDI track’s notes'
       : id === 'effects'
         ? effectsTrack
           ? `Effects — ${effectsTrack.name}'s insert chain`
@@ -228,6 +270,8 @@ function DockTab({ id, vertical = false }: { id: PanelId; vertical?: boolean }):
         editorUi.open(editTarget)
       } else if (editorClipId !== null) {
         panels.openPanel('editor')
+      } else if (emptyNoteTrackId !== null) {
+        editorUi.openTrack(emptyNoteTrackId)
       }
       return
     }
@@ -306,39 +350,6 @@ function DockTab({ id, vertical = false }: { id: PanelId; vertical?: boolean }):
             onPointerDown={(e) => e.stopPropagation()}
             onContextMenu={(e) => e.preventDefault()}
           >
-            {id === 'editor' && (
-              <>
-                {(['piano', 'steps'] as const).map((form) => (
-                  <button
-                    key={form}
-                    className="menu-item"
-                    title={
-                      form === 'piano'
-                        ? 'Edit as notes on a keyboard grid'
-                        : 'Edit as a drum-machine step grid'
-                    }
-                    onClick={() => {
-                      setTabMenu(null)
-                      if (openable !== null) editorUi.open(openable, form)
-                    }}
-                  >
-                    <span>{form === 'piano' ? 'Piano roll' : 'Step grid'}</span>
-                    {editorForm === form && <span className="menu-shortcut">•</span>}
-                  </button>
-                ))}
-                <button
-                  className="menu-item"
-                  title="Let the track's instrument choose: drum kits get the step grid"
-                  onClick={() => {
-                    setTabMenu(null)
-                    editorUi.setForm(null)
-                  }}
-                >
-                  <span>Follow the instrument</span>
-                </button>
-                <div className="menu-sep" />
-              </>
-            )}
             {id === 'files' && (
               <>
                 <button className="menu-item" onClick={() => sendBayAction('import')}>

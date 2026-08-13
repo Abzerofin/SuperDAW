@@ -281,6 +281,22 @@ suite('project file format', () => {
     expect(parsed.state.clips['c1'].stretch).toBe(1)
   })
 
+  test('solo flag and stamp pointer survive save -> load; plain clips stay unflagged', () => {
+    const state = sampleState()
+    const solo = { ...state.clips['c1'], id: 'cs', freeLength: true }
+    const stamp = { ...state.clips['c1'], id: 'cst', sourceClipId: 'c1' }
+    const saved = { ...state, clips: { ...state.clips, cs: solo, cst: stamp } }
+    const parsed = parseProjectJson(
+      JSON.stringify({ formatVersion: 3, state: saved, assets: [] })
+    )
+    expect(parsed.state.clips['cs'].freeLength).toBe(true)
+    expect(parsed.state.clips['cst'].sourceClipId).toBe('c1')
+    // Absent means "measure-shaped" and "owns its own notes" — neither may
+    // materialize as false/null, so a plain clip round-trips identically.
+    expect('freeLength' in parsed.state.clips['c1']).toBe(false)
+    expect('sourceClipId' in parsed.state.clips['c1']).toBe(false)
+  })
+
   test('legacy boolean-loop clips migrate: enabled keeps its period, disabled becomes 0', () => {
     const state = sampleState()
     const withLoop = {

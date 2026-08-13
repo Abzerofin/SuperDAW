@@ -120,7 +120,7 @@ function buildLiveSamplerVoice(
   onEnded?: () => void
 ): LiveVoiceHandle {
   const region = samplerRegion(sp, sample, pitch)
-  if (!region) return { release: () => onEnded?.(), stop: () => onEnded?.() }
+  if (!region) return { sustains: false, release: () => onEnded?.(), stop: () => onEnded?.() }
   const looping = Math.round(sp.smpMode) === 0 && sp.smpLoop >= 0.5
   const now = ctx.currentTime
   const peak = SAMPLER_PEAK * velocity * sp.smpGain
@@ -169,6 +169,8 @@ function buildLiveSamplerVoice(
     }
   }
   return {
+    // A looping region plays forever; a one-shot region runs out on its own.
+    sustains: looping,
     release: (when = ctx.currentTime) => {
       if (phase !== 'held') return
       phase = 'released'
@@ -472,7 +474,7 @@ export function buildLiveInstrumentVoice(
   }
   const sp = { ...synthDefaults(), ...synthParams }
   if (kind === 'sampler') {
-    if (!sample) return { release: () => onEnded?.(), stop: () => onEnded?.() }
+    if (!sample) return { sustains: false, release: () => onEnded?.(), stop: () => onEnded?.() }
     return buildLiveSamplerVoice(ctx, dest, pitch, velocity, sp, sample, onEnded)
   }
   return buildLiveDrumVoice(ctx, dest, pitch, velocity, sp, onEnded)
@@ -487,7 +489,7 @@ function buildLiveDrumVoice(
   onEnded?: () => void
 ): LiveVoiceHandle {
   const parts = buildDrumVoice(ctx, dest, ctx.currentTime, pitch, velocity, sp)
-  if (!parts) return { release: () => onEnded?.(), stop: () => onEnded?.() }
+  if (!parts) return { sustains: false, release: () => onEnded?.(), stop: () => onEnded?.() }
   let remaining = parts.sources.length
   let endedFired = false
   for (const source of parts.sources) {
@@ -503,6 +505,8 @@ function buildLiveDrumVoice(
     }
   }
   return {
+    // Every hit is a fixed-length decay — it always ends by itself.
+    sustains: false,
     // One-shots: a lifted key does not cut a cymbal.
     release: () => {},
     stop: () => {

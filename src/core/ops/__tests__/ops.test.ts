@@ -315,6 +315,20 @@ suite('invert', () => {
     { type: 'track/setSolo', trackId: 't2', soloed: true },
     { type: 'track/reorder', trackId: 't2', index: 0 },
     { type: 'clip/create', clip: clip('c9', 't2', 480), notes: [] },
+    // A free-length solo: the flag is the author's intent and has to
+    // survive the op round-trip like any other clip field.
+    { type: 'clip/create', clip: { ...clip('cs', 'tm', 0, 960), freeLength: true }, notes: [] },
+    // A STAMP of an existing loop: no notes of its own, just the pointer.
+    { type: 'clip/create', clip: { ...clip('cst', 't1', 1920), sourceClipId: 'c1' }, notes: [] },
+    // Growing a loop takes its stamps with it: undo must put back the
+    // loop's length AND every follower's, or a stamp keeps the new size.
+    {
+      type: 'clip/resizeWithNotes',
+      clipId: 'c1',
+      duration: 3840,
+      notes: [{ id: 'ng9', clipId: 'c1', pitch: 38, start: 2880, duration: 240, velocity: 100 }],
+      followers: [{ clipId: 'c2', duration: 3840 }]
+    },
     // A clip created WITH seeded notes — the MIDI-take / import shape:
     // undoing must remove the clip AND its notes in one step.
     { type: 'clip/create', clip: clip('cn', 'tm', 0, 3840), notes: [
@@ -333,6 +347,15 @@ suite('invert', () => {
     ] },
     { type: 'track/group', folder: { ...track('grp', 'Group'), kind: 'folder' }, index: 0, trackIds: ['t1', 't2'] },
     { type: 'clip/resize', clipId: 'c2', start: 960, duration: 1920, offset: 480 },
+    // Programming a step past the end of a pattern: the clip grows and the
+    // notes arrive together, so undo must take back BOTH in one step.
+    { type: 'clip/resizeWithNotes', clipId: 'c1', duration: 7680, notes: [
+      { id: 'ng1', clipId: 'c1', pitch: 36, start: 3840, duration: 240, velocity: 100 },
+      { id: 'ng2', clipId: 'c1', pitch: 42, start: 4320, duration: 240, velocity: 127 }
+    ] },
+    // The inverse shape (shrink + remove) must round-trip too — that IS
+    // what undoing the op above dispatches.
+    { type: 'clip/resizeWithNotes', clipId: 'c1', duration: 960, notes: [], removeNoteIds: ['nA'] },
     { type: 'clip/rename', clipId: 'c2', name: 'Renamed Clip' },
     { type: 'clip/setColor', clipId: 'c1', color: '#e06c75' },
     { type: 'clip/setFades', clipId: 'c1', fadeIn: 120, fadeOut: 240 },

@@ -1,6 +1,7 @@
 import type { Clip, ClipId, PluginInstance, PluginInstanceId, ProjectState, Route, Track, TrackId } from '@core/model/types'
 import {
   automationValueAt,
+  isNoteTrackKind,
   isTrackAudible,
   pluginsOfTrack,
   routesOfTrack
@@ -97,6 +98,33 @@ const FX_AUTO_INTERVAL_MS = 50
  */
 const LIVE_VOICE_CAP = 32
 
+/**
+ * How long a ONE-SHOT trigger lets a never-ending instrument ring before
+ * releasing it for you. A one-shot (a non-gated pad) has no note-off
+ * coming, so a sustaining voice — the analog synth, a looping sampler —
+ * would otherwise sound forever. Long enough to read as "let it ring",
+ * short enough that a mis-set pad is not a stuck note.
+ */
+const ONE_SHOT_HOLD_SEC = 2
+
+/**
+ * One held live voice. `autoOff` is the one-shot safety timer (see
+ * ONE_SHOT_HOLD_SEC); it must be cleared with the voice or a later,
+ * unrelated note on the same pitch would be cut short by it.
+ */
+interface LiveVoiceEntry {
+  readonly handle: LiveVoiceHandle
+  readonly seq: number
+  autoOff: ReturnType<typeof setTimeout> | null
+}
+
+/** Deregister a live voice, cancelling its one-shot timer. */
+function dropLiveVoice(voices: Map<number, LiveVoiceEntry>, key: number): void {
+  const entry = voices.get(key)
+  if (entry && entry.autoOff !== null) clearTimeout(entry.autoOff)
+  voices.delete(key)
+}
+
 /** Seconds of finished VST3 audio produced per window. Also the latency. */
 const PREVIEW_WINDOW_SEC = 2
 /** How far ahead of the playhead preview audio is kept queued. */
@@ -176,7 +204,7 @@ export class AudioEngine {
    * survive stopAllSources. They die with their track (syncMixer's
    * removed-track pass) or when the track's synth is toggled off.
    */
-  private liveVoices = new Map<TrackId, Map<number, { handle: LiveVoiceHandle; seq: number }>>()
+  private liveVoices = new Map<TrackId, Map<number, LiveVoiceEntry>>()
   /** Monotonic voice age, so the cap steals the OLDEST voice. */
   private liveVoiceSeq = 0
 
@@ -438,12 +466,22 @@ export class AudioEngine {
    * Retriggering a held pitch releases the old voice politely; past
    * LIVE_VOICE_CAP the oldest held voice anywhere is stolen. Transport
    * state is irrelevant: auditioning while stopped is the normal case.
+   *
+   * `oneShot` marks a trigger with NO note-off coming (a non-gated pad).
+   * Instruments that end by themselves ring out; one that would sustain
+   * forever gets released after ONE_SHOT_HOLD_SEC, because nothing else
+   * ever will.
    */
-  liveNoteOn(trackId: TrackId, pitch: number, velocity: number): void {
+  liveNoteOn(
+    trackId: TrackId,
+    pitch: number,
+    velocity: number,
+    options: { oneShot?: boolean } = {}
+  ): void {
     const track = this.store.state.tracks[trackId]
     // A frozen track's instrument is baked into its render; a removed or
     // bypassed synth is silent for scheduled notes and must be live too.
-    if (!track || track.kind !== 'midi' || track.frozenAssetId !== null) return
+    if (!track || !isNoteTrackKind(track.kind) || track.frozenAssetId !== null) return
     if (!synthIsAudible(track.synth)) return
     const ctx = this.ensureContext()
     if (ctx.state === 'suspended') void ctx.resume()
@@ -454,7 +492,7 @@ export class AudioEngine {
     const held = voices.get(key)
     if (held) {
       held.handle.release()
-      voices.delete(key)
+      dropLiveVoice(voices, key)
     }
     this.stealOldestLiveVoiceIfFull()
 
@@ -469,10 +507,16 @@ export class AudioEngine {
       () => {
         // Belt and braces: released/stolen voices are already deregistered.
         const current = this.liveVoices.get(trackId)
-        if (current?.get(key)?.seq === seq) current.delete(key)
+        if (current?.get(key)?.seq === seq) dropLiveVoice(current, key)
       }
     )
-    voices.set(key, { handle, seq })
+    const entry: LiveVoiceEntry = { handle, seq, autoOff: null }
+    if (options.oneShot && handle.sustains) {
+      entry.autoOff = setTimeout(() => {
+        if (this.liveVoices.get(trackId)?.get(key)?.seq === seq) this.liveNoteOff(trackId, key)
+      }, ONE_SHOT_HOLD_SEC * 1000)
+    }
+    voices.set(key, entry)
   }
 
   /** The note-off half: begin the release ramp of a held live voice. */
@@ -482,17 +526,25 @@ export class AudioEngine {
     const held = voices?.get(key)
     if (!voices || !held) return
     held.handle.release()
-    voices.delete(key)
+    dropLiveVoice(voices, key)
   }
 
-  /** Kill every held live voice (one track, or all) — hard, near-instant. */
+  /**
+   * Kill every held live voice (one track, or all) — hard, near-instant.
+   * This is the panic button: whenever the path a held note took can no
+   * longer deliver its note-off (a MIDI device unplugged, the window
+   * losing focus, a track removed), the voices it opened end here.
+   */
   liveAllNotesOff(trackId?: TrackId): void {
-    const maps = trackId !== undefined
-      ? ([this.liveVoices.get(trackId)].filter(Boolean) as Map<number, { handle: LiveVoiceHandle; seq: number }>[])
-      : [...this.liveVoices.values()]
+    const maps =
+      trackId !== undefined
+        ? ([this.liveVoices.get(trackId)].filter(Boolean) as Map<number, LiveVoiceEntry>[])
+        : [...this.liveVoices.values()]
     for (const voices of maps) {
-      for (const { handle } of voices.values()) handle.stop()
-      voices.clear()
+      for (const [key] of [...voices]) {
+        voices.get(key)?.handle.stop()
+        dropLiveVoice(voices, key)
+      }
     }
     if (trackId !== undefined) this.liveVoices.delete(trackId)
     else this.liveVoices.clear()
@@ -500,7 +552,7 @@ export class AudioEngine {
 
   private stealOldestLiveVoiceIfFull(): void {
     let total = 0
-    let oldest: { voices: Map<number, { handle: LiveVoiceHandle; seq: number }>; key: number; seq: number } | null = null
+    let oldest: { voices: Map<number, LiveVoiceEntry>; key: number; seq: number } | null = null
     for (const voices of this.liveVoices.values()) {
       for (const [key, voice] of voices) {
         total++
@@ -509,7 +561,7 @@ export class AudioEngine {
     }
     if (total < LIVE_VOICE_CAP || oldest === null) return
     oldest.voices.get(oldest.key)?.handle.stop()
-    oldest.voices.delete(oldest.key)
+    dropLiveVoice(oldest.voices, oldest.key)
   }
 
   // ---------- Performance pads ----------

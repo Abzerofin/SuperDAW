@@ -1,6 +1,7 @@
 import { useSyncExternalStore } from 'react'
 import { createPortal } from 'react-dom'
 import type { Track } from '@core/model/types'
+import { isNoteTrackKind } from '@core/model/types'
 import { buildDuplicateTrackOp } from '@core/ops/duplicateTrack'
 import { projectStore } from '@/state/projectStore'
 import { useProjectSelector } from '@/state/hooks'
@@ -87,7 +88,7 @@ export function TrackMenu({
         panels.openPanel('effects')
       })}
       {canMonitor && menuItem('Input, channels & monitoring…', () => trackInputUi.open(track.id))}
-      {track.kind === 'midi' &&
+      {isNoteTrackKind(track.kind) &&
         !frozen &&
         menuItem('MIDI input & channel…', () => trackInputUi.open(track.id))}
       {track.kind === 'audio' &&

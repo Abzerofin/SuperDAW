@@ -12,6 +12,7 @@ import { RoutingPanel } from './components/routing/RoutingPanel'
 import { AssetDownloadPrompt } from './components/collab/AssetDownloadPrompt'
 import { HistoryPopover } from './components/history/HistoryPopover'
 import { FloatingEffects } from './components/fx/FloatingEffects'
+import { GameInviteNotification } from './components/game/GameInviteNotification'
 import { useEffect } from 'react'
 import { useAppShell } from './state/appShell'
 import { useGlobalShortcuts } from './lib/shortcuts'
@@ -64,6 +65,7 @@ export default function App(): React.JSX.Element {
       <FloatingEffects />
       <HistoryPopover />
       <UiPings />
+      <GameInviteNotification />
     </div>
   )
 }

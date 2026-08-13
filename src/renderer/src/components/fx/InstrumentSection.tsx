@@ -11,17 +11,24 @@ import {
 } from '@core/model/effects'
 import { sliceRegions } from '@core/model/slices'
 import { projectStore } from '@/state/projectStore'
-import { audioEngine, assetStore } from '@/state/audioInstance'
+import { assetStore } from '@/state/audioInstance'
+import { auditionDown, auditionUp } from '@/lib/audition'
 import { assetOnsets } from '@/lib/peakSnap'
 import { BAY_DRAG_MIME, type BayDragPayload } from '@/lib/importAudio'
 import { ParamSlider } from './ParamSlider'
 
 /**
- * The instrument card on a MIDI track: one of three built-in instruments —
+ * The instrument card on a note track: one of three built-in instruments —
  * the analog synth, the sampler, the drum kit — selected by the
  * `instrument` synth param. All params coexist in the one flat record, so
  * switching kinds never loses a knob position, and every control is the
  * ordinary track/setSynthParam op (undoable, synced, clamped in core).
+ *
+ * Which kinds a track may CHOOSE depends on its own kind, and the rule is
+ * deliberately one-way: a drum track can reach for any of them (a kit
+ * built from a sampler is still a kit), while a MIDI track cannot pick the
+ * drum kit — that is what a drum track is for, and the piano roll is the
+ * wrong surface to program one on. See `editorUi.autoFormForTrack`.
  */
 
 const KIND_LABELS: Record<InstrumentKind, string> = {
@@ -38,6 +45,14 @@ export function InstrumentSection({ track }: { track: Track }): React.JSX.Elemen
   const params = { ...synthDefaults(), ...track.synth }
   const kind = instrumentKindOf(params)
   const enabled = params.on >= 0.5
+  /**
+   * Which badges this track offers. The drum kit is a drum-track choice
+   * only — except on a track that somehow already holds it (an older
+   * project, a peer's edit), where hiding the button would leave the
+   * instrument unnameable and impossible to switch away from.
+   */
+  const offersKind = (candidate: InstrumentKind): boolean =>
+    candidate !== 'drums' || track.kind === 'drum' || kind === 'drums'
   const setParam = (param: string, value: number): void => {
     projectStore.dispatch({ type: 'track/setSynthParam', trackId: track.id, param, value })
   }
@@ -54,16 +69,18 @@ export function InstrumentSection({ track }: { track: Track }): React.JSX.Elemen
         </button>
         <span className="fx-section-title">{KIND_LABELS[kind]}</span>
         <div className="fx-waves">
-          {INSTRUMENT_KINDS.map((k, index) => (
-            <button
-              key={k}
-              className={`fx-wave fx-inst-kind ${kind === k ? 'fx-wave-active' : ''}`}
-              title={KIND_LABELS[k]}
-              onClick={() => setParam('instrument', index)}
-            >
-              {KIND_BADGES[k]}
-            </button>
-          ))}
+          {INSTRUMENT_KINDS.map((k, index) =>
+            offersKind(k) ? (
+              <button
+                key={k}
+                className={`fx-wave fx-inst-kind ${kind === k ? 'fx-wave-active' : ''}`}
+                title={KIND_LABELS[k]}
+                onClick={() => setParam('instrument', index)}
+              >
+                {KIND_BADGES[k]}
+              </button>
+            ) : null
+          )}
         </div>
         <button
           className="fx-remove"
@@ -151,9 +168,9 @@ function SamplerBody({ track, params, setParam }: BodyProps & { track: Track }):
             <button
               className="smp-audition"
               title="Audition (plays through the track's effects)"
-              onPointerDown={() => audioEngine.liveNoteOn(track.id, params.smpRoot, 1)}
-              onPointerUp={() => audioEngine.liveNoteOff(track.id, params.smpRoot)}
-              onPointerLeave={() => audioEngine.liveNoteOff(track.id, params.smpRoot)}
+              onPointerDown={() => auditionDown(track.id, params.smpRoot, 1)}
+              onPointerUp={() => auditionUp(track.id, params.smpRoot)}
+              onPointerLeave={() => auditionUp(track.id, params.smpRoot)}
             >
               ▶
             </button>
@@ -248,10 +265,10 @@ function DrumBody({ track, params, setParam }: BodyProps & { track: Track }): Re
             title={`${p.label} — click to audition, edit its knobs below`}
             onPointerDown={() => {
               setSelected(p.key)
-              audioEngine.liveNoteOn(track.id, p.pitch, 0.9)
+              auditionDown(track.id, p.pitch, 0.9)
             }}
-            onPointerUp={() => audioEngine.liveNoteOff(track.id, p.pitch)}
-            onPointerLeave={() => audioEngine.liveNoteOff(track.id, p.pitch)}
+            onPointerUp={() => auditionUp(track.id, p.pitch)}
+            onPointerLeave={() => auditionUp(track.id, p.pitch)}
           >
             {p.label}
           </button>

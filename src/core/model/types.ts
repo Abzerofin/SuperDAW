@@ -5,8 +5,41 @@ import { DEFAULT_PROJECT_SETTINGS, type ProjectSettings } from './projectSetting
 export type TrackId = string
 export type ClipId = string
 export type FileNodeId = string
-/** 'folder' tracks are grouping buses: no clips, children route through them. */
-export type TrackKind = 'audio' | 'midi' | 'folder'
+/**
+ * 'folder' tracks are grouping buses: no clips, children route through them.
+ * 'midi' and 'drum' are both NOTE tracks — same clips, same notes, same
+ * instrument slot — separated because a kit is played, edited and mixed
+ * differently from a melodic part: a drum track opens on the step grid,
+ * defaults to the drum instrument, and reads as its own thing in the
+ * arrangement. Nothing stops a drum track from being played by a MIDI
+ * keyboard or an electronic kit; the kind describes the MATERIAL, not the
+ * controller. Use `isNoteTrackKind` for note logic rather than testing
+ * for 'midi', or drum tracks silently lose notes.
+ */
+export type TrackKind = 'audio' | 'midi' | 'drum' | 'folder'
+
+/** Track kinds that hold MIDI notes and drive an instrument. */
+export function isNoteTrackKind(kind: TrackKind): boolean {
+  return kind === 'midi' || kind === 'drum'
+}
+
+/** Names and header badges for the track kinds — one source for every menu. */
+export const TRACK_KIND_LABELS: Readonly<Record<TrackKind, string>> = {
+  audio: 'Audio',
+  midi: 'MIDI',
+  drum: 'Drum',
+  folder: 'Folder'
+}
+
+export const TRACK_KIND_BADGES: Readonly<Record<TrackKind, string>> = {
+  audio: 'A',
+  midi: 'M',
+  drum: 'D',
+  folder: 'F'
+}
+
+/** The kinds a user can create, in the order the menus offer them. */
+export const CREATABLE_TRACK_KINDS: readonly TrackKind[] = ['audio', 'midi', 'drum', 'folder']
 export type FileNodeKind = 'folder' | 'audio' | 'midi'
 
 /**
@@ -34,11 +67,42 @@ export interface Clip {
   /** Length in ticks. */
   readonly duration: number
   /**
-   * Audio asset this clip plays, or null (empty/MIDI clip). Asset binary
-   * data is a separate system from project state (see ARCHITECTURE.md);
-   * the document only ever references assets by id.
+   * Audio asset this clip plays, or null (a note clip). Asset binary data
+   * is a separate system from project state (see ARCHITECTURE.md); the
+   * document only ever references assets by id.
    */
   readonly assetId: string | null
+  /**
+   * A PATTERN: this clip is bank material, not something on the timeline.
+   * It lives in the step panel — the drum loops A, B, C — and never plays
+   * at a position of its own; only STAMPS of it do (see `sourceClipId`).
+   *
+   * The dependency runs one way: clips on the track depend on the pattern,
+   * never the reverse. Deleting a stamp therefore leaves the pattern in the
+   * bank, ready to stamp again — which is the whole reason a pattern is a
+   * separate thing from the clips that place it.
+   *
+   * `start` is meaningless on one (it is nowhere); `duration` is the
+   * pattern's LENGTH. Optional so every pre-existing clip stays exactly
+   * what it was: an ordinary clip on the timeline.
+   */
+  readonly isPattern?: boolean
+  /**
+   * A STAMP: this clip plays another clip's notes instead of owning any.
+   * Stamping a drum loop along the track makes copies that all follow the
+   * original — edit the source and every stamp changes with it, which is
+   * the whole point of stamping a loop rather than duplicating it.
+   *
+   * The notes themselves never move: `notesOfClip` is the one accessor and
+   * it resolves this, so nothing else in the app has to know. A stamp
+   * whose source has gone plays nothing, exactly as a clip whose asset has
+   * not arrived plays nothing — no special repair, and undo brings the
+   * source back.
+   *
+   * Optional so audio clips and every pre-existing document need no
+   * migration (absent = the clip owns its own notes).
+   */
+  readonly sourceClipId?: ClipId | null
   /** Offset into the source material, in ticks (grows when trimming the left edge). */
   readonly offset: number
   /** null = inherit the track color. */
@@ -69,6 +133,21 @@ export interface Clip {
    * loop handle; a period >= the clip's duration plays like no loop.
    */
   readonly loopLength: number
+  /**
+   * This clip's length is NOT bound to measures — a drum solo or fill,
+   * which runs for as long as the playing needs rather than a quarter,
+   * half or whole measure like the lettered loops. Programming a step past
+   * its end extends it exactly to that step instead of rounding up to the
+   * next bar.
+   *
+   * Optional so pre-existing documents need no migration (absent = a
+   * measure-shaped loop), following `samplerAssetId`. It is the author's
+   * INTENT, not a derived fact — a solo that happens to land on a bar line
+   * is still a solo — so it is document state: it saves with the project
+   * and reaches collaborators, who would otherwise see it start rounding
+   * to bars on their machine.
+   */
+  readonly freeLength?: boolean
 }
 
 /** Clamp bounds shared by the reducer and the UI controls. */
@@ -447,6 +526,12 @@ export function isTrackEffectivelyAudible(state: ProjectState, trackId: TrackId)
   return true
 }
 
+/** True when the track exists and holds notes (a MIDI or drum track). */
+export function isNoteTrack(state: ProjectState, trackId: TrackId): boolean {
+  const track = state.tracks[trackId]
+  return track !== undefined && isNoteTrackKind(track.kind)
+}
+
 /** A track's insert chain in processing order. */
 export function pluginsOfTrack(state: ProjectState, trackId: TrackId): PluginInstance[] {
   return Object.values(state.plugins)
@@ -459,10 +544,69 @@ export function routesOfTrack(state: ProjectState, trackId: TrackId): Route[] {
   return Object.values(state.routes).filter((r) => r.trackId === trackId)
 }
 
+/**
+ * Which clip actually OWNS the notes a clip plays: itself, or the loop it
+ * was stamped from. One hop only — a stamp of a stamp resolves to the same
+ * source, so this can never cycle however the document was assembled.
+ */
+export function noteSourceOf(state: ProjectState, clipId: ClipId): ClipId {
+  const source = state.clips[clipId]?.sourceClipId
+  return source && state.clips[source] ? source : clipId
+}
+
+/**
+ * The notes a clip sounds. Starts stay clip-relative, so a stamp plays the
+ * source's notes at its own position — and an edit to the source is heard
+ * in every stamp of it, because there is only ever one set of notes.
+ */
 export function notesOfClip(state: ProjectState, clipId: ClipId): Note[] {
+  const ownerId = noteSourceOf(state, clipId)
   return Object.values(state.notes)
-    .filter((n) => n.clipId === clipId)
+    .filter((n) => n.clipId === ownerId)
     .sort((a, b) => a.start - b.start || a.pitch - b.pitch)
+}
+
+/** Every clip stamped from this one (not including itself). */
+export function stampsOf(state: ProjectState, clipId: ClipId): Clip[] {
+  return Object.values(state.clips)
+    .filter((c) => c.sourceClipId === clipId)
+    .sort((a, b) => a.start - b.start)
+}
+
+/**
+ * The clips that are actually ON the timeline. Patterns are bank material
+ * and live nowhere, so everything that draws, schedules or measures the
+ * arrangement asks for these rather than every clip in the document.
+ */
+export function timelineClips(state: ProjectState): Clip[] {
+  return Object.values(state.clips).filter((c) => !c.isPattern)
+}
+
+/**
+ * A track's bank: the material it can play, which is every note clip that
+ * OWNS its notes. That covers both kinds — patterns, which live only in
+ * the bank, and ordinary note clips, which also sit on the timeline (every
+ * clip predating patterns is one of these, so old projects keep working
+ * and can be stamped like anything else). Stamps are excluded: they are
+ * the same material somewhere else, and a bank reading "A, A, A" would
+ * list positions rather than material.
+ */
+export function patternsOfTrack(state: ProjectState, trackId: TrackId): Clip[] {
+  return Object.values(state.clips)
+    .filter((c) => c.trackId === trackId && c.assetId === null && !c.sourceClipId)
+    .sort((a, b) =>
+      a.isPattern === b.isPattern
+        ? a.name < b.name
+          ? -1
+          : a.name > b.name
+            ? 1
+            : a.id < b.id
+              ? -1
+              : 1
+        : a.isPattern
+          ? -1
+          : 1
+    )
 }
 
 /**

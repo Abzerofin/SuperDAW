@@ -1,5 +1,6 @@
 import { useSyncExternalStore } from 'react'
 import type { TrackId } from '@core/model/types'
+import { isNoteTrackKind } from '@core/model/types'
 import { newId } from '@core/model/ids'
 import { buildMidiTakeOp, type MidiTake } from '@core/ops/midiTake'
 import { Recorder } from '@audio/recorder'
@@ -114,7 +115,7 @@ class RecordingStore {
       const track = state.tracks[id]
       return (
         track !== undefined &&
-        (track.kind === 'audio' || track.kind === 'midi') &&
+        (track.kind === 'audio' || isNoteTrackKind(track.kind)) &&
         track.frozenAssetId === null
       )
     })
@@ -187,7 +188,7 @@ class RecordingStore {
       this.midiCaptures.clear()
       for (const trackId of this.armedIds()) {
         const track = projectStore.state.tracks[trackId]
-        if (track?.kind === 'midi' && track.frozenAssetId === null) {
+        if (track !== undefined && isNoteTrackKind(track.kind) && track.frozenAssetId === null) {
           this.midiCaptures.set(trackId, { trackId, active: new Map(), closed: [] })
         }
       }
@@ -227,7 +228,12 @@ class RecordingStore {
       // its first event — the clock anchor already stands, so late sinks
       // land on the same timeline as the ones built at beginRoll.
       const track = projectStore.state.tracks[trackId]
-      if (!this.armedTracks.has(trackId) || track?.kind !== 'midi' || track.frozenAssetId !== null)
+      if (
+        !this.armedTracks.has(trackId) ||
+        track === undefined ||
+        !isNoteTrackKind(track.kind) ||
+        track.frozenAssetId !== null
+      )
         return
       capture = { trackId, active: new Map(), closed: [] }
       this.midiCaptures.set(trackId, capture)
