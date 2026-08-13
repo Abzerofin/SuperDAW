@@ -54,7 +54,10 @@ export function conformTrackAudioToTempo(trackId: TrackId): void {
     if (clip.trackId !== trackId || clip.assetId === null) continue
     const assetSec = assetStore.getSeconds(clip.assetId)
     if (assetSec === null || assetSec <= 0) continue
-    const semis = Math.pow(2, clip.pitch / 12)
+    // Tape timeline length = source · stretch / 2^(pitch/12), so the pitch
+    // factor must be compensated; warped length = source · stretch — pitch
+    // is independent of timing there, by design.
+    const semis = clip.warp ? 1 : Math.pow(2, clip.pitch / 12)
     const period =
       clip.loopLength > 0 ? Math.min(clip.loopLength, clip.duration) : clip.duration
     const stretch =

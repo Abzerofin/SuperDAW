@@ -1,6 +1,13 @@
 import { useSyncExternalStore } from 'react'
 import type { Clip } from '@core/model/types'
-import { MAX_PITCH, MAX_STRETCH, MIN_PITCH, MIN_STRETCH, clipRate } from '@core/model/types'
+import {
+  MAX_PITCH,
+  MAX_STRETCH,
+  MIN_PITCH,
+  MIN_STRETCH,
+  clipPlaybackRate,
+  clipWarpFactor
+} from '@core/model/types'
 import { ticksPerSecond } from '@audio/scheduling'
 import { projectStore } from '@/state/projectStore'
 import { assetStore } from '@/state/audioInstance'
@@ -27,10 +34,11 @@ import { collab, useCollab } from '@/state/collab'
 /**
  * Per-clip editing: slice, reverse, transpose, time-scale and colour.
  *
- * Pitch and length are RESAMPLING (tape/sampler behaviour) — the honest
- * mapping onto the buffer-source primitives; formant-preserving stretch
- * needs the dedicated DSP milestone. Each control is one gesture and one
- * operation, so everything here is undoable and syncs like any edit.
+ * Pitch and length default to RESAMPLING (tape/sampler behaviour); the
+ * Warp toggle switches the clip to the phase-vocoder path, where length
+ * changes keep the pitch and pitch changes keep the timing (Clip.warp).
+ * Each control is one gesture and one operation, so everything here is
+ * undoable and syncs like any edit.
  */
 
 const PITCH_STEP = 1 // semitone
@@ -57,21 +65,32 @@ export function ClipMenu({
   const missingAsset = clip.assetId !== null && !asset
   const progress = clip.assetId ? collabState.assetProgress.get(clip.assetId) : undefined
 
-  const setPlayback = (patch: Partial<Pick<Clip, 'reverse' | 'pitch' | 'stretch'>>): void => {
+  const setPlayback = (
+    patch: Partial<Pick<Clip, 'reverse' | 'pitch' | 'stretch' | 'warp'>>
+  ): void => {
     projectStore.dispatch({
       type: 'clip/setPlayback',
       clipId: clip.id,
       reverse: patch.reverse ?? clip.reverse,
       pitch: patch.pitch ?? clip.pitch,
-      stretch: patch.stretch ?? clip.stretch
+      stretch: patch.stretch ?? clip.stretch,
+      warp: patch.warp ?? clip.warp ?? false
     })
   }
 
-  // How much timeline the clip's source material covers at the current rate.
+  // How much timeline the clip's source material covers at the current
+  // playback settings (warped material is warpFactor× the source, read at
+  // the pitch-only rate — for tape clips this reduces to 1/clipRate).
   const assetSeconds = clip.assetId ? assetStore.getSeconds(clip.assetId) : null
   const materialTicks =
     assetSeconds !== null
-      ? Math.max(1, Math.round((assetSeconds * ticksPerSecond(tempo)) / clipRate(clip)) - clip.offset)
+      ? Math.max(
+          1,
+          Math.round(
+            (assetSeconds * ticksPerSecond(tempo) * clipWarpFactor(clip)) /
+              clipPlaybackRate(clip)
+          ) - clip.offset
+        )
       : null
 
   const fitClipToMaterial = (): void => {
@@ -321,8 +340,21 @@ export function ClipMenu({
           >
             <span>Fit clip to material</span>
           </button>
+          <button
+            className="menu-item"
+            title={
+              clip.warp
+                ? 'Back to tape-style resampling (pitch and length affect each other)'
+                : 'Phase-vocoder playback: length keeps the pitch, pitch keeps the timing'
+            }
+            onClick={() => setPlayback({ warp: !(clip.warp ?? false) })}
+          >
+            <span>{clip.warp ? '✓ Warp (keep pitch)' : 'Warp (keep pitch)'}</span>
+          </button>
           <p className="clipmenu-note">
-            Pitch and length resample the audio, like tape speed — they affect each other.
+            {clip.warp
+              ? 'Warp is on: length and pitch are independent (the audio is re-timed, not resampled).'
+              : 'Pitch and length resample the audio, like tape speed — they affect each other.'}
           </p>
         </>
       )}

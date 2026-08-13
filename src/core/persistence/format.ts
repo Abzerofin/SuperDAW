@@ -181,10 +181,14 @@ function normalizeState(state: ProjectState): ProjectState {
   // `loopLength`, so an enabled loop survives; a disabled one becomes 0.
   const clips: Record<string, Clip> = {}
   for (const [id, clip] of Object.entries(merged.clips)) {
-    const { loop: legacyLoopFlag, ...rest } = clip as Clip & { loop?: boolean }
+    const {
+      loop: legacyLoopFlag,
+      warp: rawWarp,
+      ...rest
+    } = clip as Clip & { loop?: boolean; warp?: unknown }
     const legacy = rest as Omit<
       Clip,
-      'fadeIn' | 'fadeOut' | 'reverse' | 'pitch' | 'stretch' | 'loopLength'
+      'fadeIn' | 'fadeOut' | 'reverse' | 'pitch' | 'stretch' | 'loopLength' | 'warp'
     > &
       Partial<Clip>
     clips[id] = {
@@ -194,7 +198,9 @@ function normalizeState(state: ProjectState): ProjectState {
       reverse: legacy.reverse ?? false,
       pitch: legacy.pitch ?? 0,
       stretch: legacy.stretch ?? 1,
-      loopLength: legacyLoopFlag === false ? 0 : (legacy.loopLength ?? 0)
+      loopLength: legacyLoopFlag === false ? 0 : (legacy.loopLength ?? 0),
+      // Additive: pre-warp files have none; junk collapses to tape mode.
+      ...(rawWarp === true ? { warp: true } : {})
     }
   }
   // Pads re-earn their place through the reducer's own sanitizer —

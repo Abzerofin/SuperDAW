@@ -882,7 +882,14 @@ export class AudioEngine {
    * together. Reversed mirrors follow the same keepReversed rule the
    * store's own cache applies.
    */
-  pruneAdoptedBuffers(evicted: ReadonlySet<string>, keepReversed: ReadonlySet<string>): void {
+  /** Backend registrations of warped variants, per asset (for pruning). */
+  private warpedKeysByAsset = new Map<string, Set<string>>()
+
+  pruneAdoptedBuffers(
+    evicted: ReadonlySet<string>,
+    keepReversed: ReadonlySet<string>,
+    keepWarped: ReadonlySet<string> = new Set()
+  ): void {
     const backend = this.backend
     if (!backend) return
     for (const assetId of [...this.adoptedBufferSource.keys()]) {
@@ -894,13 +901,50 @@ export class AudioEngine {
         backend.releaseBuffer(`${assetId}!r`)
       }
     }
+    for (const [assetId, keys] of [...this.warpedKeysByAsset]) {
+      for (const key of [...keys]) {
+        // Backend keys embed the same asset@factor identity the store's
+        // warpCacheKeys carry; a key whose cache entry is being kept stays.
+        const cacheKey = key.replace('!w', '@').replace(/!r$/, '')
+        if (evicted.has(assetId) || !keepWarped.has(cacheKey)) {
+          backend.releaseBuffer(key)
+          keys.delete(key)
+        }
+      }
+      if (keys.size === 0) this.warpedKeysByAsset.delete(assetId)
+    }
   }
 
-  private ensureBufferRegistered(assetId: string, reverse: boolean): string | null {
+  private ensureBufferRegistered(
+    assetId: string,
+    reverse: boolean,
+    warpFactor = 1
+  ): string | null {
     const backend = this.ensureBackend()
-    const key = reverse ? `${assetId}!r` : assetId
     const asset = this.assets.get(assetId)
     if (!asset?.buffer) return null
+    // Warped variants: registered (copied) from the store's stretched
+    // channels; null = still computing, the clip stays silent and the
+    // store's completion event re-queues it — transfer semantics.
+    if (warpFactor !== 1) {
+      const key = `${assetId}!w${warpFactor.toFixed(4)}${reverse ? '!r' : ''}`
+      if (backend.hasBuffer(key)) return key
+      const channels = this.assets.getWarpedChannels(assetId, warpFactor)
+      if (!channels) return null
+      const registered = reverse
+        ? channels.map((data) => {
+            const out = new Float32Array(data.length)
+            for (let i = 0, j = data.length - 1; i < data.length; i++, j--) out[i] = data[j]
+            return out
+          })
+        : channels
+      backend.registerBuffer(key, registered, asset.buffer.sampleRate)
+      let keys = this.warpedKeysByAsset.get(assetId)
+      if (!keys) this.warpedKeysByAsset.set(assetId, (keys = new Set()))
+      keys.add(key)
+      return key
+    }
+    const key = reverse ? `${assetId}!r` : assetId
     if (backend.hasBuffer(key) && this.adoptedBufferSource.get(assetId) === asset.buffer) {
       return key
     }
@@ -1887,7 +1931,7 @@ export class AudioEngine {
       // Previewed tracks: their finished audio (inserts included) arrives
       // as rendered windows — playing the dry clip too would double it.
       if (this.previewTracks.has(s.trackId)) continue
-      const bufferId = this.ensureBufferRegistered(s.assetId, s.reverse)
+      const bufferId = this.ensureBufferRegistered(s.assetId, s.reverse, s.warpFactor)
       if (!bufferId) continue
       const dest = this.destinationFor(
         s.clipId,

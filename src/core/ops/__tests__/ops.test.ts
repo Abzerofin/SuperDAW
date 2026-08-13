@@ -231,6 +231,8 @@ suite('invert', () => {
     { type: 'project/setTempo', tempo: 140 },
     // Conforming variant: undo must restore the clip's previous stretch.
     { type: 'project/setTempo', tempo: 160, conform: [{ clipId: 'c1', stretch: 0.75 }] },
+    // Warp toggle rides setPlayback; undo restores the previous mode.
+    { type: 'clip/setPlayback', clipId: 'c1', reverse: false, pitch: 3, stretch: 1.5, warp: true },
     { type: 'project/setTimeSignature', timeSignature: [7, 8] },
     { type: 'project/updateSettings', patch: { loudnessTargetLufs: -14, swingPercent: 55 } },
     {

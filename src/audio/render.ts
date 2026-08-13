@@ -4,6 +4,7 @@ import {
   automationOf,
   automationValueAt,
   clipsOfTrack,
+  clipWarpFactor,
   isTrackAudible,
   pluginsOfTrack,
   routesOfTrack
@@ -42,6 +43,30 @@ interface AssetSourceLike {
     id: string,
     create: (channels: Float32Array[], sampleRate: number) => AudioBuffer
   ): AudioBuffer | null
+  /** Stretched channels for warped clips — sync read of the store's cache. */
+  warpedChannels?(id: string, factor: number): Float32Array[] | null
+  /** Compute (and cache) a warped variant — renders pre-warm through this. */
+  ensureWarped?(id: string, factor: number): Promise<Float32Array[] | null>
+}
+
+/**
+ * Compute every warped variant the state's clips play BEFORE the graph is
+ * built — the schedule pass is synchronous, so the phase-vocoder work
+ * (async, sliced) must already be in the cache when it runs. Absent
+ * methods (test fakes) leave warped clips silent, like a missing asset.
+ */
+async function prewarmWarpedClips(state: ProjectState, assets: AssetSourceLike): Promise<void> {
+  if (!assets.ensureWarped) return
+  const wanted = new Map<string, [string, number]>()
+  for (const clip of Object.values(state.clips)) {
+    const factor = clipWarpFactor(clip)
+    if (clip.assetId !== null && factor !== 1) {
+      wanted.set(`${clip.assetId}@${factor}`, [clip.assetId, factor])
+    }
+  }
+  for (const [assetId, factor] of wanted.values()) {
+    await assets.ensureWarped(assetId, factor)
+  }
 }
 
 /** Resolve a track's sampler sample, mirroring the live engine exactly. */
@@ -255,6 +280,16 @@ function scheduleSources(
     return gain
   }
 
+  const makeBuffer = (channels: readonly Float32Array[], sampleRate: number): AudioBuffer => {
+    const b = ctx.createBuffer(channels.length, channels[0].length, sampleRate)
+    channels.forEach((data, ch) => b.copyToChannel(data as Float32Array<ArrayBuffer>, ch))
+    return b
+  }
+  const mirror = (data: Float32Array): Float32Array => {
+    const out = new Float32Array(data.length)
+    for (let i = 0, j = data.length - 1; i < data.length; i++, j--) out[i] = data[j]
+    return out
+  }
   for (const s of scheduleClips(
     state,
     (id) => assets.getSeconds(id),
@@ -263,14 +298,21 @@ function scheduleSources(
     untilTicks
   )) {
     const plain = assets.get(s.assetId)?.buffer
-    // Reversed clips read the mirrored copy, exactly as in live playback.
-    const buffer = s.reverse
-      ? (assets.reversedBuffer?.(s.assetId, (channels, sampleRate) => {
-          const b = ctx.createBuffer(channels.length, channels[0].length, sampleRate)
-          channels.forEach((data, ch) => b.copyToChannel(data as Float32Array<ArrayBuffer>, ch))
-          return b
-        }) ?? null)
-      : plain
+    let buffer: AudioBuffer | null
+    if (s.warpFactor !== 1) {
+      // Warped clips read the pre-stretched copy (pre-warmed by the async
+      // entry points); reversal mirrors the WARPED material, as live.
+      const channels = assets.warpedChannels?.(s.assetId, s.warpFactor) ?? null
+      buffer =
+        channels && plain
+          ? makeBuffer(s.reverse ? channels.map(mirror) : channels, plain.sampleRate)
+          : null
+    } else if (s.reverse) {
+      // Reversed clips read the mirrored copy, exactly as in live playback.
+      buffer = assets.reversedBuffer?.(s.assetId, makeBuffer) ?? null
+    } else {
+      buffer = plain ?? null
+    }
     const dest = destinationFor(s.clipId, s.trackId)
     if (!buffer || !dest) continue
     const source = ctx.createBufferSource()
@@ -354,6 +396,7 @@ export async function renderMixdownChannels(
     panners.get(trackId)!.connect(parentInput ?? master)
   }
 
+  await prewarmWarpedClips(state, assets)
   scheduleSources(ctx, state, assets, inputs)
 
   const rendered = await ctx.startRendering()
@@ -424,6 +467,8 @@ export async function renderTrackFreeze(
         (i) => i.enabled && !pluginRegistry.resolve(i.descriptor) && external.has(i.descriptor)
       )
     : []
+
+  await prewarmWarpedClips(state, assets)
 
   // Fast path: nothing needs the out-of-process host, so the whole chain
   // is one Web Audio pass exactly as before. Graph-routed tracks take it
@@ -533,6 +578,7 @@ export async function renderPreviewWindow(
   const totalFrames = Math.ceil((preRollSec + windowSec) * sampleRate)
   const ctx = new OfflineAudioContext(2, totalFrames, sampleRate)
 
+  await prewarmWarpedClips(state, assets)
   const input = ctx.createGain()
   // Only the LOCAL inserts here; externals are applied afterwards by held
   // instances, which is the whole reason their state survives windows.

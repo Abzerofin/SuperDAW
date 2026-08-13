@@ -94,6 +94,30 @@ suite('scheduleClips', () => {
     expect(scheduleClips(s, tenSecondAsset, 0, 0)).toHaveLength(0)
   })
 
+  test('warped clips read the stretched copy at the pitch-only rate', () => {
+    // warp + stretch 2 + pitch +12: buffer = 4× the source (2 · 2^(12/12)),
+    // read at rate 2 — so the timeline sees length × 2 (stretch alone) and
+    // the pitch rides the resample without re-timing anything.
+    const s = stateWith([
+      { start: 0, duration: PPQ * 4, offset: 960, stretch: 2, pitch: 12, warp: true }
+    ])
+    const [sched] = scheduleClips(s, tenSecondAsset, 0, 100)
+    expect(sched.warpFactor).toBeCloseTo(4)
+    expect(sched.rate).toBeCloseTo(2)
+    // Offset ticks map through the pitch-only rate into WARPED seconds.
+    expect(sched.offsetSec).toBeCloseTo((960 / TPS) * 2)
+    // 2 timeline seconds consume 4 buffer seconds at rate 2 — well inside
+    // the 40 warped seconds the 10 s source stretches to.
+    expect(sched.durationSec).toBeCloseTo(4)
+  })
+
+  test('a tape clip with the same numbers still couples pitch and time', () => {
+    const s = stateWith([{ start: 0, duration: PPQ * 4, stretch: 2, pitch: 12 }])
+    const [sched] = scheduleClips(s, tenSecondAsset, 0, 100)
+    expect(sched.warpFactor).toBe(1)
+    expect(sched.rate).toBeCloseTo(1) // 2^(12/12) / 2
+  })
+
 
   test('pitching up an octave reads the buffer twice as fast', () => {
     const s = stateWith([{ start: 0, duration: PPQ * 4, pitch: 12 }])

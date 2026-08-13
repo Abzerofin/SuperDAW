@@ -507,11 +507,22 @@ looping, trimming and mid-clip resume all stay correct under resampling.
 Reversed clips read a mirrored copy of the ASSET, cached once per asset by
 `AssetStore.reversedBuffer` and shared by every clip using it.
 
-**These are resampling, i.e. tape/sampler behaviour**: transposing also
-changes how fast the material is consumed, and time-scaling transposes.
-Formant-preserving independent stretch needs the PSOLA/phase-vocoder
-worklet the roadmap defers to its own DSP milestone; the UI says so rather
-than implying otherwise. Slicing is the existing `clip/split`.
+**Two playback modes.** Default is resampling, i.e. tape/sampler
+behaviour: transposing also changes how fast the material is consumed,
+and time-scaling transposes. `Clip.warp` (the clip menu's "Warp (keep
+pitch)") switches to the phase-vocoder path: the clip plays a
+pre-stretched copy of its source (factor `clipWarpFactor` =
+stretch · 2^(pitch/12)) at the pitch-only rate, so stretch re-times
+without transposing and pitch transposes without re-timing. The stretch
+itself is pure DSP (`audio/phaseVocoder.ts`: STFT with identity phase
+locking, unit-tested for pitch/length/level preservation, deterministic
+on every machine); warped copies are derived data cached per
+(asset, factor) beside reversed copies — computed async and sliced (a
+clip is silent until its copy lands, exactly like a transferring asset,
+and the store's completion event re-queues it), evicted by the same
+policy, never persisted or transferred. The offline renders pre-warm the
+cache before building their graphs, so bounces and freezes match
+playback. Slicing is the existing `clip/split`.
 
 ## Track kinds (audio · midi · drum · folder)
 
@@ -1015,7 +1026,18 @@ anyone raises the comfortable ~100-200-track ceiling.
     ADOPTED zero-copy and released alongside assetMemory eviction
     (`pruneAdoptedBuffers`), so decoded memory stays bounded.
 
-31. ✅ **Loopback latency calibration** (NATIVE_AUDIO_BACKEND.md phase 1)
+31. ✅ **Tempo & warp** — the trim-point fix (see the audio-engine
+    section's tempo note: `project/setTempo` preserves un-conformed audio
+    clips' physical trim points, with exact undo via the op's `offsets`
+    list) and formant-preserving stretch (`Clip.warp` + the
+    phase-vocoder path — see Clip playback). New op coverage: derived
+    rescale/exemptions/idempotency/rounding-exact undo for setTempo;
+    warp round-trips on `clip/setPlayback`; warped schedule math; DSP
+    pitch/length/level preservation; an end-to-end engine check
+    (`parity.ts runWarpCheck`: warp+stretch 2 renders 2× longer at the
+    same 440 Hz).
+
+32. ✅ **Loopback latency calibration** (NATIVE_AUDIO_BACKEND.md phase 1)
     — Settings ▸ Audio measures the true round-trip: three exponential
     chirps played at known clock times, captured through the recording
     worklet, located by FFT matched filter with peak-to-sidelobe

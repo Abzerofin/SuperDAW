@@ -1,5 +1,5 @@
 import type { Clip, ProjectState } from '@core/model/types'
-import { clipRate } from '@core/model/types'
+import { clipPlaybackRate, clipWarpFactor } from '@core/model/types'
 import { ticksPerSecond } from '@audio/scheduling'
 import { onsetsForPeaks } from '@audio/onsets'
 import { assetStore } from '@/state/audioInstance'
@@ -34,12 +34,14 @@ export function clipOnsetTicks(clip: Clip, tps: number): number[] {
   if (clip.assetId === null) return []
   const asset = assetStore.get(clip.assetId)
   if (asset?.seconds == null) return []
-  const rate = clipRate(clip)
+  // Source seconds → timeline ticks: warped material is warpFactor× the
+  // source read at the pitch-only rate (tape reduces to 1/clipRate).
+  const scale = clipWarpFactor(clip) / clipPlaybackRate(clip)
   const windowTicks = clip.loopLength > 0 ? Math.min(clip.loopLength, clip.duration) : clip.duration
   const out: number[] = []
   for (const sec of assetOnsets(clip.assetId)) {
     const bufferSec = clip.reverse ? asset.seconds - sec : sec
-    const ticks = (bufferSec * tps) / rate - clip.offset
+    const ticks = bufferSec * tps * scale - clip.offset
     if (ticks >= 0 && ticks < windowTicks) out.push(ticks)
   }
   return out.sort((a, b) => a - b)

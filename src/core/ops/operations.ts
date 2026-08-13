@@ -336,9 +336,18 @@ export type Operation =
    * How the clip's source material is played back: backwards, transposed
    * and/or time-scaled. Carried together (like fades) because they are one
    * family of sample-playback settings; each UI gesture sends the current
-   * value of the others.
+   * value of the others. `warp` switches stretch/pitch to the
+   * formant-preserving phase-vocoder path (see Clip.warp); undefined
+   * keeps the clip's current mode, so pre-warp ops replay unchanged.
    */
-  | { type: 'clip/setPlayback'; clipId: ClipId; reverse: boolean; pitch: number; stretch: number }
+  | {
+      type: 'clip/setPlayback'
+      clipId: ClipId
+      reverse: boolean
+      pitch: number
+      stretch: number
+      warp?: boolean
+    }
   /**
    * Cut a clip in two at an absolute tick position. `rightName`/`rightColor`/
    * `leftDuration`/`rightFades`/`leftFadeOut` exist so that inverting a

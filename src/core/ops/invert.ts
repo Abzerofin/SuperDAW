@@ -600,7 +600,8 @@ export function invert(state: ProjectState, op: Operation): Operation | null {
         clipId: op.clipId,
         reverse: clip.reverse,
         pitch: clip.pitch,
-        stretch: clip.stretch
+        stretch: clip.stretch,
+        warp: clip.warp ?? false
       }
     }
 

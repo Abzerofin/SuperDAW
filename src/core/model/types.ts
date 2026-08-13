@@ -134,6 +134,14 @@ export interface Clip {
    */
   readonly loopLength: number
   /**
+   * Formant-preserving playback (audio clips): stretch re-times WITHOUT
+   * transposing and pitch transposes WITHOUT re-timing, via a
+   * phase-vocoder-stretched copy of the source (see clipWarpFactor).
+   * Absent/false = the original tape-style resample. Optional so every
+   * pre-warp document loads unchanged.
+   */
+  readonly warp?: boolean
+  /**
    * This clip's length is NOT bound to measures — a drum solo or fill,
    * which runs for as long as the playing needs rather than a quarter,
    * half or whole measure like the lettered loops. Programming a step past
@@ -177,6 +185,27 @@ export function isClipLooped(clip: Clip): boolean {
 export function clipRate(clip: Clip): number {
   const stretch = clip.stretch > 0 ? clip.stretch : 1
   return Math.pow(2, clip.pitch / 12) / stretch
+}
+
+/**
+ * WARP mode (clip.warp): the clip plays a phase-vocoder-stretched copy of
+ * its source instead of resampling it, so stretch does not transpose and
+ * pitch does not re-time. The pre-stretched buffer's factor is
+ * stretch · 2^(pitch/12); playing it at rate 2^(pitch/12) then yields a
+ * timeline length of source · stretch (stretch alone re-times) and a
+ * transposition of exactly `pitch` (pitch alone transposes). Tape mode
+ * (warp off) keeps clipRate's coupled behavior. Both helpers are pure so
+ * scheduling, rendering, caching and the UI agree exactly.
+ */
+export function clipWarpFactor(clip: Clip): number {
+  if (!clip.warp) return 1
+  const stretch = clip.stretch > 0 ? clip.stretch : 1
+  return stretch * Math.pow(2, clip.pitch / 12)
+}
+
+/** The resampling rate actually applied at playback (see clipWarpFactor). */
+export function clipPlaybackRate(clip: Clip): number {
+  return clip.warp ? Math.pow(2, clip.pitch / 12) : clipRate(clip)
 }
 
 export interface Track {

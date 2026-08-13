@@ -1,4 +1,5 @@
 import { newId } from '@core/model/ids'
+import { stretchChannelsAsync } from './phaseVocoder'
 
 /**
  * Decoded audio assets, held OUTSIDE project state. The project document
@@ -47,12 +48,69 @@ export interface AssetEvent {
   readonly origin: 'local' | 'restored'
 }
 
+/** Cache key of a warped variant; factor quantized so float noise can't fork entries. */
+export function warpCacheKey(assetId: string, factor: number): string {
+  return `${assetId}@${factor.toFixed(4)}`
+}
+
 export class AssetStore {
   private assets = new Map<string, ProjectAsset>()
   private reversed = new Map<string, AudioBuffer>()
+  /** Phase-vocoder-stretched channel sets, by warpCacheKey. */
+  private warped = new Map<string, Float32Array[]>()
+  private warpedPending = new Set<string>()
   private listeners = new Set<(event?: AssetEvent) => void>()
   /** SHA-256 (hex) of encoded bytes → asset id, for import dedup. */
   private byDigest = new Map<string, string>()
+
+  /**
+   * The stretched channels a warped clip plays, or null while they are
+   * (still) computing. The first ask kicks an async compute (sliced —
+   * never blocks the UI); completion notifies listeners with the asset,
+   * so the engine re-queues the waiting clips exactly as it does when a
+   * transferring asset lands. Deterministic derived data, like reversed
+   * copies — never persisted, identical on every machine.
+   */
+  getWarpedChannels(id: string, factor: number): Float32Array[] | null {
+    const key = warpCacheKey(id, factor)
+    const hit = this.warped.get(key)
+    if (hit) return hit
+    const buffer = this.assets.get(id)?.buffer
+    if (!buffer || this.warpedPending.has(key)) return null
+    this.warpedPending.add(key)
+    const channels: Float32Array[] = []
+    for (let ch = 0; ch < buffer.numberOfChannels; ch++) channels.push(buffer.getChannelData(ch))
+    void stretchChannelsAsync(channels, factor)
+      .then((warpedChannels) => {
+        this.warpedPending.delete(key)
+        const current = this.assets.get(id)
+        // Evicted or replaced while computing (project switch) — drop it.
+        if (!current || current.buffer !== buffer) return
+        this.warped.set(key, warpedChannels)
+        for (const listener of this.listeners) listener({ asset: current, origin: 'restored' })
+      })
+      .catch(() => this.warpedPending.delete(key))
+    return null
+  }
+
+  /** Sync cache read (renders call this after ensureWarped pre-warmed). */
+  warpedChannels(id: string, factor: number): Float32Array[] | null {
+    return this.warped.get(warpCacheKey(id, factor)) ?? null
+  }
+
+  /** Await a warped variant (the offline render's path). Null = no buffer. */
+  async ensureWarped(id: string, factor: number): Promise<Float32Array[] | null> {
+    const key = warpCacheKey(id, factor)
+    const hit = this.warped.get(key)
+    if (hit) return hit
+    const buffer = this.assets.get(id)?.buffer
+    if (!buffer) return null
+    const channels: Float32Array[] = []
+    for (let ch = 0; ch < buffer.numberOfChannels; ch++) channels.push(buffer.getChannelData(ch))
+    const warpedChannels = await stretchChannelsAsync(channels, factor)
+    if (this.assets.get(id)?.buffer === buffer) this.warped.set(key, warpedChannels)
+    return warpedChannels
+  }
 
   /**
    * A mirrored copy of an asset's buffer, for clips playing in reverse.
@@ -177,7 +235,12 @@ export class AssetStore {
    * pure cache rebuilt on demand, so everything outside `keepReversed` is
    * dropped unconditionally. Returns how many decoded buffers were freed.
    */
-  evict(ids: ReadonlySet<string>, keepReversed: ReadonlySet<string>): number {
+  evict(
+    ids: ReadonlySet<string>,
+    keepReversed: ReadonlySet<string>,
+    /** warpCacheKeys still referenced by warped clips (same rule as reversed). */
+    keepWarped: ReadonlySet<string> = new Set()
+  ): number {
     let freed = 0
     for (const id of ids) {
       const asset = this.assets.get(id)
@@ -187,6 +250,10 @@ export class AssetStore {
     }
     for (const id of [...this.reversed.keys()]) {
       if (!keepReversed.has(id) || ids.has(id)) this.reversed.delete(id)
+    }
+    for (const key of [...this.warped.keys()]) {
+      const assetId = key.slice(0, key.lastIndexOf('@'))
+      if (!keepWarped.has(key) || ids.has(assetId)) this.warped.delete(key)
     }
     return freed
   }
@@ -226,6 +293,8 @@ export class AssetStore {
   clear(): void {
     this.assets.clear()
     this.reversed.clear()
+    this.warped.clear()
+    this.warpedPending.clear()
     this.byDigest.clear()
     for (const listener of this.listeners) listener()
   }

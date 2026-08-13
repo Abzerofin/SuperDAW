@@ -971,9 +971,19 @@ export function apply(state: ProjectState, op: Operation): ProjectState {
         const stretch = Number.isFinite(op.stretch)
           ? Math.min(MAX_STRETCH, Math.max(MIN_STRETCH, Math.round(op.stretch * 1000) / 1000))
           : c.stretch
-        return c.reverse === op.reverse && c.pitch === pitch && c.stretch === stretch
-          ? c
-          : { ...c, reverse: op.reverse, pitch, stretch }
+        const warp = typeof op.warp === 'boolean' ? op.warp : (c.warp ?? false)
+        if (
+          c.reverse === op.reverse &&
+          c.pitch === pitch &&
+          c.stretch === stretch &&
+          (c.warp ?? false) === warp
+        ) {
+          return c
+        }
+        // Canonical form: warp false = the field is ABSENT, so toggling it
+        // off round-trips to a clip identical to one that never warped.
+        const { warp: _dropped, ...rest } = c
+        return { ...rest, reverse: op.reverse, pitch, stretch, ...(warp ? { warp: true } : {}) }
       })
 
     case 'clip/setFades':

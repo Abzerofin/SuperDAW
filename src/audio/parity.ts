@@ -372,6 +372,121 @@ export async function runEngineParity(
   return result
 }
 
+/**
+ * End-to-end warp check: a 440 Hz, 1 s clip with warp + stretch 2 must
+ * come out of the LIVE engine twice as long and still at 440 Hz (the
+ * tape path would read 220 Hz). Exercises the store's warped cache, the
+ * engine's warped-buffer registration and the schedule math together.
+ */
+export async function runWarpCheck(): Promise<{
+  dominantHz: number
+  audibleSec: number
+  pass: boolean
+}> {
+  const ctx = new OfflineAudioContext(2, 3 * PARITY_SAMPLE_RATE, PARITY_SAMPLE_RATE)
+  Object.defineProperty(ctx, 'state', { get: () => 'running' })
+  ;(ctx as unknown as { resume(): Promise<void> }).resume = () => Promise.resolve()
+
+  const assets = new AssetStore()
+  const tone = toneBuffer(ctx, 1, (t) => 0.7 * Math.sin(2 * Math.PI * 440 * t))
+  const asset = assets.restore('ast-warp', 'tone', 'audio', 'wav', new Uint8Array(4), tone)
+
+  const base = createEmptyProject('Warp check')
+  const beat = PPQ
+  const state: ProjectState = {
+    ...base,
+    tempo: 120,
+    tracks: {
+      't': {
+        id: 't',
+        kind: 'audio',
+        name: 't',
+        color: '#888',
+        muted: false,
+        soloed: false,
+        volume: 1,
+        pan: 0,
+        synth: {},
+        parentId: null,
+        frozenAssetId: null
+      }
+    },
+    trackOrder: ['t'],
+    clips: {
+      c: {
+        id: 'c',
+        trackId: 't',
+        name: 'c',
+        start: 0,
+        duration: 4 * beat, // 2 s at 120 bpm — the stretched material's span
+        assetId: asset.id,
+        offset: 0,
+        color: null,
+        fadeIn: 0,
+        fadeOut: 0,
+        reverse: false,
+        pitch: 0,
+        stretch: 2,
+        loopLength: 0,
+        warp: true
+      }
+    }
+  }
+  // Pre-warm: the offline harness renders in one pass, so the async
+  // vocoder compute must finish before the engine schedules.
+  await assets.ensureWarped(asset.id, 2)
+
+  const listeners: Array<(event: 'play' | 'stop' | 'seek') => void> = []
+  const transport = {
+    isPlaying: true,
+    positionTicks: () => 0,
+    onEvent(listener: (event: 'play' | 'stop' | 'seek') => void) {
+      listeners.push(listener)
+      return () => {}
+    },
+    setTimeSource() {},
+    setOutputLatency() {},
+    activeLoop: () => null
+  }
+  const engine = new AudioEngine({ state, subscribe: () => () => {} }, transport, assets)
+  engine.setContextFactory(() => ctx as unknown as AudioContext)
+  for (const listener of listeners) listener('play')
+  await new Promise((resolve) => setTimeout(resolve, 30))
+  transport.isPlaying = false
+
+  const rendered = await ctx.startRendering()
+  const data = rendered.getChannelData(0)
+  // Dominant frequency over the second second (cycle-anchored crossings).
+  const start = Math.round(1.2 * PARITY_SAMPLE_RATE)
+  const end = Math.round(1.8 * PARITY_SAMPLE_RATE)
+  let first = -1
+  let last = -1
+  let crossings = 0
+  for (let i = start + 1; i < end; i++) {
+    if (data[i - 1] < 0 && data[i] >= 0) {
+      if (first < 0) first = i
+      last = i
+      crossings++
+    }
+  }
+  const dominantHz =
+    crossings > 1 ? (crossings - 1) / ((last - first) / PARITY_SAMPLE_RATE) : 0
+  // Last sample above the noise floor = the stretched material's real end.
+  let audibleEnd = 0
+  for (let i = data.length - 1; i >= 0; i--) {
+    if (Math.abs(data[i]) > 0.01) {
+      audibleEnd = i
+      break
+    }
+  }
+  const audibleSec = audibleEnd / PARITY_SAMPLE_RATE
+  return {
+    dominantHz,
+    audibleSec,
+    pass: Math.abs(dominantHz - 440) < 5 && audibleSec > 1.8 && audibleSec < 2.2
+  }
+}
+
 // ------------------------------------------------------------- comparison
 
 /** Max |a−b| per sample that still counts as "the same render" (see top). */

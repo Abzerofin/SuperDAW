@@ -1,4 +1,6 @@
 import { referencedAssetIds } from '@core/persistence/format'
+import { clipWarpFactor } from '@core/model/types'
+import { warpCacheKey } from '@audio/assets'
 import { projectStore } from './projectStore'
 import { assetStore, audioEngine } from './audioInstance'
 
@@ -65,10 +67,16 @@ class AssetMemoryPolicy {
       }
     }
     const keepReversed = new Set<string>()
+    const keepWarped = new Set<string>()
     for (const clip of Object.values(state.clips)) {
-      if (clip.reverse && clip.assetId) keepReversed.add(clip.assetId)
+      if (!clip.assetId) continue
+      if (clip.reverse) keepReversed.add(clip.assetId)
+      // A warped clip's stretched copy lives while the clip needs it —
+      // the reversed-copy rule, keyed by (asset, factor).
+      const factor = clipWarpFactor(clip)
+      if (factor !== 1) keepWarped.add(warpCacheKey(clip.assetId, factor))
     }
-    if (assetStore.evict(evictable, keepReversed) > 0) {
+    if (assetStore.evict(evictable, keepReversed, keepWarped) > 0) {
       for (const id of evictable) {
         this.evicted.add(id)
         this.unreferencedSince.delete(id)
@@ -76,7 +84,7 @@ class AssetMemoryPolicy {
     }
     // The engine's backend adopted these buffers for playback; its copies
     // must release with the store's or the eviction frees nothing.
-    audioEngine.pruneAdoptedBuffers(evictable, keepReversed)
+    audioEngine.pruneAdoptedBuffers(evictable, keepReversed, keepWarped)
   }
 
   /** An op may have re-referenced an evicted asset — decode it back. */

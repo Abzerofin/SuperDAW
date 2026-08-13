@@ -1,6 +1,13 @@
 import { PPQ, ticksPerBeat } from '@core/model/timebase'
 import type { Clip, ProjectState } from '@core/model/types'
-import { clipRate, isClipLooped, isNoteTrackKind, noteSourceOf, timelineClips } from '@core/model/types'
+import {
+  clipPlaybackRate,
+  clipWarpFactor,
+  isClipLooped,
+  isNoteTrackKind,
+  noteSourceOf,
+  timelineClips
+} from '@core/model/types'
 import { synthIsAudible } from '@core/model/effects'
 
 /**
@@ -36,6 +43,12 @@ export interface ClipSchedule {
   readonly rate: number
   /** Play from the reversed copy of the asset. */
   readonly reverse: boolean
+  /**
+   * ≠ 1: play from a phase-vocoder-stretched copy of the asset at this
+   * factor (clipWarpFactor) — offsetSec/durationSec are then measured in
+   * the WARPED buffer, and `rate` carries only the pitch resample.
+   */
+  readonly warpFactor: number
 }
 
 /** One repeat of a looped clip, as its own timeline window. */
@@ -133,7 +146,8 @@ export function scheduleClips(
       durationSec: playable,
       // The render already baked in every clip's playback settings.
       rate: 1,
-      reverse: false
+      reverse: false,
+      warpFactor: 1
     })
   }
   const limitSec = anchorSec + (untilTicks - anchorTicks) / tps
@@ -142,12 +156,18 @@ export function scheduleClips(
     if (clip.assetId === null) continue
     const track = state.tracks[clip.trackId]
     if (!track || track.frozenAssetId !== null) continue // frozen: render replaces live clips
-    const bufferSec = assetSeconds(clip.assetId)
-    if (bufferSec === null) continue // asset not available (yet): stays silent
+    const sourceSec = assetSeconds(clip.assetId)
+    if (sourceSec === null) continue // asset not available (yet): stays silent
 
     // Pitch/stretch resample, so timeline seconds and buffer seconds differ
     // by `rate`: covering T seconds of timeline consumes T * rate of buffer.
-    const rate = clipRate(clip)
+    // Warp mode reads a pre-stretched COPY of the source instead: the
+    // buffer is warpFactor× the source and `rate` carries only the pitch
+    // resample — the identical region math then runs in warped-buffer
+    // seconds (see ClipSchedule.warpFactor).
+    const warpFactor = clipWarpFactor(clip)
+    const rate = clipPlaybackRate(clip)
+    const bufferSec = sourceSec * warpFactor
 
     // A looped clip is scheduled as one source per repeat; each replays the
     // same material from the clip's offset in its own timeline window.
@@ -191,7 +211,8 @@ export function scheduleClips(
         offsetSec: Math.max(0, offsetSec),
         durationSec: playableSec,
         rate,
-        reverse: clip.reverse
+        reverse: clip.reverse,
+        warpFactor
       })
     }
   }

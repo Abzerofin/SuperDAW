@@ -1,6 +1,6 @@
 import { memo, useEffect, useRef, useState, useSyncExternalStore } from 'react'
 import type { Clip, ClipId, Note } from '@core/model/types'
-import { clipRate, MIN_LOOP_TICKS } from '@core/model/types'
+import { clipPlaybackRate, clipWarpFactor, MIN_LOOP_TICKS } from '@core/model/types'
 import { effectiveFades, ticksPerSecond } from '@audio/scheduling'
 import type { ProjectAsset } from '@audio/assets'
 import { assetStore } from '@/state/audioInstance'
@@ -182,7 +182,9 @@ export const ClipView = memo(function ClipView({
       if (assetSeconds === null) return
       const materialTicks = Math.max(
         1,
-        Math.round((assetSeconds * ticksPerSecond(tempo)) / clipRate(clip)) - clip.offset
+        Math.round(
+          (assetSeconds * ticksPerSecond(tempo) * clipWarpFactor(clip)) / clipPlaybackRate(clip)
+        ) - clip.offset
       )
       if (materialTicks === clip.duration) return
       projectStore.dispatch({
@@ -224,7 +226,12 @@ export const ClipView = memo(function ClipView({
           offset={offset}
           duration={duration}
           tempo={tempo}
-          rate={clipRate({ ...clip, stretch })}
+          // Source-seconds consumed per timeline-second: for warped clips
+          // pitch cancels out of the mapping (1/stretch); tape keeps the
+          // coupled clipRate. The painter itself stays mode-blind.
+          rate={
+            clipPlaybackRate({ ...clip, stretch }) / clipWarpFactor({ ...clip, stretch })
+          }
           reverse={clip.reverse}
           loopTicks={looped ? loopLength : 0}
         />
