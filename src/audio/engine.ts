@@ -354,10 +354,24 @@ export class AudioEngine {
     this.latencyHintProvider = provider
   }
 
+  /**
+   * Test seam: the parity harness (audio/parity.ts) injects a patched
+   * OfflineAudioContext so a whole engine pass renders deterministically
+   * and pre/post-refactor output can be diffed bit-for-bit. Never used by
+   * the app itself.
+   */
+  private contextFactory: (() => AudioContext) | null = null
+
+  setContextFactory(factory: () => AudioContext): void {
+    this.contextFactory = factory
+  }
+
   /** Create the AudioContext (idempotent). Safe pre-gesture; starts suspended. */
   ensureContext(): AudioContext {
     if (this.ctx) return this.ctx
-    const ctx = new AudioContext({ latencyHint: this.latencyHintProvider?.() ?? 'interactive' })
+    const ctx = this.contextFactory
+      ? this.contextFactory()
+      : new AudioContext({ latencyHint: this.latencyHintProvider?.() ?? 'interactive' })
     this.ctx = ctx
     this.master = ctx.createGain()
     this.master.gain.value = this.store.state.masterVolume

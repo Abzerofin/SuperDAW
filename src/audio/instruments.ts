@@ -194,7 +194,18 @@ function noiseBuffer(ctx: BaseAudioContext): AudioBuffer {
   if (cached) return cached
   const buffer = ctx.createBuffer(1, Math.ceil(ctx.sampleRate), ctx.sampleRate)
   const data = buffer.getChannelData(0)
-  for (let i = 0; i < data.length; i++) data[i] = Math.random() * 2 - 1
+  // Seeded (mulberry32), NOT Math.random(): the same project must render
+  // the same bytes on every run and every machine — freezes and bounces
+  // are shared with collaborators, and the engine parity harness (and the
+  // future native backend's numerical verification) diffs renders exactly.
+  // Noise is noise; only reproducibility changes.
+  let seed = 0x9e3779b9 ^ Math.round(ctx.sampleRate)
+  for (let i = 0; i < data.length; i++) {
+    seed = (seed + 0x6d2b79f5) | 0
+    let t = Math.imul(seed ^ (seed >>> 15), 1 | seed)
+    t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t
+    data[i] = (((t ^ (t >>> 14)) >>> 0) / 4294967296) * 2 - 1
+  }
   noiseBuffers.set(ctx, buffer)
   return buffer
 }
