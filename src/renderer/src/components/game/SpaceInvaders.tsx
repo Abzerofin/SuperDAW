@@ -9,6 +9,29 @@ interface GameState {
   gameOver: boolean
 }
 
+/** Keys the game owns — swallowed so they never reach the app behind it. */
+const GAME_KEYS = new Set([
+  'w',
+  'a',
+  's',
+  'd',
+  'ArrowUp',
+  'ArrowDown',
+  'ArrowLeft',
+  'ArrowRight',
+  ' ',
+  'Enter'
+])
+
+/**
+ * Single-character keys are held lowercase. Pressing Shift mid-hold changes
+ * what keyup reports ('w' down, 'W' up), which would otherwise leave the key
+ * stuck in the held set and the ship gliding forever.
+ */
+function normKey(key: string): string {
+  return key.length === 1 ? key.toLowerCase() : key
+}
+
 export function SpaceInvaders({ onClose }: { onClose: () => void }): React.JSX.Element {
   const canvasRef = useRef<HTMLCanvasElement>(null)
   const [gameState, setGameState] = useState<GameState>({
@@ -152,13 +175,21 @@ export function SpaceInvaders({ onClose }: { onClose: () => void }): React.JSX.E
     }
   }, [gameState])
 
-  // Input handlers
+  // Input handlers. Every key the game claims is preventDefault'd: the
+  // overlay sits on top of a scrollable app, and the arrows/Space would
+  // otherwise scroll the timeline behind it.
   useEffect(() => {
     const handleKeyDown = (e: KeyboardEvent) => {
-      keysPressed.current.add(e.key)
+      if (e.key === 'Escape') {
+        onClose()
+        return
+      }
+      const key = normKey(e.key)
+      if (GAME_KEYS.has(key)) e.preventDefault()
+      keysPressed.current.add(key)
 
       // Shoot
-      if (e.key === ' ') {
+      if (key === ' ') {
         e.preventDefault()
         setGameState((prev) => ({
           ...prev,
@@ -173,7 +204,7 @@ export function SpaceInvaders({ onClose }: { onClose: () => void }): React.JSX.E
           ]
         }))
       }
-      if (e.key === 'Enter') {
+      if (key === 'Enter') {
         e.preventDefault()
         setGameState((prev) => ({
           ...prev,
@@ -191,7 +222,7 @@ export function SpaceInvaders({ onClose }: { onClose: () => void }): React.JSX.E
     }
 
     const handleKeyUp = (e: KeyboardEvent) => {
-      keysPressed.current.delete(e.key)
+      keysPressed.current.delete(normKey(e.key))
     }
 
     window.addEventListener('keydown', handleKeyDown)
@@ -200,8 +231,9 @@ export function SpaceInvaders({ onClose }: { onClose: () => void }): React.JSX.E
     return () => {
       window.removeEventListener('keydown', handleKeyDown)
       window.removeEventListener('keyup', handleKeyUp)
+      keysPressed.current.clear()
     }
-  }, [])
+  }, [onClose])
 
   return (
     <div className="game-modal">

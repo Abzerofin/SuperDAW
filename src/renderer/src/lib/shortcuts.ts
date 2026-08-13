@@ -11,6 +11,7 @@ import { recording } from '@/state/recording'
 import { trackInputs } from '@/state/trackInputs'
 import { audioEngine } from '@/state/audioInstance'
 import { keymap } from '@/state/keymap'
+import { gameState } from '@/state/gameState'
 import { newProject, openProject, saveProject } from './projectFile'
 import {
   copySelectedClip,
@@ -53,7 +54,9 @@ function duplicateSelectedTrack(): void {
 }
 
 /**
- * App-wide keyboard shortcuts. Inactive while a text field has focus.
+ * App-wide keyboard shortcuts. Inactive while a text field has focus, and
+ * while the break-room game is open — it owns WASD/arrows/Space/Enter, which
+ * would otherwise fire transport and slice actions behind the overlay.
  * WHAT combo triggers WHICH action lives in the keymap (state/keymap.ts,
  * rebindable in Settings ▸ Keyboard Shortcuts); this handler only says what
  * each action DOES and in which context it applies. The 2–9 slice keys are
@@ -65,6 +68,7 @@ export function useGlobalShortcuts(): void {
       const target = e.target as HTMLElement
       if (target.tagName === 'INPUT' || target.tagName === 'TEXTAREA' || target.isContentEditable)
         return
+      if (gameState.getActiveGame() !== null) return
 
       const id = keymap.resolve(e)
 
