@@ -1,0 +1,7 @@
+{
+  "name": "audiohost",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Native low-latency audio backend addon for SuperDAW (miniaudio/WASAPI device layer)",
+  "main": "index.js"
+}
