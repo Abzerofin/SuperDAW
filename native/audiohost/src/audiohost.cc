@@ -24,6 +24,7 @@
 #include <string>
 #include <vector>
 
+#include "engine.h"
 #include "miniaudio.h"
 
 namespace {
@@ -37,6 +38,8 @@ struct HostState {
   ma_device device{};
   bool deviceReady = false;
 
+  sdengine::Engine engine;
+
   // ---- published by the JS thread, read by the audio callback ----
   std::atomic<double> toneFreq{0.0};
   std::atomic<double> toneGain{0.0};
@@ -49,6 +52,7 @@ struct HostState {
 
   // Callback-local (audio thread only — no atomics needed).
   double tonePhase = 0.0;
+  float engineBlock[sdengine::kBlockFrames * 2] = {};
 
   uint32_t sampleRate = 0;
   uint32_t channels = 0;
@@ -59,27 +63,46 @@ struct HostState {
 HostState* g_host = nullptr;
 
 /*
- * The realtime callback. Zero-fills, then adds the test tone if audible.
- * Frame-count irregularity (WASAPI shared can deliver uneven periods) is
- * tracked as a health signal, not treated as an error.
+ * The realtime callback: the engine renders in kBlockFrames slices
+ * (WASAPI shared delivers variable frame counts; the engine's block size
+ * is its own), the stream time deriving from the rendered-frame counter.
+ * The stage-1 test tone remains as an additive debug source. Frame-count
+ * irregularity is tracked as a health signal, not treated as an error.
  */
 void DataCallback(ma_device* device, void* output, const void* /*input*/, ma_uint32 frameCount) {
   auto* host = static_cast<HostState*>(device->pUserData);
   auto* out = static_cast<float*>(output);
   const uint32_t channels = host->channels;
+  const double sampleRate = static_cast<double>(host->sampleRate);
 
   std::memset(out, 0, sizeof(float) * frameCount * channels);
+
+  uint64_t framesDone = host->framesRendered.load(std::memory_order_relaxed);
+  ma_uint32 offset = 0;
+  while (offset < frameCount) {
+    const ma_uint32 n =
+        std::min<ma_uint32>(sdengine::kBlockFrames, frameCount - offset);
+    const double blockTime = static_cast<double>(framesDone + offset) / sampleRate;
+    host->engine.RenderBlock(blockTime, n, sampleRate, host->engineBlock);
+    for (ma_uint32 i = 0; i < n; i++) {
+      for (uint32_t ch = 0; ch < channels; ch++) {
+        out[(offset + i) * channels + ch] +=
+            host->engineBlock[i * 2 + (ch < 2 ? ch : 1)];
+      }
+    }
+    offset += n;
+  }
 
   const double gain = host->toneGain.load(std::memory_order_relaxed);
   const double freq = host->toneFreq.load(std::memory_order_relaxed);
   if (gain > 0.0 && freq > 0.0 && host->sampleRate > 0) {
-    const double step = kTau * freq / static_cast<double>(host->sampleRate);
+    const double step = kTau * freq / sampleRate;
     double phase = host->tonePhase;
     for (ma_uint32 i = 0; i < frameCount; i++) {
       const float sample = static_cast<float>(gain * std::sin(phase));
       phase += step;
       if (phase > kTau) phase -= kTau;
-      for (uint32_t ch = 0; ch < channels; ch++) out[i * channels + ch] = sample;
+      for (uint32_t ch = 0; ch < channels; ch++) out[i * channels + ch] += sample;
     }
     host->tonePhase = phase;
   }
@@ -321,6 +344,189 @@ Napi::Value SetTestTone(const Napi::CallbackInfo& info) {
   return env.Undefined();
 }
 
+// ------------------------------------------------------------ the engine
+
+sdengine::Engine& EngineOf(Napi::Env env) {
+  if (g_host == nullptr) g_host = new HostState();
+  return g_host->engine;
+}
+
+sdengine::ParamEvent UnpackEvent(const Napi::Object& raw) {
+  sdengine::ParamEvent event{};
+  const std::string kind = raw.Get("kind").As<Napi::String>();
+  auto num = [&](const char* key) -> double {
+    return raw.Has(key) && raw.Get(key).IsNumber() ? raw.Get(key).As<Napi::Number>() : 0.0;
+  };
+  if (kind == "setValue") {
+    event.kind = sdengine::ParamEventKind::SetValue;
+    event.value = num("value");
+    event.time = num("time");
+  } else if (kind == "linearRamp") {
+    event.kind = sdengine::ParamEventKind::LinearRamp;
+    event.value = num("value");
+    event.endTime = num("endTime");
+  } else if (kind == "setTarget") {
+    event.kind = sdengine::ParamEventKind::SetTarget;
+    event.value = num("value");
+    event.time = num("time");
+    event.timeConstant = num("timeConstant");
+  } else if (kind == "setCurve") {
+    event.kind = sdengine::ParamEventKind::SetCurve;
+    event.time = num("time");
+    event.duration = num("duration");
+    if (raw.Has("curve") && raw.Get("curve").IsTypedArray()) {
+      auto curve = raw.Get("curve").As<Napi::Float32Array>();
+      event.curve.assign(curve.Data(), curve.Data() + curve.ElementLength());
+    }
+  } else {
+    event.kind = sdengine::ParamEventKind::Cancel;
+    event.time = num("afterTime");
+  }
+  return event;
+}
+
+/** createNode('gain' | 'stereoPanner') → id */
+Napi::Value CreateNode(const Napi::CallbackInfo& info) {
+  Napi::Env env = info.Env();
+  const std::string kind = info[0].As<Napi::String>();
+  const uint32_t id = EngineOf(env).CreateNode(
+      kind == "stereoPanner" ? sdengine::NodeKind::Panner : sdengine::NodeKind::Gain);
+  return Napi::Number::New(env, id);
+}
+
+Napi::Value ConnectNodes(const Napi::CallbackInfo& info) {
+  Napi::Env env = info.Env();
+  EngineOf(env).Connect(info[0].As<Napi::Number>().Uint32Value(),
+                        info[1].As<Napi::Number>().Uint32Value());
+  return env.Undefined();
+}
+
+Napi::Value DisconnectNodes(const Napi::CallbackInfo& info) {
+  Napi::Env env = info.Env();
+  const bool haveTo = info.Length() > 1 && info[1].IsNumber();
+  EngineOf(env).Disconnect(info[0].As<Napi::Number>().Uint32Value(), haveTo,
+                           haveTo ? info[1].As<Napi::Number>().Uint32Value() : 0);
+  return env.Undefined();
+}
+
+Napi::Value DisposeNode(const Napi::CallbackInfo& info) {
+  Napi::Env env = info.Env();
+  EngineOf(env).DisposeNode(info[0].As<Napi::Number>().Uint32Value());
+  return env.Undefined();
+}
+
+/** scheduleParam(nodeId, 'gain' | 'pan', events[]) */
+Napi::Value ScheduleParam(const Napi::CallbackInfo& info) {
+  Napi::Env env = info.Env();
+  const uint32_t node = info[0].As<Napi::Number>().Uint32Value();
+  const bool pan = std::string(info[1].As<Napi::String>()) == "pan";
+  auto events = info[2].As<Napi::Array>();
+  for (uint32_t i = 0; i < events.Length(); i++) {
+    EngineOf(env).ScheduleParam(node, pan, UnpackEvent(events.Get(i).As<Napi::Object>()));
+  }
+  return env.Undefined();
+}
+
+/** registerBuffer(id, channels: Float32Array[], sampleRate) — copies. */
+Napi::Value RegisterBuffer(const Napi::CallbackInfo& info) {
+  Napi::Env env = info.Env();
+  const std::string id = info[0].As<Napi::String>();
+  auto channels = info[1].As<Napi::Array>();
+  auto buffer = std::make_shared<sdengine::SharedBuffer>();
+  buffer->sampleRate = info[2].As<Napi::Number>().DoubleValue();
+  for (uint32_t ch = 0; ch < channels.Length(); ch++) {
+    auto data = channels.Get(ch).As<Napi::Float32Array>();
+    buffer->channels.emplace_back(data.Data(), data.Data() + data.ElementLength());
+  }
+  EngineOf(env).RegisterBuffer(id, std::move(buffer));
+  return env.Undefined();
+}
+
+Napi::Value HasBuffer(const Napi::CallbackInfo& info) {
+  Napi::Env env = info.Env();
+  return Napi::Boolean::New(env, EngineOf(env).HasBuffer(info[0].As<Napi::String>()));
+}
+
+Napi::Value ReleaseBuffer(const Napi::CallbackInfo& info) {
+  Napi::Env env = info.Env();
+  EngineOf(env).ReleaseBuffer(info[0].As<Napi::String>());
+  return env.Undefined();
+}
+
+/** play({bufferId, when, offsetSec?, durationSec?, rate?, destination}) → voiceId | 0 */
+Napi::Value PlayVoice(const Napi::CallbackInfo& info) {
+  Napi::Env env = info.Env();
+  auto spec = info[0].As<Napi::Object>();
+  auto num = [&](const char* key, double fallback) -> double {
+    return spec.Has(key) && spec.Get(key).IsNumber() ? spec.Get(key).As<Napi::Number>()
+                                                     : fallback;
+  };
+  const uint32_t id = EngineOf(env).Play(
+      spec.Get("bufferId").As<Napi::String>(), num("when", 0), num("offsetSec", 0),
+      num("durationSec", -1), num("rate", 1),
+      spec.Get("destination").As<Napi::Number>().Uint32Value());
+  return Napi::Number::New(env, id);
+}
+
+Napi::Value StopVoice(const Napi::CallbackInfo& info) {
+  Napi::Env env = info.Env();
+  const double atTime =
+      info.Length() > 1 && info[1].IsNumber() ? info[1].As<Napi::Number>().DoubleValue() : -1;
+  EngineOf(env).StopVoice(info[0].As<Napi::Number>().Uint32Value(), atTime);
+  return env.Undefined();
+}
+
+Napi::Value CreateTap(const Napi::CallbackInfo& info) {
+  Napi::Env env = info.Env();
+  const uint32_t id = EngineOf(env).CreateTap(info[0].As<Napi::Number>().Uint32Value(),
+                                              info[1].As<Napi::Number>().Uint32Value());
+  return Napi::Number::New(env, id);
+}
+
+/** readTap(id, out: Float32Array) → bool */
+Napi::Value ReadTap(const Napi::CallbackInfo& info) {
+  Napi::Env env = info.Env();
+  auto out = info[1].As<Napi::Float32Array>();
+  const bool ok = EngineOf(env).ReadTap(info[0].As<Napi::Number>().Uint32Value(), out.Data(),
+                                        out.ElementLength());
+  return Napi::Boolean::New(env, ok);
+}
+
+Napi::Value DisposeTap(const Napi::CallbackInfo& info) {
+  Napi::Env env = info.Env();
+  EngineOf(env).DisposeTap(info[0].As<Napi::Number>().Uint32Value());
+  return env.Undefined();
+}
+
+Napi::Value DrainEnded(const Napi::CallbackInfo& info) {
+  Napi::Env env = info.Env();
+  const auto ended = EngineOf(env).DrainEnded();
+  Napi::Array out = Napi::Array::New(env, ended.size());
+  for (size_t i = 0; i < ended.size(); i++) out.Set(i, ended[i]);
+  return out;
+}
+
+/**
+ * renderOffline(startTime, frames, sampleRate) → Float32Array (stereo
+ * interleaved). The verification hook: the identical engine renders on
+ * the JS thread, so Node tests (and the parity harness) can diff its
+ * output numerically. Only valid while the device is stopped.
+ */
+Napi::Value RenderOffline(const Napi::CallbackInfo& info) {
+  Napi::Env env = info.Env();
+  if (g_host != nullptr && g_host->deviceReady) {
+    Napi::Error::New(env, "renderOffline requires a stopped device")
+        .ThrowAsJavaScriptException();
+    return env.Undefined();
+  }
+  const double startTime = info[0].As<Napi::Number>().DoubleValue();
+  const uint32_t frames = info[1].As<Napi::Number>().Uint32Value();
+  const double sampleRate = info[2].As<Napi::Number>().DoubleValue();
+  auto out = Napi::Float32Array::New(env, static_cast<size_t>(frames) * 2);
+  EngineOf(env).RenderOffline(startTime, frames, sampleRate, out.Data());
+  return out;
+}
+
 }  // namespace
 
 static Napi::Object InitModule(Napi::Env env, Napi::Object exports) {
@@ -332,6 +538,21 @@ static Napi::Object InitModule(Napi::Env env, Napi::Object exports) {
   exports.Set("latencySec", Napi::Function::New(env, LatencySec));
   exports.Set("stats", Napi::Function::New(env, Stats));
   exports.Set("setTestTone", Napi::Function::New(env, SetTestTone));
+  exports.Set("createNode", Napi::Function::New(env, CreateNode));
+  exports.Set("connect", Napi::Function::New(env, ConnectNodes));
+  exports.Set("disconnect", Napi::Function::New(env, DisconnectNodes));
+  exports.Set("disposeNode", Napi::Function::New(env, DisposeNode));
+  exports.Set("scheduleParam", Napi::Function::New(env, ScheduleParam));
+  exports.Set("registerBuffer", Napi::Function::New(env, RegisterBuffer));
+  exports.Set("hasBuffer", Napi::Function::New(env, HasBuffer));
+  exports.Set("releaseBuffer", Napi::Function::New(env, ReleaseBuffer));
+  exports.Set("play", Napi::Function::New(env, PlayVoice));
+  exports.Set("stopVoice", Napi::Function::New(env, StopVoice));
+  exports.Set("createTap", Napi::Function::New(env, CreateTap));
+  exports.Set("readTap", Napi::Function::New(env, ReadTap));
+  exports.Set("disposeTap", Napi::Function::New(env, DisposeTap));
+  exports.Set("drainEnded", Napi::Function::New(env, DrainEnded));
+  exports.Set("renderOffline", Napi::Function::New(env, RenderOffline));
   return exports;
 }
 
