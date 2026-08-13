@@ -990,7 +990,26 @@ anyone raises the comfortable ~100-200-track ceiling.
     app version sits under the brand on the home screen and in the
     transport bar (`__APP_VERSION__`, a build-time define).
 
-30. ✅ **Loopback latency calibration** (NATIVE_AUDIO_BACKEND.md phase 1)
+30. ✅ **Audio backend seam** (NATIVE_AUDIO_BACKEND.md phase 0) — the
+    engine no longer touches AudioContext/AudioNode directly: every node,
+    connection, param ramp, buffer voice and meter tap goes through
+    `IAudioBackend` (`audio/backend.ts`), whose serializable currency
+    (integer ids, named buffers, ParamEvent lists) is what the native
+    addon will implement over a MessagePort. `WebAudioBackend` adapts
+    today's graph; `backend.webAudio` is the documented escape hatch for
+    the pieces later phases port (effect builders + instrument voices →
+    phase 2, monitor/capture → phase 3, decode + UI analysers). The
+    metronome click became two pre-rendered buffers. Verified three ways:
+    the parity harness (`audio/parity.ts` — fixture render through the
+    live engine against a patched OfflineAudioContext, diffed within
+    tolerance against the committed pre-refactor baseline
+    `parityBaseline.ts`; the DSP noise sources were seeded to make this
+    possible), headless command-stream tests against a MockBackend
+    (`backend.test.ts`), and a live playback smoke. Asset buffers are
+    ADOPTED zero-copy and released alongside assetMemory eviction
+    (`pruneAdoptedBuffers`), so decoded memory stays bounded.
+
+31. ✅ **Loopback latency calibration** (NATIVE_AUDIO_BACKEND.md phase 1)
     — Settings ▸ Audio measures the true round-trip: three exponential
     chirps played at known clock times, captured through the recording
     worklet, located by FFT matched filter with peak-to-sidelobe

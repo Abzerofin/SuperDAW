@@ -11,7 +11,15 @@ import { ticksPerBar, ticksPerBeat } from '@core/model/timebase'
 import { denormalizeParam, synthIsAudible } from '@core/model/effects'
 import { paramDefsOf } from '@core/plugins/builtin'
 import type { AssetEvent, AssetStore } from './assets'
-import { applyClipFades } from './fades'
+import {
+  WebAudioBackend,
+  type BackendNodeId,
+  type IAudioBackend,
+  type ParamEvent,
+  type TapId,
+  type VoiceId
+} from './backend'
+import { clipFadeEvents } from './fades'
 import { buildInstrumentVoice, buildLiveInstrumentVoice, type InstrumentSample } from './instruments'
 import { LivePreview } from './livePreview'
 import { onsetsForPeaks } from './onsets'
@@ -162,40 +170,60 @@ function clipAudiblySame(a: Clip, b: Clip): boolean {
 
 interface TrackChain {
   /** Where sources and synth voices connect; head of the insert chain. */
-  input: GainNode
-  auto: GainNode
-  fader: GainNode
-  panner: StereoPannerNode
+  input: BackendNodeId
+  auto: BackendNodeId
+  fader: BackendNodeId
+  panner: BackendNodeId
   /** Side-tap off the panner for the track's level meter (never in the path). */
-  analyser: AnalyserNode
-  meterBuf: Float32Array<ArrayBuffer>
+  tap: TapId
+  meterBuf: Float32Array
   /** Folder bus this chain's panner feeds (null = master). Folders ARE buses. */
   parentId: TrackId | null
 }
 
+/** An insert's live Web Audio nodes plus their backend-adopted ports. */
+interface FxEntry {
+  readonly nodes: PluginNodes
+  readonly inputId: BackendNodeId
+  readonly outputId: BackendNodeId
+}
+
+/** Master-meter tap length (frequency resolution is irrelevant to a peak). */
+const MASTER_TAP_FRAMES = 2048
+/** Track-meter tap length — a 4× cheaper scan than the old 1024. */
+const TRACK_TAP_FRAMES = 256
+
 export class AudioEngine {
-  private ctx: AudioContext | null = null
-  private master: GainNode | null = null
-  private analyser: AnalyserNode | null = null
-  private meterBuf: Float32Array<ArrayBuffer> | null = null
+  /**
+   * The seam (docs/NATIVE_AUDIO_BACKEND.md §3): every node, voice, param
+   * ramp and tap goes through this. `backend.webAudio` is the documented
+   * phase-0 escape hatch — the builtin effect builders, instrument voices,
+   * monitor nodes and decode still speak Web Audio until their phases port
+   * them; each use below is deliberate and grep-able.
+   */
+  private backend: IAudioBackend | null = null
+  private masterTap: TapId | null = null
+  private meterBuf: Float32Array | null = null
   private chains = new Map<TrackId, TrackChain>()
-  private fxNodes = new Map<PluginInstanceId, PluginNodes>()
+  private fxNodes = new Map<PluginInstanceId, FxEntry>()
   /**
    * Per-instance inlet/outlet gains for GRAPH-routed tracks. Routing edges
    * connect outlets to inlets; a bypassed/missing plugin just shorts its
    * inlet to its outlet, so every graph shape degrades gracefully.
    */
-  private graphPorts = new Map<PluginInstanceId, { inlet: GainNode; outlet: GainNode }>()
-  /** Everything currently scheduled: clip buffer sources AND synth oscillators. */
-  private sources = new Set<AudioScheduledSourceNode>()
-  /** The same sources indexed by track, so an edit can tear down ONE track. */
-  private sourcesByTrack = new Map<TrackId, Set<AudioScheduledSourceNode>>()
+  private graphPorts = new Map<PluginInstanceId, { inlet: BackendNodeId; outlet: BackendNodeId }>()
+  /** Everything currently scheduled: clip voices AND adopted synth voices. */
+  private sources = new Set<VoiceId>()
+  /** The same voices indexed by track, so an edit can tear down ONE track. */
+  private sourcesByTrack = new Map<TrackId, Set<VoiceId>>()
+  /** Per-voice bookkeeping run when the backend reports the voice ended. */
+  private voiceCleanups = new Map<VoiceId, () => void>()
   /** Per-clip fade envelope gains, with the clock time their pass ends
    *  (Infinity for open-ended passes) so loop iterations can be swept, and
    *  their track so scoped reschedules can tear them down. */
-  private fadeNodes = new Map<GainNode, { endSec: number; trackId: TrackId }>()
+  private fadeNodes = new Map<BackendNodeId, { endSec: number; trackId: TrackId }>()
   /** Live input monitors feeding track chains, by track. */
-  private monitors = new Map<TrackId, AudioNode>()
+  private monitors = new Map<TrackId, { node: AudioNode; id: BackendNodeId }>()
 
   /**
    * Live (MIDI-played) synth voices, held-keys only, keyed by pitch.
@@ -337,7 +365,7 @@ export class AudioEngine {
     // A provider registering later (plugin installed mid-session) rewires
     // chains so placeholders come alive without any document change.
     pluginRegistry.subscribe(() => {
-      if (this.ctx) this.syncPlugins()
+      if (this.backend) this.syncPlugins()
     })
   }
 
@@ -357,8 +385,7 @@ export class AudioEngine {
   /**
    * Test seam: the parity harness (audio/parity.ts) injects a patched
    * OfflineAudioContext so a whole engine pass renders deterministically
-   * and pre/post-refactor output can be diffed bit-for-bit. Never used by
-   * the app itself.
+   * and pre/post-refactor output can be diffed. Never used by the app.
    */
   private contextFactory: (() => AudioContext) | null = null
 
@@ -366,28 +393,62 @@ export class AudioEngine {
     this.contextFactory = factory
   }
 
-  /** Create the AudioContext (idempotent). Safe pre-gesture; starts suspended. */
-  ensureContext(): AudioContext {
-    if (this.ctx) return this.ctx
-    const ctx = this.contextFactory
-      ? this.contextFactory()
-      : new AudioContext({ latencyHint: this.latencyHintProvider?.() ?? 'interactive' })
-    this.ctx = ctx
-    this.master = ctx.createGain()
-    this.master.gain.value = this.store.state.masterVolume
-    this.analyser = ctx.createAnalyser()
-    this.analyser.fftSize = 2048
-    this.meterBuf = new Float32Array(this.analyser.fftSize)
-    this.master.connect(this.analyser)
-    this.analyser.connect(ctx.destination)
+  /**
+   * Test seam: unit tests inject a MockBackend to assert the engine's
+   * command streams headless. The app always runs the default (Web Audio).
+   */
+  private backendFactory: (() => IAudioBackend) | null = null
+
+  setBackendFactory(factory: () => IAudioBackend): void {
+    this.backendFactory = factory
+  }
+
+  /** Start the backend (idempotent). Safe pre-gesture; starts suspended. */
+  private ensureBackend(): IAudioBackend {
+    if (this.backend) return this.backend
+    const backend = this.backendFactory
+      ? this.backendFactory()
+      : new WebAudioBackend({
+          latencyHint: () => this.latencyHintProvider?.() ?? 'interactive',
+          contextFactory: this.contextFactory ?? undefined
+        })
+    this.backend = backend
+    backend.start()
+    backend.scheduleParam(backend.masterNode(), 'gain', [
+      { kind: 'setValue', value: this.store.state.masterVolume, time: 0 }
+    ])
+    this.masterTap = backend.createTap(backend.masterNode(), MASTER_TAP_FRAMES)
+    this.meterBuf = new Float32Array(MASTER_TAP_FRAMES)
+    // One engine-wide end listener: each voice registered its own cleanup.
+    backend.onVoiceEnded((id) => {
+      const cleanup = this.voiceCleanups.get(id)
+      if (cleanup) {
+        this.voiceCleanups.delete(id)
+        cleanup()
+      }
+    })
+    this.registerClickBuffers(backend)
     // From here on the playhead runs on the audio clock — no drift between
     // what the user sees and what they hear.
-    this.transport.setTimeSource({ now: () => ctx.currentTime })
+    this.transport.setTimeSource({ now: () => backend.now() })
     this.transport.setOutputLatency(this.outputLatencySec())
     this.syncMixer()
     this.syncPlugins()
     void this.applyOutputDevice()
-    return ctx
+    return backend
+  }
+
+  /**
+   * The live AudioContext, for the renderer subsystems still on the Web
+   * Audio path by design: recording capture, input monitoring taps and
+   * latency calibration (they move behind the backend with phase 3's
+   * native duplex input). Browser builds always run the Web Audio backend,
+   * so this never throws in practice.
+   */
+  ensureContext(): AudioContext {
+    const backend = this.ensureBackend()
+    if (!backend.webAudio) throw new Error('No Web Audio context on this backend')
+    return backend.webAudio.ctx
   }
 
   // ---------- Output device ----------
@@ -402,47 +463,37 @@ export class AudioEngine {
     return this.applyOutputDevice()
   }
 
-  /** Info for the audio settings panel; null until a context exists. */
+  /** Info for the audio settings panel; null until the backend started. */
   contextInfo(): {
     sampleRate: number
     outputChannels: number
     baseLatencySec: number | null
     outputLatencySec: number | null
   } | null {
-    if (!this.ctx) return null
-    const ctx = this.ctx as AudioContext & { outputLatency?: number }
+    if (!this.backend?.running()) return null
+    const info = this.backend.start()
+    // The split readout (graph buffering vs device path) is a Web Audio
+    // detail the settings pane displays; other backends report one number.
+    const ctx = this.backend.webAudio?.ctx as (AudioContext & { outputLatency?: number }) | null
     return {
-      sampleRate: this.ctx.sampleRate,
-      outputChannels: this.ctx.destination.maxChannelCount,
-      baseLatencySec: typeof this.ctx.baseLatency === 'number' ? this.ctx.baseLatency : null,
-      outputLatencySec: typeof ctx.outputLatency === 'number' ? ctx.outputLatency : null
+      sampleRate: info.sampleRate,
+      outputChannels: info.outputChannels,
+      baseLatencySec: typeof ctx?.baseLatency === 'number' ? ctx.baseLatency : null,
+      outputLatencySec: typeof ctx?.outputLatency === 'number' ? ctx.outputLatency : null
     }
   }
 
   /**
-   * Seconds the heard output lags the context clock: the graph's internal
-   * buffering (baseLatency) plus the device path (outputLatency). The
-   * drawn playhead and recorded-take placement both correct by this.
+   * Seconds the heard output lags the stream clock. The drawn playhead
+   * and recorded-take placement both correct by this.
    */
   outputLatencySec(): number {
-    const ctx = this.ctx as (AudioContext & { outputLatency?: number }) | null
-    if (!ctx) return 0
-    const base = typeof ctx.baseLatency === 'number' ? ctx.baseLatency : 0
-    const out = typeof ctx.outputLatency === 'number' ? ctx.outputLatency : 0
-    return base + out
+    return this.backend?.latencies().outputSec ?? 0
   }
 
   private async applyOutputDevice(): Promise<boolean> {
-    // setSinkId is Chromium-era; feature-detect so the plain-browser build
-    // (and older engines) degrade to the default device silently.
-    const ctx = this.ctx as (AudioContext & { setSinkId?(id: string): Promise<void> }) | null
-    if (!ctx?.setSinkId) return this.outputDeviceId === null
-    try {
-      await ctx.setSinkId(this.outputDeviceId ?? '')
-      return true
-    } catch {
-      return false
-    }
+    if (!this.backend) return this.outputDeviceId === null
+    return this.backend.setOutputDevice(this.outputDeviceId)
   }
 
   /**
@@ -452,18 +503,19 @@ export class AudioEngine {
    * deleted track can never leave a monitor dangling.
    */
   setMonitorSource(trackId: TrackId, node: AudioNode | null): void {
+    // The monitor node is a live getUserMedia tap — Web Audio by design
+    // until phase 3's native duplex input replaces the capture path.
+    const backend = this.ensureBackend()
     const previous = this.monitors.get(trackId)
     if (previous) {
-      try {
-        previous.disconnect(this.chain(trackId).input)
-      } catch {
-        // chain already torn down — nothing to detach
-      }
+      backend.disconnect(previous.id, this.chain(trackId).input)
+      backend.disposeNode(previous.id)
       this.monitors.delete(trackId)
     }
-    if (node) {
-      node.connect(this.chain(trackId).input)
-      this.monitors.set(trackId, node)
+    if (node && backend.webAudio) {
+      const id = backend.webAudio.adoptNode(node)
+      backend.connect(id, this.chain(trackId).input)
+      this.monitors.set(trackId, { node, id })
     }
   }
 
@@ -497,8 +549,10 @@ export class AudioEngine {
     // bypassed synth is silent for scheduled notes and must be live too.
     if (!track || !isNoteTrackKind(track.kind) || track.frozenAssetId !== null) return
     if (!synthIsAudible(track.synth)) return
+    // Live voices are Web-Audio-built until the phase-2 DSP ports.
     const ctx = this.ensureContext()
     if (ctx.state === 'suspended') void ctx.resume()
+    const escapes = this.backend!.webAudio!
 
     const key = Math.min(127, Math.max(0, Math.round(pitch)))
     let voices = this.liveVoices.get(trackId)
@@ -513,7 +567,7 @@ export class AudioEngine {
     const seq = ++this.liveVoiceSeq
     const handle = buildLiveInstrumentVoice(
       ctx,
-      this.chain(trackId).input,
+      escapes.nodeOf(this.chain(trackId).input),
       key,
       Math.min(1, Math.max(0, velocity)),
       track.synth,
@@ -587,10 +641,10 @@ export class AudioEngine {
   // through the ordinary schedule math over a derived state, exactly the
   // track-loop trick, so launches carry inserts, fades and routing.
 
-  private padSampleVoices = new Map<string, { source: AudioBufferSourceNode; gain: GainNode }>()
+  private padSampleVoices = new Map<string, { voice: VoiceId; gain: BackendNodeId }>()
   private padClipLoops = new Map<
     ClipId,
-    { startTicks: number; nextRepeat: number; sources: Set<AudioScheduledSourceNode> }
+    { startTicks: number; nextRepeat: number; sources: Set<VoiceId> }
   >()
   private padTimer: ReturnType<typeof setInterval> | null = null
   private padListeners = new Set<() => void>()
@@ -598,41 +652,40 @@ export class AudioEngine {
 
   /** Fire a sample pad. Retriggering cuts the previous hit (natural pad feel). */
   playPadSample(padId: string, assetId: string): void {
-    const ctx = this.ensureContext()
-    if (ctx.state === 'suspended') void ctx.resume()
+    const backend = this.ensureBackend()
+    this.resumeOutput()
     this.stopPadSample(padId, true)
-    const asset = this.assets.get(assetId)
-    if (!asset?.buffer || !this.master) return
-    const gain = ctx.createGain()
-    gain.gain.value = 0.9
-    gain.connect(this.master)
-    const source = ctx.createBufferSource()
-    source.buffer = asset.buffer
-    source.connect(gain)
-    source.onended = () => {
-      source.disconnect()
-      gain.disconnect()
-      if (this.padSampleVoices.get(padId)?.source === source) {
+    const bufferId = this.ensureBufferRegistered(assetId, false)
+    if (!bufferId) return
+    const gain = backend.createNode('gain')
+    backend.scheduleParam(gain, 'gain', [{ kind: 'setValue', value: 0.9, time: 0 }])
+    backend.connect(gain, backend.masterNode())
+    const voice = backend.play({ bufferId, when: 0, destination: gain })
+    if (voice === null) {
+      backend.disposeNode(gain)
+      return
+    }
+    this.voiceCleanups.set(voice, () => {
+      backend.disposeNode(gain)
+      if (this.padSampleVoices.get(padId)?.voice === voice) {
         this.padSampleVoices.delete(padId)
         this.emitPads()
       }
-    }
-    source.start()
-    this.padSampleVoices.set(padId, { source, gain })
+    })
+    this.padSampleVoices.set(padId, { voice, gain })
     this.emitPads()
   }
 
   /** Release a gated sample pad (or cut it before a retrigger). */
   stopPadSample(padId: string, hard = false): void {
     const voice = this.padSampleVoices.get(padId)
-    if (!voice || !this.ctx) return
-    const now = this.ctx.currentTime
-    voice.gain.gain.setTargetAtTime(0.0001, now, hard ? 0.005 : 0.02)
-    try {
-      voice.source.stop(now + 0.08)
-    } catch {
-      // already ended
-    }
+    const backend = this.backend
+    if (!voice || !backend) return
+    const now = backend.now()
+    backend.scheduleParam(voice.gain, 'gain', [
+      { kind: 'setTarget', value: 0.0001, time: now, timeConstant: hard ? 0.005 : 0.02 }
+    ])
+    backend.stopVoice(voice.voice, now + 0.08)
     this.padSampleVoices.delete(padId)
     this.emitPads()
   }
@@ -653,8 +706,8 @@ export class AudioEngine {
     if (!clip || clip.duration <= 0) return false
     if (this.padClipLoops.has(clipId)) return true
     if (!this.transport.isPlaying || this.transport.activeLoop()) return false
-    const ctx = this.ensureContext()
-    if (ctx.state === 'suspended') void ctx.resume()
+    this.ensureBackend()
+    this.resumeOutput()
     const bar = ticksPerBar(state.timeSignature)
     const startTicks = Math.ceil(this.transport.positionTicks() / bar) * bar
     this.padClipLoops.set(clipId, { startTicks, nextRepeat: 0, sources: new Set() })
@@ -668,13 +721,9 @@ export class AudioEngine {
     const loop = this.padClipLoops.get(clipId)
     if (!loop) return
     this.padClipLoops.delete(clipId)
-    const now = this.ctx?.currentTime ?? 0
-    for (const source of [...loop.sources]) {
-      try {
-        source.stop(now + 0.02)
-      } catch {
-        // never started / already stopped
-      }
+    const now = this.backend?.now() ?? 0
+    for (const voice of [...loop.sources]) {
+      this.backend?.stopVoice(voice, now + 0.02)
     }
     if (this.padClipLoops.size === 0) this.stopPadScheduler()
     this.emitPads()
@@ -715,12 +764,12 @@ export class AudioEngine {
 
   /** Queue upcoming repeats of each launched clip up to the lookahead. */
   private topUpPadLoops(): void {
-    const ctx = this.ctx
-    if (!ctx || this.padClipLoops.size === 0 || this.transport.activeLoop()) return
+    const backend = this.backend
+    if (!backend || this.padClipLoops.size === 0 || this.transport.activeLoop()) return
     const state = this.store.state
     const tps = ticksPerSecond(state.tempo)
     const horizonTicks =
-      this.anchorTicks + (ctx.currentTime + SCHEDULE_LOOKAHEAD_SEC - this.anchorSec) * tps
+      this.anchorTicks + (backend.now() + SCHEDULE_LOOKAHEAD_SEC - this.anchorSec) * tps
     for (const [clipId, loop] of this.padClipLoops) {
       const clip = state.clips[clipId]
       const track = clip ? state.tracks[clip.trackId] : undefined
@@ -734,7 +783,7 @@ export class AudioEngine {
       let guard = 0
       while (loop.startTicks + repeat * period < horizonTicks && guard++ < 64) {
         const repeatState = padClipRepeatState(state, clipId, loop.startTicks + repeat * period)
-        const fadeGains = new Map<string, GainNode>()
+        const fadeGains = new Map<string, BackendNodeId>()
         this.scheduleClipsPass(
           this.anchorTicks,
           this.anchorSec,
@@ -774,40 +823,126 @@ export class AudioEngine {
     instanceId: PluginInstanceId,
     partial: Readonly<Record<string, number>>
   ): void {
-    const ctx = this.ctx
+    const backend = this.backend
     const instance = this.store.state.plugins[instanceId]
-    const nodes = this.fxNodes.get(instanceId)
-    if (ctx && instance && nodes) {
-      nodes.apply({ ...instance.params, ...partial }, ctx.currentTime)
+    const entry = this.fxNodes.get(instanceId)
+    if (backend && instance && entry) {
+      entry.nodes.apply({ ...instance.params, ...partial }, backend.now())
     }
   }
 
   // ---------- Ephemeral previews (fader/knob drags before the op lands) ----------
 
+  private smooth(node: BackendNodeId, param: 'gain' | 'pan', value: number): void {
+    this.backend?.scheduleParam(node, param, [
+      { kind: 'setTarget', value, time: this.backend.now(), timeConstant: GAIN_SMOOTHING_SEC }
+    ])
+  }
+
   previewTrackVolume(trackId: TrackId, volume: number): void {
-    const chain = this.ctx ? this.chain(trackId) : null
-    if (chain && this.ctx) {
-      chain.fader.gain.setTargetAtTime(
-        this.isAudible(trackId) ? volume : 0,
-        this.ctx.currentTime,
-        GAIN_SMOOTHING_SEC
-      )
-    }
+    if (!this.backend) return
+    this.smooth(this.chain(trackId).fader, 'gain', this.isAudible(trackId) ? volume : 0)
   }
 
   previewTrackPan(trackId: TrackId, pan: number): void {
-    const chain = this.ctx ? this.chain(trackId) : null
-    if (chain && this.ctx) chain.panner.pan.setTargetAtTime(pan, this.ctx.currentTime, GAIN_SMOOTHING_SEC)
+    if (!this.backend) return
+    this.smooth(this.chain(trackId).panner, 'pan', pan)
   }
 
   previewMasterVolume(volume: number): void {
-    if (this.ctx && this.master) {
-      this.master.gain.setTargetAtTime(volume, this.ctx.currentTime, GAIN_SMOOTHING_SEC)
-    }
+    if (!this.backend) return
+    this.smooth(this.backend.masterNode(), 'gain', volume)
   }
 
   async decode(data: ArrayBuffer): Promise<AudioBuffer> {
+    // Decode stays renderer-side Web Audio by design (§3: the native
+    // backend receives decoded planar floats, never encoded bytes).
     return this.ensureContext().decodeAudioData(data)
+  }
+
+  /** Autoplay policy: nudge a suspended Web Audio context (no-op natively). */
+  private resumeOutput(): void {
+    const ctx = this.backend?.webAudio?.ctx
+    if (ctx && ctx.state === 'suspended') void ctx.resume()
+  }
+
+  /**
+   * Register (adopt) an asset's decoded buffer — or its reversed mirror —
+   * with the backend under a stable id. Adoption is zero-copy on the Web
+   * Audio backend, so decoded memory stays bounded by assetMemory's
+   * accounting; re-adoption after an eviction/re-decode is detected by
+   * buffer identity.
+   */
+  private adoptedBufferSource = new Map<string, AudioBuffer>()
+
+  /**
+   * The eviction hook (called by the renderer's asset-memory policy right
+   * beside AssetStore.evict): adopted backend buffers pin the decoded
+   * memory the eviction is trying to free, so the two must release
+   * together. Reversed mirrors follow the same keepReversed rule the
+   * store's own cache applies.
+   */
+  pruneAdoptedBuffers(evicted: ReadonlySet<string>, keepReversed: ReadonlySet<string>): void {
+    const backend = this.backend
+    if (!backend) return
+    for (const assetId of [...this.adoptedBufferSource.keys()]) {
+      if (evicted.has(assetId)) {
+        backend.releaseBuffer(assetId)
+        backend.releaseBuffer(`${assetId}!r`)
+        this.adoptedBufferSource.delete(assetId)
+      } else if (!keepReversed.has(assetId)) {
+        backend.releaseBuffer(`${assetId}!r`)
+      }
+    }
+  }
+
+  private ensureBufferRegistered(assetId: string, reverse: boolean): string | null {
+    const backend = this.ensureBackend()
+    const key = reverse ? `${assetId}!r` : assetId
+    const asset = this.assets.get(assetId)
+    if (!asset?.buffer) return null
+    if (backend.hasBuffer(key) && this.adoptedBufferSource.get(assetId) === asset.buffer) {
+      return key
+    }
+    // Buffer changed identity (evicted + re-decoded): refresh both keys.
+    if (this.adoptedBufferSource.get(assetId) !== asset.buffer) {
+      backend.releaseBuffer(assetId)
+      backend.releaseBuffer(`${assetId}!r`)
+      this.adoptedBufferSource.set(assetId, asset.buffer)
+    }
+    const escapes = backend.webAudio
+    if (!reverse) {
+      if (escapes) escapes.adoptBuffer(key, asset.buffer)
+      else {
+        const channels: Float32Array[] = []
+        for (let ch = 0; ch < asset.buffer.numberOfChannels; ch++) {
+          channels.push(asset.buffer.getChannelData(ch))
+        }
+        backend.registerBuffer(key, channels, asset.buffer.sampleRate)
+      }
+      return key
+    }
+    if (escapes) {
+      const mirrored = this.assets.reversedBuffer(assetId, (channels, sampleRate) => {
+        const buffer = escapes.ctx.createBuffer(channels.length, channels[0].length, sampleRate)
+        channels.forEach((data, ch) =>
+          buffer.copyToChannel(data as Float32Array<ArrayBuffer>, ch)
+        )
+        return buffer
+      })
+      if (!mirrored) return null
+      escapes.adoptBuffer(key, mirrored)
+      return key
+    }
+    const flipped: Float32Array[] = []
+    for (let ch = 0; ch < asset.buffer.numberOfChannels; ch++) {
+      const source = asset.buffer.getChannelData(ch)
+      const out = new Float32Array(source.length)
+      for (let i = 0, j = source.length - 1; i < source.length; i++, j--) out[i] = source[j]
+      flipped.push(out)
+    }
+    backend.registerBuffer(key, flipped, asset.buffer.sampleRate)
+    return key
   }
 
   // ---------- Metronome ----------
@@ -837,8 +972,8 @@ export class AudioEngine {
    */
   trackLevel(trackId: TrackId): number {
     const chain = this.chains.get(trackId)
-    if (!chain) return 0
-    chain.analyser.getFloatTimeDomainData(chain.meterBuf)
+    if (!chain || !this.backend) return 0
+    if (!this.backend.readTap(chain.tap, chain.meterBuf)) return 0
     let peak = 0
     for (let i = 0; i < chain.meterBuf.length; i++) {
       const v = Math.abs(chain.meterBuf[i])
@@ -849,8 +984,8 @@ export class AudioEngine {
 
   /** Instantaneous master peak level, 0..1. Zero when the engine is idle. */
   meterLevel(): number {
-    if (!this.analyser || !this.meterBuf) return 0
-    this.analyser.getFloatTimeDomainData(this.meterBuf)
+    if (this.masterTap === null || !this.meterBuf || !this.backend) return 0
+    if (!this.backend.readTap(this.masterTap, this.meterBuf)) return 0
     let peak = 0
     for (let i = 0; i < this.meterBuf.length; i++) {
       const v = Math.abs(this.meterBuf[i])
@@ -866,29 +1001,32 @@ export class AudioEngine {
    * cards' rAF loops, never through React state.
    */
   pluginAnalysis(instanceId: PluginInstanceId): PluginAnalysis | null {
-    return this.fxNodes.get(instanceId)?.analysis ?? null
+    return this.fxNodes.get(instanceId)?.nodes.analysis ?? null
   }
 
   /**
    * Time-domain analyser for a routing-graph wire's SOURCE: an insert's
    * output rides its existing internal analyser tap; the 'in' terminal
    * gets a lazy tap on the track chain's input, keyed by the input node
-   * itself so a chain rebuild simply mints a fresh tap. Feeds the graph
+   * id so a chain rebuild simply mints a fresh tap. Feeds the graph
    * view's wire oscilloscopes; costs nothing until the view asks.
+   *
+   * UI-facing AnalyserNode contract — a Web Audio escape until phase 2's
+   * tap system replaces plugin/wire analysis app-wide.
    */
-  private inputWaveTaps = new WeakMap<GainNode, AnalyserNode>()
+  private inputWaveTaps = new Map<BackendNodeId, AnalyserNode>()
 
   graphSourceAnalyser(trackId: TrackId, from: 'in' | PluginInstanceId): AnalyserNode | null {
-    if (from !== 'in') return this.fxNodes.get(from)?.analysis?.spectrum ?? null
-    const ctx = this.ctx
-    if (!ctx) return null
+    if (from !== 'in') return this.fxNodes.get(from)?.nodes.analysis?.spectrum ?? null
+    const escapes = this.backend?.webAudio
+    if (!escapes) return null
     const chain = this.chains.get(trackId)
     if (!chain) return null
     let tap = this.inputWaveTaps.get(chain.input)
     if (!tap) {
-      tap = ctx.createAnalyser()
+      tap = escapes.ctx.createAnalyser()
       tap.fftSize = 1024
-      chain.input.connect(tap)
+      escapes.nodeOf(chain.input).connect(tap)
       this.inputWaveTaps.set(chain.input, tap)
     }
     return tap
@@ -911,7 +1049,7 @@ export class AudioEngine {
     }
     if (event === 'seek' && !this.transport.isPlaying) return
 
-    const ctx = this.ensureContext()
+    const backend = this.ensureBackend()
     const go = (): void => {
       // Refresh per play/seek: outputLatency changes with output devices.
       this.transport.setOutputLatency(this.outputLatencySec())
@@ -929,7 +1067,8 @@ export class AudioEngine {
         else this.stopFxAutomation()
       })
     }
-    if (ctx.state === 'suspended') void ctx.resume().then(go)
+    const ctx = backend.webAudio?.ctx
+    if (ctx && ctx.state === 'suspended') void ctx.resume().then(go)
     else go()
   }
 
@@ -952,7 +1091,7 @@ export class AudioEngine {
     const generation = this.previewGeneration
     const first = await this.preparePreview()
     // Stopped or superseded while rendering: drop it on the floor.
-    if (generation !== this.previewGeneration || !this.ctx) return
+    if (generation !== this.previewGeneration || !this.backend) return
     this.reanchor()
     // Clear automation BEFORE the passes arm it: cancelScheduledValues
     // would otherwise wipe what they just queued.
@@ -982,9 +1121,9 @@ export class AudioEngine {
    */
   private async preparePreview(): Promise<Map<TrackId, { buffer: AudioBuffer; fromTicks: number }>> {
     const out = new Map<TrackId, { buffer: AudioBuffer; fromTicks: number }>()
-    const ctx = this.ctx
+    const backend = this.backend
     this.previewTracks = new Set()
-    if (!ctx || !this.preview || !this.transport.isPlaying) return out
+    if (!backend || !this.preview || !this.transport.isPlaying) return out
     // Preview windows advance linearly and cannot wrap, so while the cycle
     // region is active previewed tracks would sail past the loop end.
     // They play dry instead (builtins live, VST3 bypassed) — as before
@@ -999,12 +1138,13 @@ export class AudioEngine {
     const untilTicks =
       fromTicks + Math.ceil(PREVIEW_WINDOW_SEC * ticksPerSecond(this.store.state.tempo))
 
+    const sampleRate = backend.start().sampleRate
     for (const trackId of tracks) {
-      // Plugins open at the LIVE context rate, and preview windows are
+      // Plugins open at the LIVE stream rate, and preview windows are
       // rendered at the same rate (LivePreview keeps the two agreeing) —
       // the plugin sees material at its negotiated rate and the returned
       // windows play 1:1, no resample at either end.
-      if (!(await this.preview.open(trackId, ctx.sampleRate))) continue
+      if (!(await this.preview.open(trackId, sampleRate))) continue
       const buffer = await this.preview.renderWindow(trackId, fromTicks, untilTicks)
       if (generation !== this.previewGeneration) return new Map()
       if (!buffer) continue
@@ -1030,27 +1170,39 @@ export class AudioEngine {
     }
   }
 
+  /** Unique ids for transient preview-window buffers (released on end). */
+  private previewBufferSeq = 0
+
   private schedulePreviewBuffer(
     trackId: TrackId,
     buffer: AudioBuffer,
     when: number,
     offsetSec = 0
   ): void {
-    const ctx = this.ctx
-    if (!ctx) return
-    const source = ctx.createBufferSource()
-    source.buffer = buffer
+    const backend = this.backend
+    if (!backend) return
+    const bufferId = `pv!${trackId}!${this.previewBufferSeq++}`
+    if (backend.webAudio) backend.webAudio.adoptBuffer(bufferId, buffer)
+    else {
+      const channels: Float32Array[] = []
+      for (let ch = 0; ch < buffer.numberOfChannels; ch++) channels.push(buffer.getChannelData(ch))
+      backend.registerBuffer(bufferId, channels, buffer.sampleRate)
+    }
     // Injected AFTER the inserts: the builtins are already baked into the
     // window, while `auto` still applies live volume automation.
-    source.connect(this.chain(trackId).auto)
-    const byTrack = this.trackSources(trackId)
-    source.onended = () => {
-      this.sources.delete(source)
-      byTrack.delete(source)
+    const voice = backend.play({ bufferId, when, offsetSec, destination: this.chain(trackId).auto })
+    if (voice === null) {
+      backend.releaseBuffer(bufferId)
+      return
     }
-    source.start(when, offsetSec)
-    this.sources.add(source)
-    byTrack.add(source)
+    const byTrack = this.trackSources(trackId)
+    this.sources.add(voice)
+    byTrack.add(voice)
+    this.voiceCleanups.set(voice, () => {
+      this.sources.delete(voice)
+      byTrack.delete(voice)
+      backend.releaseBuffer(bufferId)
+    })
   }
 
   private startPreviewScheduler(): void {
@@ -1060,8 +1212,8 @@ export class AudioEngine {
 
   /** Render and queue windows until the lookahead horizon is covered. */
   private async topUpPreview(): Promise<void> {
-    const ctx = this.ctx
-    if (!ctx || !this.preview || !this.transport.isPlaying) return
+    const backend = this.backend
+    if (!backend || !this.preview || !this.transport.isPlaying) return
     // A loop region appeared mid-play: preview cannot wrap, so restart —
     // preparePreview will then decline and the tracks fall back to dry.
     if (this.transport.activeLoop()) {
@@ -1078,7 +1230,7 @@ export class AudioEngine {
       for (const trackId of this.previewTracks) {
         let guard = 0
         while (
-          (this.previewNextSec.get(trackId) ?? 0) < ctx.currentTime + PREVIEW_LOOKAHEAD_SEC &&
+          (this.previewNextSec.get(trackId) ?? 0) < backend.now() + PREVIEW_LOOKAHEAD_SEC &&
           guard++ < 4
         ) {
           const fromTicks = this.previewNextTicks.get(trackId) ?? 0
@@ -1087,11 +1239,11 @@ export class AudioEngine {
             fromTicks,
             fromTicks + windowTicks
           )
-          if (generation !== this.previewGeneration || !this.ctx) return
+          if (generation !== this.previewGeneration || !this.backend) return
           if (!buffer) break // past the end of the material
-          const when = this.previewNextSec.get(trackId) ?? ctx.currentTime
+          const when = this.previewNextSec.get(trackId) ?? backend.now()
           // Falling behind: drop the window rather than schedule the past.
-          if (when > ctx.currentTime) this.schedulePreviewBuffer(trackId, buffer, when)
+          if (when > backend.now()) this.schedulePreviewBuffer(trackId, buffer, when)
           this.previewNextSec.set(trackId, when + buffer.duration)
           this.previewNextTicks.set(trackId, fromTicks + windowTicks)
         }
@@ -1167,7 +1319,7 @@ export class AudioEngine {
     else next.delete(trackId)
     this.trackLoops = next
     for (const listener of this.trackLoopListeners) listener()
-    if (this.transport.isPlaying && this.ctx) {
+    if (this.transport.isPlaying && this.backend) {
       void this.restart(() => {})
       this.startTrackLoopScheduler()
     }
@@ -1200,19 +1352,19 @@ export class AudioEngine {
     this.fxAutoTimer = null
     // Settle every automated insert back onto its stored params, so a
     // stopped transport leaves the knobs meaning what they say.
-    const ctx = this.ctx
-    if (!ctx) return
+    const backend = this.backend
+    if (!backend) return
     const state = this.store.state
     for (const instanceId of this.automationIndex().byInstance.keys()) {
       const instance = state.plugins[instanceId]
-      if (instance) this.fxNodes.get(instance.id)?.apply(instance.params, ctx.currentTime)
+      if (instance) this.fxNodes.get(instance.id)?.nodes.apply(instance.params, backend.now())
     }
   }
 
   /** Push each automated insert param's curve value into its live nodes. */
   private applyFxAutomation(): void {
-    const ctx = this.ctx
-    if (!ctx || !this.transport.isPlaying) return
+    const backend = this.backend
+    if (!backend || !this.transport.isPlaying) return
     const state = this.store.state
     // Groups are prebuilt (and pre-sorted) once per document change — this
     // runs 20× a second and must not rescan the automation record.
@@ -1223,8 +1375,8 @@ export class AudioEngine {
       const instance = state.plugins[instanceId]
       if (!instance || !instance.enabled) continue
       if (state.tracks[instance.trackId]?.frozenAssetId) continue // baked
-      const nodes = this.fxNodes.get(instanceId)
-      if (!nodes) continue // missing/external plugin: nothing live to drive
+      const entry = this.fxNodes.get(instanceId)
+      if (!entry) continue // missing/external plugin: nothing live to drive
       const defs = paramDefsOf(instance.descriptor)
       const merged: Record<string, number> = { ...instance.params }
       for (const [param, points] of params) {
@@ -1232,7 +1384,7 @@ export class AudioEngine {
         const def = defs?.[param]
         merged[param] = def ? denormalizeParam(def, v) : v
       }
-      nodes.apply(merged, ctx.currentTime)
+      entry.nodes.apply(merged, backend.now())
     }
   }
 
@@ -1244,12 +1396,12 @@ export class AudioEngine {
    * region already repeats everything inside it).
    */
   private topUpTrackLoops(): void {
-    const ctx = this.ctx
-    if (!ctx || this.trackLoops.size === 0 || this.transport.activeLoop()) return
+    const backend = this.backend
+    if (!backend || this.trackLoops.size === 0 || this.transport.activeLoop()) return
     const state = this.store.state
     const tps = ticksPerSecond(state.tempo)
     const horizonTicks =
-      this.anchorTicks + (ctx.currentTime + SCHEDULE_LOOKAHEAD_SEC - this.anchorSec) * tps
+      this.anchorTicks + (backend.now() + SCHEDULE_LOOKAHEAD_SEC - this.anchorSec) * tps
     for (const trackId of this.trackLoops) {
       const track = state.tracks[trackId]
       if (!track || track.frozenAssetId !== null) continue
@@ -1266,7 +1418,7 @@ export class AudioEngine {
       let guard = 0
       while (span.start + repeat * period < horizonTicks && guard++ < 64) {
         const repeatState = trackLoopRepeatState(state, trackId, repeat * period)
-        const fadeGains = new Map<string, GainNode>()
+        const fadeGains = new Map<string, BackendNodeId>()
         this.scheduleClipsPass(
           this.anchorTicks,
           this.anchorSec,
@@ -1294,8 +1446,8 @@ export class AudioEngine {
    * inaudible.
    */
   private resyncMetronomeIfWrapped(): void {
-    const ctx = this.ctx
-    if (!ctx || !this.metroEnabled) return
+    const backend = this.backend
+    if (!backend || !this.metroEnabled) return
     const position = this.transport.positionTicks()
     if (position >= this.lastMetroPosition) {
       this.lastMetroPosition = position
@@ -1303,7 +1455,7 @@ export class AudioEngine {
     }
     this.lastMetroPosition = position
     this.metroAnchorTicks = position
-    this.metroAnchorSec = ctx.currentTime
+    this.metroAnchorSec = backend.now()
     this.nextBeatIndex = beatIndexAt(this.store.state, position)
   }
 
@@ -1334,7 +1486,7 @@ export class AudioEngine {
     if (state.tracks !== this.prevTracks || state.masterVolume !== this.prevMasterVolume) {
       this.prevTracks = state.tracks
       this.prevMasterVolume = state.masterVolume
-      if (this.ctx) {
+      if (this.backend) {
         this.syncMixer()
         // Freeze/unfreeze re-wires inserts (bypass vs live) — only on the
         // tracks that actually flipped.
@@ -1355,7 +1507,7 @@ export class AudioEngine {
     if (state.plugins !== this.prevPlugins) {
       const prev = this.prevPlugins
       const rewire = new Set<TrackId>()
-      const now = this.ctx?.currentTime ?? 0
+      const now = this.backend?.now() ?? 0
       for (const [id, instance] of Object.entries(state.plugins)) {
         const before = prev[id]
         if (before === instance) continue
@@ -1372,10 +1524,10 @@ export class AudioEngine {
         ) {
           rewire.add(before.trackId)
           rewire.add(instance.trackId)
-        } else if (before.params !== instance.params && this.ctx) {
+        } else if (before.params !== instance.params && this.backend) {
           // Remote peer edits and committed ops land here; local drags
           // already previewed the same values through the same call.
-          this.fxNodes.get(id)?.apply(instance.params, now)
+          this.fxNodes.get(id)?.nodes.apply(instance.params, now)
         }
       }
       for (const [id, instance] of Object.entries(prev)) {
@@ -1385,7 +1537,7 @@ export class AudioEngine {
         }
       }
       this.prevPlugins = state.plugins
-      if (this.ctx) this.syncPluginsFor(rewire)
+      if (this.backend) this.syncPluginsFor(rewire)
     }
     // Routing-graph edits rewire chains; on a track previewed through
     // external plugins they also change what the windows sound like.
@@ -1400,11 +1552,11 @@ export class AudioEngine {
         if (!state.routes[id]) rewire.add(route.trackId)
       }
       this.prevRoutes = state.routes
-      if (this.ctx) this.syncPluginsFor(rewire)
+      if (this.backend) this.syncPluginsFor(rewire)
     }
     const automationEdited = state.automation !== this.prevAutomation
     this.prevAutomation = state.automation
-    if (automationEdited && this.transport.isPlaying && this.ctx) {
+    if (automationEdited && this.transport.isPlaying && this.backend) {
       this.rearmAutomation()
       // The first insert-param point mid-play needs the sampler running.
       if (this.automationIndex().byInstance.size > 0) this.startFxAutomation()
@@ -1456,7 +1608,7 @@ export class AudioEngine {
     // interrupt playback, and one track's edit must never glitch another's
     // audio. Already-rendered preview windows bake the OLD state in, so
     // the preview paths restart() to re-render them.
-    if (this.transport.isPlaying && this.ctx) {
+    if (this.transport.isPlaying && this.backend) {
       // restart() resets and re-arms automation itself, so a freeze flip
       // (whose baked automation must go neutral) needs nothing extra here.
       if (fullRestart) this.queueRestart()
@@ -1465,7 +1617,7 @@ export class AudioEngine {
   }
 
   private onAssetsChanged = (event?: AssetEvent): void => {
-    if (!this.transport.isPlaying || !this.ctx) return
+    if (!this.transport.isPlaying || !this.backend) return
     // Eventless notifications are peak fills and project-switch clears:
     // drawing data, and a path that always stops the transport first.
     // Neither affects what is scheduled.
@@ -1515,7 +1667,7 @@ export class AudioEngine {
       this.lastRestartAt = performance.now()
       const scoped = this.pendingRestartTracks
       this.pendingRestartTracks = null
-      if (this.transport.isPlaying && this.ctx) {
+      if (this.transport.isPlaying && this.backend) {
         if (scoped === null) void this.restart(() => this.resyncMetronome())
         else this.rescheduleTracks(scoped)
       }
@@ -1525,8 +1677,8 @@ export class AudioEngine {
   // ---------- Internals ----------
 
   private reanchor(): void {
-    if (!this.ctx) return
-    this.anchorSec = this.ctx.currentTime
+    if (!this.backend) return
+    this.anchorSec = this.backend.now()
     this.anchorTicks = this.transport.positionTicks()
     // A restart tore down every scheduled source, launched pad repeats
     // included. Rewind each loop's counter to the repeat sounding at the
@@ -1554,7 +1706,7 @@ export class AudioEngine {
   ): void {
     // Clips and synth voices share one fade envelope per clip, so a MIDI
     // clip tapers exactly like an audio one.
-    const fadeGains = new Map<string, GainNode>()
+    const fadeGains = new Map<string, BackendNodeId>()
     this.scheduleClipsPass(fromTicks, atSec, untilTicks, fadeGains, undefined, window)
     this.scheduleNotesPass(fromTicks, atSec, untilTicks, fadeGains, undefined, window)
     // Automation rides along so each loop iteration replays it. Windowed
@@ -1571,8 +1723,8 @@ export class AudioEngine {
    * restarting clip sources (an automation edit must not glitch playback).
    */
   private upcomingPasses(): Array<[fromTicks: number, atSec: number, untilTicks: number]> {
-    const ctx = this.ctx
-    if (!ctx) return []
+    const backend = this.backend
+    if (!backend) return []
     const loop = this.transport.activeLoop()
     if (!loop) return [[this.anchorTicks, this.anchorSec, Number.POSITIVE_INFINITY]]
     const tps = ticksPerSecond(this.store.state.tempo)
@@ -1581,7 +1733,7 @@ export class AudioEngine {
       [this.anchorTicks, this.anchorSec, loop.end]
     ]
     if (spanSec <= 0) return passes
-    const horizon = ctx.currentTime + SCHEDULE_LOOKAHEAD_SEC
+    const horizon = backend.now() + SCHEDULE_LOOKAHEAD_SEC
     let at = this.anchorSec + (loop.end - this.anchorTicks) / tps
     let guard = 0
     while (at < horizon && guard++ < 64) {
@@ -1599,13 +1751,13 @@ export class AudioEngine {
   private destinationFor(
     clipId: string,
     trackId: TrackId,
-    fadeGains: Map<string, GainNode>,
+    fadeGains: Map<string, BackendNodeId>,
     fromTicks: number,
     atSec: number,
     untilTicks: number,
     state: ProjectState = this.store.state
-  ): AudioNode {
-    const ctx = this.ctx!
+  ): BackendNodeId {
+    const backend = this.backend!
     const chainInput = this.chain(trackId).input
     // Looked up in the pass's own state: a track-loop ghost repeat carries
     // shifted clip positions, so its fades land on the repeat, not the
@@ -1613,12 +1765,12 @@ export class AudioEngine {
     const clip = state.clips[clipId]
     if (!clip || (clip.fadeIn <= 0 && clip.fadeOut <= 0)) return chainInput
     let gain = fadeGains.get(clipId)
-    if (!gain) {
-      gain = ctx.createGain()
-      gain.connect(chainInput)
+    if (gain === undefined) {
+      gain = backend.createNode('gain')
+      backend.connect(gain, chainInput)
       // Fades are relative to THIS pass's anchor, so a clip inside a loop
       // region tapers identically on every iteration.
-      applyClipFades(gain.gain, clip, state.tempo, fromTicks, atSec)
+      backend.scheduleParam(gain, 'gain', clipFadeEvents(clip, state.tempo, fromTicks, atSec))
       fadeGains.set(clipId, gain)
       const endSec = Number.isFinite(untilTicks)
         ? atSec + (untilTicks - fromTicks) / ticksPerSecond(state.tempo)
@@ -1640,10 +1792,10 @@ export class AudioEngine {
       this.loopNextIterationSec = null
       // Linear playback: queue only the lookahead window; the scheduler
       // timer extends it. Automation is armed for the whole song here.
-      const ctx = this.ctx!
+      const backend = this.backend!
       const tps = ticksPerSecond(this.store.state.tempo)
       const horizon = Math.ceil(
-        this.anchorTicks + (ctx.currentTime + SCHEDULE_LOOKAHEAD_SEC - this.anchorSec) * tps
+        this.anchorTicks + (backend.now() + SCHEDULE_LOOKAHEAD_SEC - this.anchorSec) * tps
       )
       this.windowUntilTicks = horizon
       this.schedulePass(this.anchorTicks, this.anchorSec, Number.POSITIVE_INFINITY, {
@@ -1666,14 +1818,14 @@ export class AudioEngine {
 
   /** Queue whole iterations until the lookahead window is covered. */
   private topUpLoopIterations(): void {
-    const ctx = this.ctx
+    const backend = this.backend
     const loop = this.transport.activeLoop()
-    if (!ctx || !loop || this.loopNextIterationSec === null) return
-    this.purgeExpiredFades(ctx.currentTime)
+    if (!backend || !loop || this.loopNextIterationSec === null) return
+    this.purgeExpiredFades(backend.now())
     const tps = ticksPerSecond(this.store.state.tempo)
     const spanSec = (loop.end - loop.start) / tps
     if (spanSec <= 0) return
-    const horizon = ctx.currentTime + SCHEDULE_LOOKAHEAD_SEC
+    const horizon = backend.now() + SCHEDULE_LOOKAHEAD_SEC
     let guard = 0
     while (this.loopNextIterationSec < horizon && guard++ < 64) {
       this.schedulePass(loop.start, this.loopNextIterationSec, loop.end)
@@ -1688,14 +1840,14 @@ export class AudioEngine {
    * project is scanned every ~2 s, not four times a second.
    */
   private topUpWindow(): void {
-    const ctx = this.ctx
-    if (!ctx || this.windowUntilTicks === null) return
-    this.purgeExpiredFades(ctx.currentTime)
+    const backend = this.backend
+    if (!backend || this.windowUntilTicks === null) return
+    this.purgeExpiredFades(backend.now())
     const tps = ticksPerSecond(this.store.state.tempo)
     const untilSec = this.anchorSec + (this.windowUntilTicks - this.anchorTicks) / tps
-    if (untilSec - ctx.currentTime > SCHEDULE_LOOKAHEAD_SEC / 2) return
+    if (untilSec - backend.now() > SCHEDULE_LOOKAHEAD_SEC / 2) return
     const horizon = Math.ceil(
-      this.anchorTicks + (ctx.currentTime + SCHEDULE_LOOKAHEAD_SEC - this.anchorSec) * tps
+      this.anchorTicks + (backend.now() + SCHEDULE_LOOKAHEAD_SEC - this.anchorSec) * tps
     )
     if (horizon <= this.windowUntilTicks) return
     // Anchored at the ORIGINAL play anchor: `when` math stays one linear
@@ -1712,15 +1864,15 @@ export class AudioEngine {
     fromTicks: number,
     atSec: number,
     untilTicks: number,
-    fadeGains: Map<string, GainNode>,
+    fadeGains: Map<string, BackendNodeId>,
     state: ProjectState = this.store.state,
     window?: ScheduleWindow,
     only?: ReadonlySet<TrackId>,
-    /** Also registers created sources here — pad clip-loops stop via this. */
-    collect?: Set<AudioScheduledSourceNode>
+    /** Also registers created voices here — pad clip-loops stop via this. */
+    collect?: Set<VoiceId>
   ): void {
-    const ctx = this.ctx
-    if (!ctx) return
+    const backend = this.backend
+    if (!backend) return
     const schedules = scheduleClips(
       state,
       (id) => this.assets.getSeconds(id),
@@ -1735,14 +1887,8 @@ export class AudioEngine {
       // Previewed tracks: their finished audio (inserts included) arrives
       // as rendered windows — playing the dry clip too would double it.
       if (this.previewTracks.has(s.trackId)) continue
-      const asset = this.assets.get(s.assetId)
-      if (!asset?.buffer) continue
-      const buffer = s.reverse ? this.reversedBufferFor(ctx, s.assetId) : asset.buffer
-      if (!buffer) continue
-      const source = ctx.createBufferSource()
-      source.buffer = buffer
-      // Resampling: pitch and stretch both land here (see clipRate).
-      if (s.rate !== 1) source.playbackRate.value = s.rate
+      const bufferId = this.ensureBufferRegistered(s.assetId, s.reverse)
+      if (!bufferId) continue
       const dest = this.destinationFor(
         s.clipId,
         s.trackId,
@@ -1752,17 +1898,25 @@ export class AudioEngine {
         untilTicks,
         state
       )
-      source.connect(dest)
+      // Resampling: pitch and stretch both land in `rate` (see clipRate).
+      const voice = backend.play({
+        bufferId,
+        when: s.when,
+        offsetSec: s.offsetSec,
+        durationSec: s.durationSec,
+        rate: s.rate,
+        destination: dest
+      })
+      if (voice === null) continue
       const byTrack = this.trackSources(s.trackId)
-      source.onended = () => {
-        this.sources.delete(source)
-        byTrack.delete(source)
-        collect?.delete(source)
-      }
-      source.start(s.when, s.offsetSec, s.durationSec)
-      this.sources.add(source)
-      byTrack.add(source)
-      collect?.add(source)
+      this.sources.add(voice)
+      byTrack.add(voice)
+      collect?.add(voice)
+      this.voiceCleanups.set(voice, () => {
+        this.sources.delete(voice)
+        byTrack.delete(voice)
+        collect?.delete(voice)
+      })
     }
   }
 
@@ -1776,15 +1930,18 @@ export class AudioEngine {
     fromTicks: number,
     atSec: number,
     untilTicks: number,
-    fadeGains: Map<string, GainNode>,
+    fadeGains: Map<string, BackendNodeId>,
     state: ProjectState = this.store.state,
     window?: ScheduleWindow,
     only?: ReadonlySet<TrackId>,
-    /** Also registers created sources here — pad clip-loops stop via this. */
-    collect?: Set<AudioScheduledSourceNode>
+    /** Also registers created voices here — pad clip-loops stop via this. */
+    collect?: Set<VoiceId>
   ): void {
-    const ctx = this.ctx
-    if (!ctx) return
+    const backend = this.backend
+    // Instrument voices are Web-Audio-built until the phase-2 DSP ports;
+    // adopted as backend voices so teardown and bookkeeping stay uniform.
+    const escapes = backend?.webAudio
+    if (!backend || !escapes) return
     for (const s of scheduleNotes(state, fromTicks, atSec, untilTicks, window)) {
       if (only !== undefined && !only.has(s.trackId)) continue
       // Previewed tracks get their audio as rendered windows (synth included).
@@ -1801,22 +1958,30 @@ export class AudioEngine {
       )
       const byTrack = this.trackSources(s.trackId)
       const track = state.tracks[s.trackId]
-      const voices = buildInstrumentVoice(
-        ctx,
-        dest,
+      const adopted = new Map<AudioScheduledSourceNode, VoiceId>()
+      const sources = buildInstrumentVoice(
+        escapes.ctx,
+        escapes.nodeOf(dest),
         s,
         track?.synth ?? {},
         this.samplerSampleFor(track),
         (source) => {
-          this.sources.delete(source)
-          byTrack.delete(source)
-          collect?.delete(source)
+          // The voice id exists by the time any source can end: adoption
+          // happens synchronously below, before the voice is audible.
+          const voice = adopted.get(source)
+          if (voice === undefined) return
+          this.sources.delete(voice)
+          byTrack.delete(voice)
+          collect?.delete(voice)
+          this.voiceCleanups.delete(voice)
         }
       )
-      for (const source of voices) {
-        this.sources.add(source)
-        byTrack.add(source)
-        collect?.add(source)
+      for (const source of sources) {
+        const voice = escapes.adoptVoice(source)
+        adopted.set(source, voice)
+        this.sources.add(voice)
+        byTrack.add(voice)
+        collect?.add(voice)
       }
     }
   }
@@ -1846,24 +2011,28 @@ export class AudioEngine {
    * running off the end of the region and holding.
    */
   private resetAutomation(): void {
-    const ctx = this.ctx
-    if (!ctx) return
+    const backend = this.backend
+    if (!backend) return
     const state = this.store.state
     const index = this.automationIndex()
-    const now = ctx.currentTime
+    const now = backend.now()
     for (const trackId of Object.keys(state.tracks)) {
       const chain = this.chain(trackId)
-      chain.auto.gain.cancelScheduledValues(now)
-      chain.panner.pan.cancelScheduledValues(now)
+      backend.scheduleParam(chain.auto, 'gain', [{ kind: 'cancel', afterTime: now }])
+      backend.scheduleParam(chain.panner, 'pan', [{ kind: 'cancel', afterTime: now }])
       // Frozen tracks baked their volume automation into the render.
       const points = state.tracks[trackId]?.frozenAssetId
         ? NO_POINTS
         : (index.volumeByTrack.get(trackId) ?? NO_POINTS)
-      if (points.length === 0) chain.auto.gain.setValueAtTime(1, now)
+      if (points.length === 0) {
+        backend.scheduleParam(chain.auto, 'gain', [{ kind: 'setValue', value: 1, time: now }])
+      }
       // Pan automation owns the panner while points exist (0..1 → -1..1);
       // when the last point is deleted mid-playback the knob takes back over.
       if ((index.panByTrack.get(trackId) ?? NO_POINTS).length === 0) {
-        chain.panner.pan.setValueAtTime(state.tracks[trackId]?.pan ?? 0, now)
+        backend.scheduleParam(chain.panner, 'pan', [
+          { kind: 'setValue', value: state.tracks[trackId]?.pan ?? 0, time: now }
+        ])
       }
     }
   }
@@ -1876,6 +2045,8 @@ export class AudioEngine {
    * a ramp from wherever the previous iteration ended.
    */
   private scheduleAutomationPass(fromTicks: number, atSec: number, untilTicks: number): void {
+    const backend = this.backend
+    if (!backend) return
     const state = this.store.state
     const index = this.automationIndex()
     const tps = ticksPerSecond(state.tempo)
@@ -1890,19 +2061,33 @@ export class AudioEngine {
       const chain = this.chain(trackId)
 
       if (points.length > 0) {
-        chain.auto.gain.setValueAtTime(automationValueAt(points, fromTicks), atSec)
+        const events: ParamEvent[] = [
+          { kind: 'setValue', value: automationValueAt(points, fromTicks), time: atSec }
+        ]
         for (const point of points) {
           if (point.ticks <= fromTicks || point.ticks > untilTicks) continue
-          chain.auto.gain.linearRampToValueAtTime(point.value, rampTime(point.ticks))
+          events.push({ kind: 'linearRamp', value: point.value, endTime: rampTime(point.ticks) })
         }
+        backend.scheduleParam(chain.auto, 'gain', events)
       }
 
       if (panPoints.length > 0) {
-        chain.panner.pan.setValueAtTime(automationValueAt(panPoints, fromTicks) * 2 - 1, atSec)
+        const events: ParamEvent[] = [
+          {
+            kind: 'setValue',
+            value: automationValueAt(panPoints, fromTicks) * 2 - 1,
+            time: atSec
+          }
+        ]
         for (const point of panPoints) {
           if (point.ticks <= fromTicks || point.ticks > untilTicks) continue
-          chain.panner.pan.linearRampToValueAtTime(point.value * 2 - 1, rampTime(point.ticks))
+          events.push({
+            kind: 'linearRamp',
+            value: point.value * 2 - 1,
+            endTime: rampTime(point.ticks)
+          })
         }
+        backend.scheduleParam(chain.panner, 'pan', events)
       }
     }
   }
@@ -1915,27 +2100,25 @@ export class AudioEngine {
     }
   }
 
-  private trackSources(trackId: TrackId): Set<AudioScheduledSourceNode> {
+  private trackSources(trackId: TrackId): Set<VoiceId> {
     let set = this.sourcesByTrack.get(trackId)
     if (!set) this.sourcesByTrack.set(trackId, (set = new Set()))
     return set
   }
 
   private stopAllSources(): void {
-    for (const source of this.sources) {
-      // onended stays attached: synth voices disconnect their filter/env
-      // nodes there, and nulling it used to orphan two nodes per voice
-      // (with scheduled AudioParam events) on every stop at 4 nodes/note.
-      try {
-        source.stop()
-      } catch {
-        // never started or already stopped — fine
-      }
-      source.disconnect()
+    const backend = this.backend
+    for (const voice of this.sources) {
+      // The end notification stays live: synth voices disconnect their
+      // filter/env nodes in their own onended, which stopVoice preserves.
+      backend?.stopVoice(voice)
     }
     this.sources.clear()
     this.sourcesByTrack.clear()
-    for (const gain of this.fadeNodes.keys()) gain.disconnect()
+    for (const gain of this.fadeNodes.keys()) {
+      backend?.disconnect(gain)
+      backend?.disposeNode(gain)
+    }
     this.fadeNodes.clear()
   }
 
@@ -1945,23 +2128,20 @@ export class AudioEngine {
    * edit glitching its own track and an edit glitching the whole mix.
    */
   private stopTrackSources(trackIds: ReadonlySet<TrackId>): void {
+    const backend = this.backend
     for (const trackId of trackIds) {
       const set = this.sourcesByTrack.get(trackId)
       if (!set) continue
-      for (const source of set) {
-        this.sources.delete(source)
-        try {
-          source.stop()
-        } catch {
-          // never started or already stopped — fine
-        }
-        source.disconnect()
+      for (const voice of set) {
+        this.sources.delete(voice)
+        backend?.stopVoice(voice)
       }
       this.sourcesByTrack.delete(trackId)
     }
     for (const [gain, info] of this.fadeNodes) {
       if (trackIds.has(info.trackId)) {
-        gain.disconnect()
+        backend?.disconnect(gain)
+        backend?.disposeNode(gain)
         this.fadeNodes.delete(gain)
       }
     }
@@ -1975,8 +2155,8 @@ export class AudioEngine {
    * (windows bake document state in and must re-render regardless).
    */
   private rescheduleTracks(trackIds: ReadonlySet<TrackId>): void {
-    const ctx = this.ctx
-    if (!ctx || !this.transport.isPlaying) return
+    const backend = this.backend
+    if (!backend || !this.transport.isPlaying) return
     if (this.windowUntilTicks === null || this.previewTracks.size > 0) {
       void this.restart(() => this.resyncMetronome())
       return
@@ -1987,8 +2167,8 @@ export class AudioEngine {
     // material, which is exactly right for the edited clip under the
     // playhead — but only against a current-time anchor.
     const fromTicks = this.transport.positionTicks()
-    const atSec = ctx.currentTime
-    const fadeGains = new Map<string, GainNode>()
+    const atSec = backend.now()
+    const fadeGains = new Map<string, BackendNodeId>()
     const window: ScheduleWindow = { startBeforeTicks: this.windowUntilTicks }
     this.scheduleClipsPass(fromTicks, atSec, Number.POSITIVE_INFINITY, fadeGains, undefined, window, trackIds)
     this.scheduleNotesPass(fromTicks, atSec, Number.POSITIVE_INFINITY, fadeGains, undefined, window, trackIds)
@@ -2011,7 +2191,8 @@ export class AudioEngine {
   private purgeExpiredFades(now: number): void {
     for (const [gain, { endSec }] of this.fadeNodes) {
       if (endSec < now - 0.5) {
-        gain.disconnect()
+        this.backend?.disconnect(gain)
+        this.backend?.disposeNode(gain)
         this.fadeNodes.delete(gain)
       }
     }
@@ -2020,32 +2201,34 @@ export class AudioEngine {
   private chain(trackId: TrackId): TrackChain {
     const existing = this.chains.get(trackId)
     if (existing) return existing
-    const ctx = this.ensureContext()
-    const input = ctx.createGain()
-    const auto = ctx.createGain()
-    const fader = ctx.createGain()
-    const panner = ctx.createStereoPanner()
-    fader.gain.value = this.effectiveGain(trackId)
-    panner.pan.value = this.store.state.tracks[trackId]?.pan ?? 0
-    input.connect(auto)
-    auto.connect(fader)
-    fader.connect(panner)
+    const backend = this.ensureBackend()
+    const input = backend.createNode('gain')
+    const auto = backend.createNode('gain')
+    const fader = backend.createNode('gain')
+    const panner = backend.createNode('stereoPanner')
+    backend.scheduleParam(fader, 'gain', [
+      { kind: 'setValue', value: this.effectiveGain(trackId), time: 0 }
+    ])
+    backend.scheduleParam(panner, 'pan', [
+      { kind: 'setValue', value: this.store.state.tracks[trackId]?.pan ?? 0, time: 0 }
+    ])
+    backend.connect(input, auto)
+    backend.connect(auto, fader)
+    backend.connect(fader, panner)
     const parentId = this.store.state.tracks[trackId]?.parentId ?? null
-    panner.connect(this.busFor(parentId))
-    // Metering is a side-tap: the analyser has no onward connection, so it
+    backend.connect(panner, this.busFor(parentId))
+    // Metering is a side-tap: the tap has no onward connection, so it
     // observes the post-fader/pan signal without altering the path. A peak
     // meter needs no frequency resolution — 256 samples per read is a 4×
     // cheaper scan than the old 1024 across every track every frame.
-    const analyser = ctx.createAnalyser()
-    analyser.fftSize = 256
-    panner.connect(analyser)
+    const tap = backend.createTap(panner, TRACK_TAP_FRAMES)
     const chain: TrackChain = {
       input,
       auto,
       fader,
       panner,
-      analyser,
-      meterBuf: new Float32Array(analyser.fftSize),
+      tap,
+      meterBuf: new Float32Array(TRACK_TAP_FRAMES),
       parentId
     }
     this.chains.set(trackId, chain)
@@ -2054,11 +2237,11 @@ export class AudioEngine {
   }
 
   /** Where a track's output goes: its folder's chain input, or master. */
-  private busFor(parentId: TrackId | null): AudioNode {
+  private busFor(parentId: TrackId | null): BackendNodeId {
     if (parentId !== null && this.store.state.tracks[parentId]) {
       return this.chain(parentId).input
     }
-    return this.master!
+    return this.backend!.masterNode()
   }
 
   /**
@@ -2069,7 +2252,7 @@ export class AudioEngine {
    * a missing plugin never breaks playback or the project.
    */
   private syncPlugins(): void {
-    if (!this.ctx) return
+    if (!this.backend) return
     this.syncPluginsFor(new Set(this.chains.keys()))
   }
 
@@ -2080,19 +2263,23 @@ export class AudioEngine {
    * track's worth of connect calls and a full-project storm per edit.
    */
   private syncPluginsFor(trackIds: ReadonlySet<TrackId>): void {
-    const ctx = this.ctx
-    if (!ctx || trackIds.size === 0) return
+    const backend = this.backend
+    if (!backend || trackIds.size === 0) return
     const state = this.store.state
-    for (const [instanceId, nodes] of this.fxNodes) {
+    for (const [instanceId, entry] of this.fxNodes) {
       if (!state.plugins[instanceId]) {
-        nodes.dispose()
+        entry.nodes.dispose()
+        backend.disposeNode(entry.inputId)
+        backend.disposeNode(entry.outputId)
         this.fxNodes.delete(instanceId)
       }
     }
     for (const [instanceId, ports] of this.graphPorts) {
       if (!state.plugins[instanceId]) {
-        ports.inlet.disconnect()
-        ports.outlet.disconnect()
+        backend.disconnect(ports.inlet)
+        backend.disconnect(ports.outlet)
+        backend.disposeNode(ports.inlet)
+        backend.disposeNode(ports.outlet)
         this.graphPorts.delete(instanceId)
       }
     }
@@ -2103,28 +2290,33 @@ export class AudioEngine {
   }
 
   private wireInserts(trackId: TrackId, chain: TrackChain): void {
-    const ctx = this.ctx
-    if (!ctx) return
-    const now = ctx.currentTime
+    const backend = this.backend
+    if (!backend) return
+    const now = backend.now()
     const inserts = pluginsOfTrack(this.store.state, trackId)
 
-    chain.input.disconnect()
+    backend.disconnect(chain.input)
     // The blanket disconnect above also severed the wire-oscilloscope tap
     // (graphSourceAnalyser) if one exists — re-attach it, or the routing
     // view's scopes go flat after the first rewire and never recover.
     const inputTap = this.inputWaveTaps.get(chain.input)
-    if (inputTap) chain.input.connect(inputTap)
+    if (inputTap && backend.webAudio) {
+      backend.webAudio.nodeOf(chain.input).connect(inputTap)
+    }
     for (const instance of inserts) {
-      this.fxNodes.get(instance.id)?.output.disconnect()
+      const entry = this.fxNodes.get(instance.id)
+      if (entry) backend.disconnect(entry.outputId)
       const ports = this.graphPorts.get(instance.id)
-      ports?.inlet.disconnect()
-      ports?.outlet.disconnect()
+      if (ports) {
+        backend.disconnect(ports.inlet)
+        backend.disconnect(ports.outlet)
+      }
     }
 
     // A frozen track's render already contains its inserts — bypass them
     // all (this is where the CPU is saved; nodes stay alive for unfreeze).
     if (this.store.state.tracks[trackId]?.frozenAssetId) {
-      chain.input.connect(chain.auto)
+      backend.connect(chain.input, chain.auto)
       return
     }
 
@@ -2134,15 +2326,15 @@ export class AudioEngine {
       return
     }
 
-    let prev: AudioNode = chain.input
+    let prev: BackendNodeId = chain.input
     for (const instance of inserts) {
       if (!instance.enabled) continue
-      const nodes = this.liveNodesFor(instance, now)
-      if (!nodes) continue // MISSING here: bypass until a provider appears
-      prev.connect(nodes.input)
-      prev = nodes.output
+      const entry = this.liveNodesFor(instance, now)
+      if (!entry) continue // MISSING here: bypass until a provider appears
+      backend.connect(prev, entry.inputId)
+      prev = entry.outputId
     }
-    prev.connect(chain.auto)
+    backend.connect(prev, chain.auto)
   }
 
   /**
@@ -2159,48 +2351,51 @@ export class AudioEngine {
     routes: Route[],
     now: number
   ): void {
-    const ctx = this.ctx!
+    const backend = this.backend!
     for (const instance of inserts) {
       let ports = this.graphPorts.get(instance.id)
       if (!ports) {
-        ports = { inlet: ctx.createGain(), outlet: ctx.createGain() }
+        ports = { inlet: backend.createNode('gain'), outlet: backend.createNode('gain') }
         this.graphPorts.set(instance.id, ports)
       }
-      const nodes = instance.enabled ? this.liveNodesFor(instance, now) : null
-      if (nodes) {
-        ports.inlet.connect(nodes.input)
-        nodes.output.connect(ports.outlet)
+      const entry = instance.enabled ? this.liveNodesFor(instance, now) : null
+      if (entry) {
+        backend.connect(ports.inlet, entry.inputId)
+        backend.connect(entry.outputId, ports.outlet)
       } else {
-        ports.inlet.connect(ports.outlet)
+        backend.connect(ports.inlet, ports.outlet)
       }
     }
     for (const route of routes) {
       const from = route.from === 'in' ? chain.input : this.graphPorts.get(route.from)?.outlet
       const to = route.to === 'out' ? chain.auto : this.graphPorts.get(route.to)?.inlet
-      if (from && to) from.connect(to)
+      if (from !== undefined && to !== undefined) backend.connect(from, to)
     }
   }
 
-  /** The live builtin nodes for an instance, created/applied on demand (null = not local). */
-  private liveNodesFor(instance: PluginInstance, now: number): PluginNodes | null {
-    let nodes = this.fxNodes.get(instance.id)
-    if (!nodes) {
+  /**
+   * The live builtin nodes for an instance, created/applied on demand
+   * (null = not local). Builders create Web Audio nodes (the phase-2 DSP
+   * ports move them behind the seam); their input/output are adopted as
+   * backend nodes so all WIRING stays in the seam's currency.
+   */
+  private liveNodesFor(instance: PluginInstance, now: number): FxEntry | null {
+    let entry = this.fxNodes.get(instance.id)
+    if (!entry) {
+      const escapes = this.backend?.webAudio
+      if (!escapes) return null // non-Web-Audio backend: bypass until phase 2
       const resolved = pluginRegistry.resolve(instance.descriptor)
       if (!resolved) return null
-      nodes = resolved.provider.create(this.ctx!)
-      this.fxNodes.set(instance.id, nodes)
+      const nodes = resolved.provider.create(escapes.ctx)
+      entry = {
+        nodes,
+        inputId: escapes.adoptNode(nodes.input),
+        outputId: escapes.adoptNode(nodes.output)
+      }
+      this.fxNodes.set(instance.id, entry)
     }
-    nodes.apply(instance.params, now)
-    return nodes
-  }
-
-  /** Mirrored buffer for reversed clips, allocated by the asset store's cache. */
-  private reversedBufferFor(ctx: BaseAudioContext, assetId: string): AudioBuffer | null {
-    return this.assets.reversedBuffer(assetId, (channels, sampleRate) => {
-      const buffer = ctx.createBuffer(channels.length, channels[0].length, sampleRate)
-      channels.forEach((data, ch) => buffer.copyToChannel(data as Float32Array<ArrayBuffer>, ch))
-      return buffer
-    })
+    entry.nodes.apply(instance.params, now)
+    return entry
   }
 
   private isAudible(trackId: TrackId): boolean {
@@ -2261,40 +2456,45 @@ export class AudioEngine {
   }
 
   private syncMixer(): void {
-    const ctx = this.ctx
-    if (!ctx) return
-    const now = ctx.currentTime
-    this.master!.gain.setTargetAtTime(this.store.state.masterVolume, now, GAIN_SMOOTHING_SEC)
+    const backend = this.backend
+    if (!backend) return
+    this.smooth(backend.masterNode(), 'gain', this.store.state.masterVolume)
     const audible = this.audibilityResolver()
     const panAutomated = this.automationIndex().panByTrack
     for (const [trackId, chain] of this.chains) {
       const track = this.store.state.tracks[trackId]
       if (!track) {
         this.liveAllNotesOff(trackId)
-        this.monitors.get(trackId)?.disconnect()
-        this.monitors.delete(trackId)
-        chain.input.disconnect()
-        chain.auto.disconnect()
-        chain.fader.disconnect()
-        chain.panner.disconnect()
-        chain.analyser.disconnect()
+        const monitor = this.monitors.get(trackId)
+        if (monitor) {
+          backend.disconnect(monitor.id)
+          backend.disposeNode(monitor.id)
+          this.monitors.delete(trackId)
+        }
+        backend.disposeNode(chain.input)
+        backend.disposeNode(chain.auto)
+        backend.disposeNode(chain.fader)
+        backend.disposeNode(chain.panner)
+        backend.disposeTap(chain.tap)
+        this.inputWaveTaps.delete(chain.input)
         for (const instance of Object.values(this.prevPlugins)) {
           if (instance.trackId === trackId) {
-            this.fxNodes.get(instance.id)?.dispose()
-            this.fxNodes.delete(instance.id)
+            const entry = this.fxNodes.get(instance.id)
+            if (entry) {
+              entry.nodes.dispose()
+              backend.disposeNode(entry.inputId)
+              backend.disposeNode(entry.outputId)
+              this.fxNodes.delete(instance.id)
+            }
           }
         }
         this.chains.delete(trackId)
         continue
       }
-      chain.fader.gain.setTargetAtTime(
-        audible(trackId) ? track.volume : 0,
-        now,
-        GAIN_SMOOTHING_SEC
-      )
+      this.smooth(chain.fader, 'gain', audible(trackId) ? track.volume : 0)
       // While pan automation is playing, its ramps own the panner.
       if (!(this.transport.isPlaying && (panAutomated.get(trackId)?.length ?? 0) > 0)) {
-        chain.panner.pan.setTargetAtTime(track.pan, now, GAIN_SMOOTHING_SEC)
+        this.smooth(chain.panner, 'pan', track.pan)
       }
     }
     for (const trackId of Object.keys(this.store.state.tracks)) {
@@ -2304,9 +2504,11 @@ export class AudioEngine {
     for (const [trackId, chain] of this.chains) {
       const parentId = this.store.state.tracks[trackId]?.parentId ?? null
       if (parentId !== chain.parentId) {
-        chain.panner.disconnect()
-        chain.panner.connect(this.busFor(parentId))
-        chain.panner.connect(chain.analyser) // keep the meter tap
+        backend.disconnect(chain.panner)
+        backend.connect(chain.panner, this.busFor(parentId))
+        // The blanket disconnect severed the meter tap; re-tap the panner.
+        backend.disposeTap(chain.tap)
+        chain.tap = backend.createTap(chain.panner, TRACK_TAP_FRAMES)
         chain.parentId = parentId
       }
     }
@@ -2318,17 +2520,17 @@ export class AudioEngine {
    * seconds — the moment the roll (and capture) should begin.
    */
   countInClicks(bars: number): number {
-    const ctx = this.ensureContext()
+    const backend = this.ensureBackend()
     const state = this.store.state
     const beatsPerBar = state.timeSignature[0]
     const secPerBeat = ticksPerBeat(state.timeSignature) / ticksPerSecond(state.tempo)
     // Small offset so the first click isn't clipped by scheduling latency.
-    const start = ctx.currentTime + 0.06
+    const start = backend.now() + 0.06
     const total = bars * beatsPerBar
     for (let i = 0; i < total; i++) {
       this.scheduleClick(start + i * secPerBeat, i % beatsPerBar === 0)
     }
-    return start + total * secPerBeat - ctx.currentTime
+    return start + total * secPerBeat - backend.now()
   }
 
   private startMetronome(): void {
@@ -2344,8 +2546,8 @@ export class AudioEngine {
   }
 
   private resyncMetronome(): void {
-    const ctx = this.ctx
-    if (!ctx) return
+    const backend = this.backend
+    if (!backend) return
     const position = this.transport.positionTicks()
     this.nextBeatIndex = beatIndexAt(this.store.state, position)
     // The metronome keeps its own anchor because cycling moves the playhead
@@ -2355,14 +2557,14 @@ export class AudioEngine {
     // offsets every click by however far the loop had already wrapped
     // (silent at play, wrong when the metronome is switched on mid-cycle).
     this.metroAnchorTicks = position
-    this.metroAnchorSec = ctx.currentTime
+    this.metroAnchorSec = backend.now()
     this.lastMetroPosition = position
   }
 
   private metroTick = (): void => {
-    const ctx = this.ctx
-    if (!ctx || !this.metroEnabled || !this.transport.isPlaying) return
-    const now = ctx.currentTime
+    const backend = this.backend
+    if (!backend || !this.metroEnabled || !this.transport.isPlaying) return
+    const now = backend.now()
     const { clicks, nextBeatIndex } = metronomeClicks(
       this.store.state,
       this.metroAnchorTicks,
@@ -2375,23 +2577,40 @@ export class AudioEngine {
     for (const click of clicks) this.scheduleClick(click.when, click.isDownbeat)
   }
 
+  /**
+   * The click, pre-rendered once per buffer (§3: "generated: click") —
+   * byte-identical to the old inline oscillator: sin(2πft) under the
+   * 0.5 → 0.001 exponential decay over 50 ms, held to the 60 ms stop.
+   */
+  private registerClickBuffers(backend: IAudioBackend): void {
+    const { sampleRate } = backend.start()
+    for (const [id, freq] of [
+      ['sd!click!hi', 1320],
+      ['sd!click!lo', 880]
+    ] as const) {
+      const length = Math.round(0.06 * sampleRate)
+      const data = new Float32Array(length)
+      for (let i = 0; i < length; i++) {
+        const t = i / sampleRate
+        const env = t < 0.05 ? 0.5 * Math.pow(0.001 / 0.5, t / 0.05) : 0.001
+        data[i] = env * Math.sin(2 * Math.PI * freq * t)
+      }
+      backend.registerBuffer(id, [data], sampleRate)
+    }
+  }
+
   private scheduleClick(when: number, isDownbeat: boolean): void {
-    const ctx = this.ctx!
-    const osc = ctx.createOscillator()
-    const gain = ctx.createGain()
-    osc.frequency.value = isDownbeat ? 1320 : 880
-    gain.gain.setValueAtTime(0.5, when)
-    gain.gain.exponentialRampToValueAtTime(0.001, when + 0.05)
-    osc.connect(gain)
-    gain.connect(this.master!)
+    const backend = this.backend
+    if (!backend) return
+    const voice = backend.play({
+      bufferId: isDownbeat ? 'sd!click!hi' : 'sd!click!lo',
+      when,
+      destination: backend.masterNode()
+    })
+    if (voice === null) return
     // Tracked like every other source, so pressing stop also silences the
     // clicks already queued inside the lookahead window.
-    osc.onended = () => {
-      this.sources.delete(osc)
-      gain.disconnect()
-    }
-    osc.start(when)
-    osc.stop(when + 0.06)
-    this.sources.add(osc)
+    this.sources.add(voice)
+    this.voiceCleanups.set(voice, () => this.sources.delete(voice))
   }
 }

@@ -74,6 +74,9 @@ class AssetMemoryPolicy {
         this.unreferencedSince.delete(id)
       }
     }
+    // The engine's backend adopted these buffers for playback; its copies
+    // must release with the store's or the eviction frees nothing.
+    audioEngine.pruneAdoptedBuffers(evictable, keepReversed)
   }
 
   /** An op may have re-referenced an evicted asset — decode it back. */
