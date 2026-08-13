@@ -242,14 +242,18 @@ class Engine {
   }
 
   // ---- JS thread ----
+  //
+  // Ids are CALLER-minted (the renderer's proxy allocates them): every
+  // command is then one-way fire-and-forget, which is what lets the same
+  // protocol run in-process today and over a MessagePort unchanged —
+  // an id round-trip per createNode/play would put renderer→host RPC
+  // latency inside the scheduling path for no reason.
 
-  uint32_t CreateNode(NodeKind kind) {
-    const uint32_t id = nextId_++;
+  void CreateNode(uint32_t id, NodeKind kind) {
     Command c{Command::Op::CreateNode};
     c.a = id;
     c.nodeKind = kind;
     Push(std::move(c));
-    return id;
   }
 
   void Connect(uint32_t from, uint32_t to) {
@@ -297,17 +301,16 @@ class Engine {
     buffers_.erase(bufferId);
   }
 
-  /* Returns the voice id, or 0 when the buffer is unknown. */
-  uint32_t Play(const std::string& bufferId, double when, double offsetSec, double durationSec,
-                double rate, uint32_t dest) {
+  /* False when the buffer is unknown (the caller's play() returns null). */
+  bool Play(uint32_t id, const std::string& bufferId, double when, double offsetSec,
+            double durationSec, double rate, uint32_t dest) {
     std::shared_ptr<SharedBuffer> buffer;
     {
       std::lock_guard<std::mutex> lock(buffersMutex_);
       auto it = buffers_.find(bufferId);
-      if (it == buffers_.end()) return 0;
+      if (it == buffers_.end()) return false;
       buffer = it->second;
     }
-    const uint32_t id = nextId_++;
     Command c{Command::Op::Play};
     c.buffer = std::move(buffer);
     c.voice.id = id;
@@ -317,7 +320,7 @@ class Engine {
     c.voice.rate = rate > 0 ? rate : 1;
     c.voice.dest = dest;
     Push(std::move(c));
-    return id;
+    return true;
   }
 
   void StopVoice(uint32_t id, double atTime) {
@@ -327,14 +330,12 @@ class Engine {
     Push(std::move(c));
   }
 
-  uint32_t CreateTap(uint32_t node, uint32_t frames) {
-    const uint32_t id = nextId_++;
+  void CreateTap(uint32_t id, uint32_t node, uint32_t frames) {
     Command c{Command::Op::CreateTap};
     c.a = id;
     c.b = frames < 32 ? 32 : frames;
     c.voice.dest = node;  // reuse the field
     Push(std::move(c));
-    return id;
   }
 
   void DisposeTap(uint32_t id) {
@@ -624,8 +625,6 @@ class Engine {
       }
     }
   }
-
-  std::atomic<uint32_t> nextId_{1};
 
   std::mutex pendingMutex_;
   std::vector<Command> pending_;

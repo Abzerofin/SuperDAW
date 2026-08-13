@@ -385,13 +385,14 @@ sdengine::ParamEvent UnpackEvent(const Napi::Object& raw) {
   return event;
 }
 
-/** createNode('gain' | 'stereoPanner') → id */
+/** createNode(id, 'gain' | 'stereoPanner') — ids are caller-minted (≥ 1). */
 Napi::Value CreateNode(const Napi::CallbackInfo& info) {
   Napi::Env env = info.Env();
-  const std::string kind = info[0].As<Napi::String>();
-  const uint32_t id = EngineOf(env).CreateNode(
-      kind == "stereoPanner" ? sdengine::NodeKind::Panner : sdengine::NodeKind::Gain);
-  return Napi::Number::New(env, id);
+  const uint32_t id = info[0].As<Napi::Number>().Uint32Value();
+  const std::string kind = info[1].As<Napi::String>();
+  EngineOf(env).CreateNode(
+      id, kind == "stereoPanner" ? sdengine::NodeKind::Panner : sdengine::NodeKind::Gain);
+  return env.Undefined();
 }
 
 Napi::Value ConnectNodes(const Napi::CallbackInfo& info) {
@@ -453,7 +454,8 @@ Napi::Value ReleaseBuffer(const Napi::CallbackInfo& info) {
   return env.Undefined();
 }
 
-/** play({bufferId, when, offsetSec?, durationSec?, rate?, destination}) → voiceId | 0 */
+/** play({id, bufferId, when, offsetSec?, durationSec?, rate?, destination})
+ *  → false when the buffer is unknown (caller-minted voice ids). */
 Napi::Value PlayVoice(const Napi::CallbackInfo& info) {
   Napi::Env env = info.Env();
   auto spec = info[0].As<Napi::Object>();
@@ -461,11 +463,11 @@ Napi::Value PlayVoice(const Napi::CallbackInfo& info) {
     return spec.Has(key) && spec.Get(key).IsNumber() ? spec.Get(key).As<Napi::Number>()
                                                      : fallback;
   };
-  const uint32_t id = EngineOf(env).Play(
-      spec.Get("bufferId").As<Napi::String>(), num("when", 0), num("offsetSec", 0),
-      num("durationSec", -1), num("rate", 1),
+  const bool ok = EngineOf(env).Play(
+      spec.Get("id").As<Napi::Number>().Uint32Value(), spec.Get("bufferId").As<Napi::String>(),
+      num("when", 0), num("offsetSec", 0), num("durationSec", -1), num("rate", 1),
       spec.Get("destination").As<Napi::Number>().Uint32Value());
-  return Napi::Number::New(env, id);
+  return Napi::Boolean::New(env, ok);
 }
 
 Napi::Value StopVoice(const Napi::CallbackInfo& info) {
@@ -476,11 +478,13 @@ Napi::Value StopVoice(const Napi::CallbackInfo& info) {
   return env.Undefined();
 }
 
+/** createTap(id, nodeId, frames) — ids are caller-minted. */
 Napi::Value CreateTap(const Napi::CallbackInfo& info) {
   Napi::Env env = info.Env();
-  const uint32_t id = EngineOf(env).CreateTap(info[0].As<Napi::Number>().Uint32Value(),
-                                              info[1].As<Napi::Number>().Uint32Value());
-  return Napi::Number::New(env, id);
+  EngineOf(env).CreateTap(info[0].As<Napi::Number>().Uint32Value(),
+                          info[1].As<Napi::Number>().Uint32Value(),
+                          info[2].As<Napi::Number>().Uint32Value());
+  return env.Undefined();
 }
 
 /** readTap(id, out: Float32Array) → bool */

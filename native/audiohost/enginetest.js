@@ -1,4 +1,4 @@
-/*
+﻿/*
  * Native engine verification (run: node enginetest.js).
  *
  * Drives the graph/param/voice engine through renderOffline — the same
@@ -42,11 +42,11 @@ async function main() {
   // ---- 1: sample-accurate start through a half-gain node ----
   const tone = sine(440, 0.5, 0.8)
   host.registerBuffer('tone', [tone], SR)
-  const gainNode = host.createNode('gain')
+  let nextId = 1000; const gainNode = nextId++; host.createNode(gainNode, 'gain')
   host.scheduleParam(gainNode, 'gain', [{ kind: 'setValue', value: 0.5, time: 0 }])
   host.connect(gainNode, master)
-  const v1 = host.play({ bufferId: 'tone', when: 0.1, destination: gainNode })
-  check('play returns a voice id', v1 > 0)
+  const v1 = nextId++; host.play({ id: v1, bufferId: 'tone', when: 0.1, destination: gainNode })
+  check('play accepted the caller-minted voice id', v1 > 0)
 
   let out = host.renderOffline(0, SR, SR)
   check('silence before the start time', rmsAt(out, 0, 0.09) < 1e-6, rmsAt(out, 0, 0.09).toExponential(2))
@@ -71,7 +71,7 @@ async function main() {
     { kind: 'setValue', value: 0, time: 0 },
     { kind: 'linearRamp', value: 1, endTime: 1 }
   ])
-  host.play({ bufferId: 'tone', when: 0.5, destination: gainNode })
+  host.play({ id: nextId++, bufferId: 'tone', when: 0.5, destination: gainNode })
   out = host.renderOffline(0, SR, SR)
   const early = rmsAt(out, 0.5, 0.6) // ramp ≈ 0.55
   const late = rmsAt(out, 0.9, 1.0) // ramp ≈ 0.95
@@ -82,10 +82,10 @@ async function main() {
   )
 
   // ---- 3: equal-power pan hard left / hard right ----
-  const panner = host.createNode('stereoPanner')
+  const panner = nextId++; host.createNode(panner, 'stereoPanner')
   host.connect(panner, master)
   host.scheduleParam(panner, 'pan', [{ kind: 'setValue', value: 1, time: 0 }])
-  host.play({ bufferId: 'tone', when: 0, destination: panner })
+  host.play({ id: nextId++, bufferId: 'tone', when: 0, destination: panner })
   out = host.renderOffline(0, Math.round(0.4 * SR), SR)
   let leftEnergy = 0
   let rightEnergy = 0
@@ -105,7 +105,7 @@ async function main() {
     { kind: 'cancel', afterTime: 0 },
     { kind: 'setValue', value: 1, time: 0 }
   ])
-  const v4 = host.play({ bufferId: 'tone', when: 0, destination: gainNode })
+  const v4 = nextId++; host.play({ id: v4, bufferId: 'tone', when: 0, destination: gainNode })
   host.stopVoice(v4, 0.2)
   out = host.renderOffline(0, Math.round(0.5 * SR), SR)
   check(
@@ -116,7 +116,7 @@ async function main() {
   check('stopped voice notifies', host.drainEnded().includes(v4))
 
   // ---- 5: rate consumes the buffer proportionally ----
-  const v5 = host.play({ bufferId: 'tone', when: 0, rate: 2, destination: gainNode })
+  const v5 = nextId++; host.play({ id: v5, bufferId: 'tone', when: 0, rate: 2, destination: gainNode })
   out = host.renderOffline(0, SR, SR)
   check(
     'rate 2 halves the audible length',
@@ -127,8 +127,8 @@ async function main() {
   void v5
 
   // ---- 6: taps capture the node's output ----
-  const tap = host.createTap(gainNode, 256)
-  const v6 = host.play({ bufferId: 'tone', when: 0, destination: gainNode })
+  const tap = nextId++; host.createTap(tap, gainNode, 256)
+  const v6 = nextId++; host.play({ id: v6, bufferId: 'tone', when: 0, destination: gainNode })
   host.renderOffline(0, Math.round(0.2 * SR), SR)
   const window = new Float32Array(256)
   const got = host.readTap(tap, window)
@@ -143,7 +143,9 @@ async function main() {
   host.drainEnded()
 
   // ---- 7: offset/duration select buffer regions ----
-  const v7 = host.play({
+  const v7 = nextId++
+  host.play({
+    id: v7,
     bufferId: 'tone',
     when: 0,
     offsetSec: 0.25,
@@ -167,3 +169,4 @@ main().catch((err) => {
   console.error(err)
   process.exit(1)
 })
+
