@@ -173,6 +173,15 @@ enum class NodeKind : uint8_t {
   Oscillator
 };
 
+// ------------------------------------------------------------------ FFT
+
+/**
+ * In-place iterative radix-2 complex FFT (length a power of two). Used
+ * by the wavetable builder and the convolver; declared here so both see
+ * it. (FftImpl below carries the body.)
+ */
+inline void Fft(std::vector<float>& re, std::vector<float>& im, bool inverse);
+
 /** Web Audio oscillator waveforms. */
 enum class OscType : uint8_t { Sine, Square, Sawtooth, Triangle };
 
@@ -184,34 +193,100 @@ inline OscType ParseOscType(const std::string& name) {
 }
 
 /**
- * One oscillator sample from a normalized phase in [0, 1).
+ * Band-limited oscillator wavetables, matching Web Audio's PeriodicWave.
  *
- * Web Audio band-limits square/sawtooth/triangle (PeriodicWave summed to
- * the Nyquist); these are the naive shapes. The only consumer today is
- * the tremolo LFO at a few Hz driving a gain — where the audible
- * difference is the absence of Gibbs ringing at the corners, i.e. the
- * modulation is marginally CLEANER than Chromium's rather than wrong.
- * A band-limited table belongs with the first audio-rate oscillator
- * (the synth voices), not here.
+ * Naive shapes alias badly at musical pitches (a 440 Hz saw folds every
+ * harmonic above 24 kHz back into the audible band as inharmonic junk),
+ * so each waveform is additively synthesized into a set of tables, one
+ * per octave, each holding only the harmonics that fit under Nyquist at
+ * that range. Playback picks the range from the frequency and crossfades
+ * between neighbours.
+ *
+ * The conventions were recovered by measuring the real OscillatorNode
+ * (see nativeOscillator.test.ts):
+ *   - the series are the textbook ones — saw Σ(2/πn)(−1)^(n+1)·sin,
+ *     square Σ_odd(4/πn)·sin, triangle Σ_odd(8/π²n²)(−1)^((n−1)/2)·sin
+ *   - every table shares ONE normalization scale, chosen so the fullest
+ *     table peaks at 1.0. That is why Chromium's saw and square harmonics
+ *     all read 0.8483× the ideal (1/1.179, the Gibbs overshoot for a jump
+ *     of 2) while sine and triangle — which have no jump — read 1.0×.
  */
-inline double OscillatorSample(OscType type, double phase) {
-  switch (type) {
-    case OscType::Square:
-      return phase < 0.5 ? 1.0 : -1.0;
-    case OscType::Sawtooth:
-      return 2.0 * phase - 1.0;
-    case OscType::Triangle:
-      return phase < 0.5 ? 4.0 * phase - 1.0 : 3.0 - 4.0 * phase;
-    case OscType::Sine:
-    default:
-      return std::sin(2.0 * kPi * phase);
-  }
-}
+constexpr size_t kWaveTableSize = 4096;
+constexpr size_t kWaveRanges = 12;
+constexpr size_t kWaveMaxHarmonics = kWaveTableSize / 2;
 
-// ------------------------------------------------------------------ FFT
+struct WaveTableSet {
+  // [range][sample]; range r holds kWaveMaxHarmonics >> r harmonics.
+  std::vector<std::vector<float>> ranges;
+
+  void Build(OscType type) {
+    ranges.assign(kWaveRanges, std::vector<float>(kWaveTableSize, 0.0f));
+    for (size_t r = 0; r < kWaveRanges; r++) {
+      const size_t harmonics = std::max<size_t>(1, kWaveMaxHarmonics >> r);
+      std::vector<float> re(kWaveTableSize, 0.0f), im(kWaveTableSize, 0.0f);
+      for (size_t n = 1; n <= harmonics && n < kWaveTableSize / 2; n++) {
+        double b = 0;
+        switch (type) {
+          case OscType::Sine:
+            b = n == 1 ? 1.0 : 0.0;
+            break;
+          case OscType::Sawtooth:
+            b = (2.0 / (kPi * n)) * ((n % 2 == 1) ? 1.0 : -1.0);
+            break;
+          case OscType::Square:
+            b = (n % 2 == 1) ? 4.0 / (kPi * n) : 0.0;
+            break;
+          case OscType::Triangle:
+            b = (n % 2 == 1) ? (8.0 / (kPi * kPi * n * n)) *
+                                   (((n - 1) / 2) % 2 == 0 ? 1.0 : -1.0)
+                             : 0.0;
+            break;
+        }
+        if (b == 0) continue;
+        // A sine component of amplitude b at bin n: the inverse transform
+        // of ±b/2 j on the conjugate bin pair.
+        im[n] = static_cast<float>(-b * kWaveTableSize / 2.0);
+        im[kWaveTableSize - n] = static_cast<float>(b * kWaveTableSize / 2.0);
+      }
+      Fft(re, im, true);
+      ranges[r] = re;
+    }
+    // ONE scale for every range, from the fullest table's peak.
+    double peak = 0;
+    for (float v : ranges[0]) peak = std::max(peak, std::fabs(static_cast<double>(v)));
+    if (peak > 1e-9) {
+      const double scale = 1.0 / peak;
+      for (auto& table : ranges) {
+        for (float& v : table) v = static_cast<float>(v * scale);
+      }
+    }
+  }
+
+  /** Interpolated sample at a normalized phase, band-limited for `freq`. */
+  float Sample(double phase, double freq, double sampleRate) const {
+    const double nyquist = sampleRate / 2;
+    const double allowed = freq > 1e-9 ? nyquist / std::fabs(freq) : kWaveMaxHarmonics;
+    // Range r holds (kWaveMaxHarmonics >> r) harmonics; pick the fractional
+    // r whose harmonic count is just under what fits, then crossfade.
+    double rPos = std::log2(static_cast<double>(kWaveMaxHarmonics) /
+                            std::max(1.0, std::min<double>(allowed, kWaveMaxHarmonics)));
+    rPos = std::max(0.0, std::min(static_cast<double>(kWaveRanges - 1), rPos));
+    const size_t r0 = static_cast<size_t>(rPos);
+    const size_t r1 = std::min(r0 + 1, kWaveRanges - 1);
+    const double blend = rPos - static_cast<double>(r0);
+
+    const double pos = phase * kWaveTableSize;
+    const size_t i0 = static_cast<size_t>(pos) % kWaveTableSize;
+    const size_t i1 = (i0 + 1) % kWaveTableSize;
+    const double frac = pos - std::floor(pos);
+    const double a = ranges[r0][i0] * (1 - frac) + ranges[r0][i1] * frac;
+    const double b = ranges[r1][i0] * (1 - frac) + ranges[r1][i1] * frac;
+    return static_cast<float>(a * (1 - blend) + b * blend);
+  }
+};
 
 /** In-place iterative radix-2 complex FFT (length a power of two). */
-inline void Fft(std::vector<float>& re, std::vector<float>& im, bool inverse) {
+inline void FftImpl(std::vector<float>& re, std::vector<float>& im, bool inverse) {
   const size_t n = re.size();
   for (size_t i = 1, j = 0; i < n; i++) {
     size_t bit = n >> 1;
@@ -250,6 +325,10 @@ inline void Fft(std::vector<float>& re, std::vector<float>& im, bool inverse) {
       im[i] /= static_cast<float>(n);
     }
   }
+}
+
+inline void Fft(std::vector<float>& re, std::vector<float>& im, bool inverse) {
+  FftImpl(re, im, inverse);
 }
 
 /**
@@ -652,6 +731,12 @@ class Engine {
   Engine() {
     // Node 0 is the master gain, pre-created and indestructible.
     nodes_.emplace(0u, std::make_unique<Node>());
+    // Wavetables are built once, here on the constructing (JS) thread —
+    // never on the audio thread, and shared by every oscillator node.
+    waveTables_[static_cast<size_t>(OscType::Sine)].Build(OscType::Sine);
+    waveTables_[static_cast<size_t>(OscType::Square)].Build(OscType::Square);
+    waveTables_[static_cast<size_t>(OscType::Sawtooth)].Build(OscType::Sawtooth);
+    waveTables_[static_cast<size_t>(OscType::Triangle)].Build(OscType::Triangle);
   }
 
   // ---- JS thread ----
@@ -1219,7 +1304,8 @@ class Engine {
         double freq = node->p0.ValueAt(t) + ParamMod(*node, 0, i);
         const double detune = node->p1.ValueAt(t);
         if (detune != 0) freq *= std::pow(2.0, detune / 1200.0);
-        const float v = static_cast<float>(OscillatorSample(node->oscType, node->phase));
+        const float v = waveTables_[static_cast<size_t>(node->oscType)].Sample(
+            node->phase, freq, sampleRate);
         node->block[i * 2] = v;
         node->block[i * 2 + 1] = v;
         node->phase += freq / sampleRate;
@@ -1425,6 +1511,8 @@ class Engine {
   std::vector<uint32_t> ended_;
 
   std::mutex tapReadMutex_;
+
+  WaveTableSet waveTables_[4];
 
   // Render-thread-owned (edited only via commands).
   std::map<uint32_t, std::unique_ptr<Node>> nodes_;
