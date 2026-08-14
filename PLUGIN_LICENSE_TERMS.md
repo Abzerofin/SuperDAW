@@ -8,7 +8,7 @@ Plugins run only on machines where they are installed. **Each user is solely res
 
 A SuperDAW project stores each plugin's parameter values as ordinary project data, shared like any other edit. A collaborator does not operate anyone else's copy of a plugin: they change a value in the shared project, and each machine's own installed copy reads that value locally, exactly as it would if the value had been typed in on that machine, loaded from a saved project, or recalled from a preset.
 
-This means a collaborator who does not have a plugin installed can still change its parameter values, and the sound will change on the machines that do have it installed.
+This means a collaborator who does not have a plugin installed can still change its parameter values, and the sound will change on the machines that do have it installed. Depending on the audio system in use, that change may be heard during playback rather than only after a track is frozen or exported; the arrangement is the same either way — no plugin is ever operated across the network, and no processed audio is sent between machines.
 
 ### Key Points
 

@@ -37,6 +37,8 @@
 #include <unordered_map>
 #include <vector>
 
+#include "vst3bridge.h"
+
 namespace sdengine {
 
 constexpr uint32_t kBlockFrames = 128;
@@ -193,7 +195,33 @@ enum class NodeKind : uint8_t {
   Convolver,
   Oscillator,
   /** The duplex stream's capture side, channel-selected (phase 3). */
-  Input
+  Input,
+  /**
+   * Plugin-delay compensation: a pure feed-forward integer delay line.
+   * Distinct from Delay, whose read side is deliberately a SOURCE clamped
+   * to one block so feedback cycles resolve — PDC is never in a cycle and
+   * must be EXACT, including exactly zero (the overwhelmingly common
+   * value, and the one Web Audio's DelayNode also passes through
+   * untouched, so both backends agree).
+   */
+  Pdc,
+  /**
+   * An external-format plugin (VST3) processed IN the audio callback via
+   * the vst3host bridge. With no bridge attached, or no slot bound, it
+   * passes its input through — the same bypass every other unavailable
+   * plugin gets.
+   */
+  External
+};
+
+/**
+ * A PDC delay line. Built on the JS thread and swapped in by command (the
+ * ConvolverState pattern), so the render thread never allocates one; the
+ * write head lives here because it is per-node state.
+ */
+struct PdcState {
+  std::vector<float> channel[2];
+  size_t write = 0;
 };
 
 /**
@@ -613,6 +641,11 @@ struct Node {
   // Oscillator: waveform + running phase in [0, 1).
   OscType oscType = OscType::Sine;
   double phase = 0;
+  // Pdc: the delay line, or null until a capacity is configured (in which
+  // case the node is an exact passthrough). p0 = delayTime seconds.
+  std::shared_ptr<PdcState> pdc;
+  // External: the vst3host realtime slot, or -1 = bypass.
+  int32_t extSlot = -1;
   /**
    * Input: which hardware channel(s) of the capture side to take —
    * audio/input.ts's semantics exactly (mono duplicates one channel to
@@ -819,9 +852,12 @@ struct Command {
   double x = 0;         // stopVoice atTime (<0 = immediate)
   std::string str;      // param name / biquad type / input mode
   ParamEvent event{};
+  int32_t slot = -1;    // CreateNode/ConfigureNode (external plugin slot)
+  bool haveSlot = false;
   std::shared_ptr<SharedBuffer> buffer;    // Play
   std::shared_ptr<ConvolverState> convState;  // ConfigureNode (convolver IR)
   std::shared_ptr<CaptureRing> captureRing;   // SetInputCapture (null = off)
+  std::shared_ptr<PdcState> pdcState;         // ConfigureNode (pdc capacity)
   Voice voice{};                           // Play template
 };
 
@@ -856,15 +892,17 @@ class Engine {
   // latency inside the scheduling path for no reason.
 
   /** `typeName` is the biquad/oscillator waveform, or an input's
-   *  "mono"/"stereo" mode; `channel` is an input's first hardware channel. */
+   *  "mono"/"stereo" mode; `channel` is an input's first hardware channel;
+   *  `externalSlot` is an external node's already-open vst3host slot. */
   void CreateNode(uint32_t id, NodeKind kind, const std::string& typeName = "",
-                  double maxDelaySec = 1, uint32_t channel = 0) {
+                  double maxDelaySec = 1, uint32_t channel = 0, int32_t externalSlot = -1) {
     Command c{Command::Op::CreateNode};
     c.a = id;
     c.b = channel;
     c.nodeKind = kind;
     c.str = typeName;
     c.x = maxDelaySec;
+    c.slot = externalSlot;
     Push(std::move(c));
   }
 
@@ -881,6 +919,15 @@ class Engine {
     c.a = id;
     c.b = channel;
     c.str = mode;
+    Push(std::move(c));
+  }
+
+  /** Point an external node at a realtime plugin slot (-1 = bypass). */
+  void SetExternalSlot(uint32_t id, int32_t slot) {
+    Command c{Command::Op::ConfigureNode};
+    c.a = id;
+    c.slot = slot;
+    c.haveSlot = true;
     Push(std::move(c));
   }
 
@@ -940,6 +987,37 @@ class Engine {
       out.push_back(std::move(chunk));
     }
     return out;
+  }
+
+  /**
+   * Give a PDC node room for `seconds` of delay. The line is built HERE, on
+   * the JS thread — the render thread only swaps it in. Recapacitating
+   * CLEARS the line, which is why the caller only ever grows it: PDC
+   * capacity changes with the plugin set, not with the delay value.
+   */
+  void SetPdcCapacity(uint32_t id, double seconds, double sampleRate) {
+    auto state = std::make_shared<PdcState>();
+    if (seconds > 0 && sampleRate > 0) {
+      const size_t size =
+          static_cast<size_t>(std::ceil(seconds * sampleRate)) + kBlockFrames + 1;
+      state->channel[0].assign(size, 0.0f);
+      state->channel[1].assign(size, 0.0f);
+    }
+    Command c{Command::Op::ConfigureNode};
+    c.a = id;
+    c.pdcState = std::move(state);
+    Push(std::move(c));
+  }
+
+  /**
+   * Publish the vst3host realtime table (native/shared/vst3bridge.h). Call
+   * before any External node exists; a null or ABI-mismatched table leaves
+   * every external insert bypassing.
+   */
+  void SetVst3Bridge(const superdaw::Vst3RtBridge* bridge) {
+    bridge_.store(
+        bridge != nullptr && bridge->abi == superdaw::kVst3RtBridgeAbi ? bridge : nullptr,
+        std::memory_order_release);
   }
 
   /**
@@ -1292,7 +1370,10 @@ class Engine {
         if (name == "detune") return 3;
         return -1;
       case NodeKind::Delay:
+      case NodeKind::Pdc:
         return name == "delayTime" ? 0 : -1;
+      case NodeKind::External:
+        return -1;
       case NodeKind::Compressor:
         if (name == "threshold") return 0;
         if (name == "knee") return 1;
@@ -1359,6 +1440,10 @@ class Engine {
         } else if (c.nodeKind == NodeKind::Input) {
           node->inputStereo = c.str == "stereo";
           node->inputChannel = c.b;
+        } else if (c.nodeKind == NodeKind::Pdc) {
+          node->p0 = ParamTimeline(0.0);  // delayTime seconds
+        } else if (c.nodeKind == NodeKind::External) {
+          node->extSlot = c.slot;
         } else if (c.nodeKind == NodeKind::Compressor) {
           // Web Audio's DynamicsCompressorNode defaults.
           node->p0 = ParamTimeline(-24.0);  // threshold dB
@@ -1385,7 +1470,10 @@ class Engine {
           node->oscType = ParseOscType(c.str);
         } else if (node->kind == NodeKind::Convolver && c.convState) {
           node->conv = std::move(c.convState);  // swap, never build, here
+        } else if (node->kind == NodeKind::Pdc && c.pdcState) {
+          node->pdc = std::move(c.pdcState);  // swap, never build, here
         }
+        if (c.haveSlot && node->kind == NodeKind::External) node->extSlot = c.slot;
         break;
       }
       case Command::Op::Connect: {
@@ -1786,6 +1874,53 @@ class Engine {
         node->block[i * 2] = static_cast<float>(delayedL * g);
         node->block[i * 2 + 1] = static_cast<float>(delayedR * g);
       }
+    } else if (node->kind == NodeKind::Pdc) {
+      // Plugin-delay compensation: an exact integer delay, applied to the
+      // summed input. With no line configured the delay is zero and the
+      // node is a passthrough — which is what every chain looks like until
+      // a plugin actually reports latency.
+      PdcState* pdc = node->pdc.get();
+      const size_t size = pdc ? pdc->channel[0].size() : 0;
+      if (size > frames) {
+        int64_t delayFrames =
+            static_cast<int64_t>(std::llround(node->p0.ValueAt(blockTime) * sampleRate));
+        if (delayFrames < 0) delayFrames = 0;
+        if (delayFrames > static_cast<int64_t>(size - frames)) {
+          delayFrames = static_cast<int64_t>(size - frames);
+        }
+        for (uint32_t i = 0; i < frames; i++) {
+          const size_t at = (pdc->write + i) % size;
+          pdc->channel[0][at] = node->block[i * 2];
+          pdc->channel[1][at] = node->block[i * 2 + 1];
+          // delayFrames == 0 reads back the sample just written: exact.
+          const size_t read = (at + size - static_cast<size_t>(delayFrames)) % size;
+          node->block[i * 2] = pdc->channel[0][read];
+          node->block[i * 2 + 1] = pdc->channel[1][read];
+        }
+        pdc->write = (pdc->write + frames) % size;
+      }
+    } else if (node->kind == NodeKind::External) {
+      // The whole point of loading vst3host in this process: the plugin
+      // runs HERE, one lock-free slot away from the callback, instead of
+      // behind the 2-second windowed preview. De-interleave into the
+      // engine's shared scratch (single-threaded render, and every input
+      // has finished rendering by now), process, interleave back.
+      const superdaw::Vst3RtBridge* bridge = bridge_.load(std::memory_order_acquire);
+      if (bridge != nullptr && node->extSlot >= 0) {
+        for (uint32_t i = 0; i < frames; i++) {
+          extIn_[0][i] = node->block[i * 2];
+          extIn_[1][i] = node->block[i * 2 + 1];
+        }
+        if (bridge->process(node->extSlot, extInPtrs_, 2, extOutPtrs_, 2, frames)) {
+          for (uint32_t i = 0; i < frames; i++) {
+            node->block[i * 2] = extOut_[0][i];
+            node->block[i * 2 + 1] = extOut_[1][i];
+          }
+          node->sawStereo = true;  // a plugin's output bus is stereo
+        }
+        // A refusal (slot torn down, process() failed) leaves the input
+        // untouched — bypass, like every other unavailable plugin.
+      }
     } else if (node->kind == NodeKind::Gain) {
       for (uint32_t i = 0; i < frames; i++) {
         const float g = static_cast<float>(node->p0.ValueAt(blockTime + i * frameDur) +
@@ -1873,6 +2008,18 @@ class Engine {
   const float* inputBlock_ = nullptr;
   uint32_t inputBlockChannels_ = 0;
   uint32_t inputBlockFrames_ = 0;
+
+  /** The vst3host realtime table, or null (every external node bypasses). */
+  std::atomic<const superdaw::Vst3RtBridge*> bridge_{nullptr};
+  /**
+   * De-interleave scratch for external plugins, shared by every External
+   * node: rendering is single-threaded and a node's inputs have all
+   * finished before it touches this, so one buffer is enough.
+   */
+  float extIn_[2][kBlockFrames] = {};
+  float extOut_[2][kBlockFrames] = {};
+  const float* extInPtrs_[2] = {extIn_[0], extIn_[1]};
+  float* extOutPtrs_[2] = {extOut_[0], extOut_[1]};
 
   WaveTableSet waveTables_[4];
 

@@ -41,13 +41,18 @@ Audience: SuperDAW maintainers
   plain browser (CLAUDE.md rule); the native backend is an Electron-only
   enhancement selected at runtime, exactly like the VST3 host is today
   (`window.superdaw?` guard pattern).
-- **Live in-callback VST3 inserts are out of scope** for this document.
-  The native backend makes them *tractable* later (section 5 note) but the
-  windowed VST3 preview (`PREVIEW_WINDOW_SEC`, `src/audio/engine.ts:91`)
-  and freeze pipeline stay as they are.
-- **No plugin-delay compensation (PDC) in the first pass.** Nothing in the
-  codebase does PDC today; the backend interface reserves room for reported
-  node latency but implementing PDC is its own project.
+- ~~**Live in-callback VST3 inserts are out of scope** for this document.~~
+  **Superseded — shipped as phase 5** (section 5, section 9). The door
+  section 5 kept open turned out to be the whole feature: load both
+  addons in the audio process and the plugin is one lock-free slot from
+  the callback. The windowed preview (`PREVIEW_WINDOW_SEC`) and the
+  freeze pipeline remain in charge under the Web Audio backend.
+- ~~**No plugin-delay compensation (PDC) in the first pass.**~~
+  **Superseded — shipped with phase 5** (`src/audio/pdc.ts`), because a
+  live external insert is the first thing in the graph that reports any
+  latency. Builtins still report none, and that is a parity decision, not
+  an omission: Web Audio reports none for the primitives they are built
+  from, so bounces would disagree if we compensated here.
 - **macOS/Linux** are out of scope for the first implementation but the
   recommended library (section 4) covers CoreAudio/ALSA when the time comes.
 
@@ -382,15 +387,100 @@ IPC per callback — needs a request/response inside 2.67 ms (128) or
 load are 5–30 ms. That confirms ARCHITECTURE.md's judgment: per-block IPC
 is not a viable transport, so the transport must never carry blocks.
 
-### Interaction with the existing VST3 host
+### Interaction with the existing VST3 host — ✅ SHIPPED (phase 5)
 
 The addon lands in the same process family as `vst3host.node` (both are
-Node-API, both resolvable by `addonPath.ts`). Longer term the audio
-utilityProcess could load *both*, putting live VST3 processing one
-lock-free queue away from the audio callback instead of behind the
-2-second windowed preview — that is the door this design opens for
-"live external inserts + PDC" later. Out of scope now; worth not
-designing shut.
+Node-API, both resolvable by `addonPath.ts`). The audio utilityProcess
+now loads *both*, putting live VST3 processing one lock-free slot away
+from the audio callback instead of behind the 2-second windowed preview.
+What the door actually cost, once opened:
+
+**The bridge cannot be Node-API.** The audio callback must never enter a
+JS runtime, so the two addons cannot talk through their own JS surfaces.
+`native/shared/vst3bridge.h` is a plain C function table that vst3host
+publishes (`realtimeBridge()`) and audiohost takes
+(`attachVst3Bridge(external)`) as an opaque `napi_external` — the pointer
+crosses through JS once, at setup; the calls never do. Its `abi` field is
+checked on arrival because the two addons are built separately and
+nothing guarantees they were built together; a mismatch bypasses rather
+than corrupting the audio thread.
+
+**Teardown is the hard part, not processing.** Processing is just
+`IAudioProcessor::process` with pre-sized buffers (the existing
+`openInstance` path already allocates nothing per block). The hazard is
+the JS thread closing a plugin while the callback is inside it. Slots are
+therefore a FIXED array of 64, with a per-SLOT busy flag — not per
+instance, which would be the freed object itself. The callback takes the
+flag *before* it loads the instance pointer; `closeRealtime` clears the
+pointer and then waits out the flag. Either the callback got in first (and
+the close waits microseconds) or it sees null and bypasses.
+
+**Parameters cross a ring, not a lock.** A single-producer ring of
+`(id, value)` drained at block start into a `ParameterChanges` pre-sized
+via `setMaxParameters`, so `addParameterData` reuses queues instead of
+allocating them. Values are applied at sample 0, which is all the
+document's param model can say anyway — values change per gesture, not
+per sample.
+
+**Opening is synchronous, and that is deliberate.** Loading a plugin
+bundle takes hundreds of milliseconds, but it happens on the session's JS
+thread, never the callback, and keeping it in message order is what lets
+the `createNode` that follows bind the slot it just got. The frame pump
+stalls for the load; the renderer's clock extrapolates across it
+(`performance.now()`-based, §3) and playback is untouched.
+
+**Identity still never becomes a path in the renderer.** The renderer
+sends a descriptor uid over its own port; MAIN pushes the uid → path
+index to the audio process over the utilityProcess's parentPort.
+
+### Plugin-delay compensation — ✅ SHIPPED (phase 5)
+
+A live external insert is the first thing in SuperDAW's graph that reports
+any latency, which is what made PDC necessary rather than merely nice.
+`src/audio/pdc.ts` holds the whole decision as a pure function; the engine
+only pushes its answers.
+
+**Where the delay goes.** Two compensators per track chain — `source`
+(before the inserts) and `out` (after pan, before the bus). Two, because
+a folder's chain input is fed both by the folder's OWN material and by
+every child's output, and those need different amounts: the children
+arrive already late by their own plugins. With
+
+```
+depth(T)  = max over children C of (depth(C) + latency(C))     // 0 if none
+source(T) = depth(T)
+out(T)    = depth(parent(T)) − depth(T) − latency(T)
+```
+
+every source in the project reaches the master having been delayed by the
+same total, which is the only property that matters and the one the tests
+assert directly.
+
+**Why they are always present.** A `pdc` node at zero delay is an exact
+passthrough on both backends (measured, §8), so the compensators are
+created with every chain and a latency change is a param write — no
+rewire, and no already-scheduled voice left connected to an old node.
+
+**Why `pdc` is not `delay`.** The existing delay primitive's read side is
+deliberately a SOURCE clamped to one block, which is what resolves
+feedback cycles at block granularity. PDC is never in a cycle and must be
+exact, zero included, so it is its own kind: write the block, read it back
+at an integer offset.
+
+**Why builtins report zero.** They are Web Audio primitives, and Web Audio
+reports no latency for them — not even for `DynamicsCompressorNode`'s
+internal 6 ms look-ahead, which our native port reproduces. Compensating
+something the bounce does not compensate would break exactly the parity
+this whole document is organised around.
+
+**The three paths, kept honest.** Live native compensates. Freeze trims
+each plugin's reported latency off the head of its segment (`shiftLeft`
+in `render.ts`) — a misalignment that had always been there, silently,
+and only became measurable once latency was read at all. The Web Audio
+preview reads its dry window that far AHEAD, which cancels the same
+delay without needing the future. The tolerances differ and the doc says
+so: the preview shifts in whole ticks (~0.3 ms at 120 bpm), the other two
+in samples.
 
 ---
 
@@ -525,8 +615,9 @@ Each phase ships independently and leaves the product strictly no worse.
 | **0 — Seam extraction** (no native code) — ✅ **SHIPPED** (`audio/backend.ts`, engine ported; parity harness `audio/parity.ts` + committed baseline; command streams pinned in `audio/__tests__/backend.test.ts`. The remaining Web Audio touch-points are the documented `backend.webAudio` escapes: builtin effect builders + instrument voices (phase 2), monitor nodes + capture (phase 3), decode + UI-facing analysers) | Introduce `IAudioBackend` + `WebAudioBackend`; port `AudioEngine` off direct `AudioContext`/node usage (chains, inserts, params, voices+fades, taps, monitor handle). Build the **parity harness**: render fixture projects through the engine pre/post refactor and diff output; extend `ops.test`-style coverage to backend command streams. Browser build: unchanged by construction (it runs the same `WebAudioBackend`). | Zero user-visible change; existing tests + parity diffs green | 3–5 wks |
 | **1 — Loopback latency calibration** (no native code) — ✅ **SHIPPED** (`audio/calibration.ts` / `calibrationRun.ts` / `state/latencyCalibration.ts`) | Settings ▸ Audio "Measure round-trip latency" per section 7, implemented on the current Web Audio + getUserMedia path; auto-trim feeds `recording.ts` compensation; manual trim becomes an offset | Recorded takes land on the grid without hand-tuning | 1–2 wks |
 | **2 — Native playback backend** — 🚧 **IN PROGRESS** (shipped: `native/audiohost` addon with miniaudio 0.11.25 vendored, WASAPI-only, device layer verified on hardware via `smoketest.js`; the C++ graph/param/voice engine implementing the seam's semantics — Web Audio param timeline, equal-power pan, sample-accurate integer-frame voice scheduling, taps, ended ring — verified numerically via `enginetest.js` + `renderOffline`; caller-minted ids so the whole command surface is one-way/serializable; the utilityProcess + direct-MessagePort transport per §5 (`main/audioHost.ts` spawn/channel/exit-watch, `main/audioHostWorker.ts` entry, Electron-free `main/audioHostSession.ts`), the renderer `NativeAudioBackend` proxy (`audio/nativeBackend.ts` — frame-based clock/taps/ended, local id minting) with the boot flow, launch-scoped Settings ▸ Audio ▸ Audio system toggle and crash fallback in `state/nativeAudio.ts` + `engine.resetBackend`; the whole renderer→port→session→engine path is pinned by `main/__tests__/audioHostSession.test.ts` against the real addon. DSP ports — **all 11 builtin effects run on BOTH backends from one definition**, no Web Audio escapes left in any builder: the filter family on a spec-exact `biquad` primitive (`nativeBiquad.test.ts`, 15 checks vs an independent transcription); `delay` on a ring primitive whose read/write split reproduces Web Audio's in-cycle feedback rule (`nativeDelay.test.ts`, sample-exact echo train); compressor + limiter on a `compressor` primitive matched to MEASURED Chromium behavior (`nativeCompressor.test.ts`, 23 checks — see the parity-drift risk row); reverb on a `convolver` primitive doing uniform partitioned overlap-save convolution, which being exact math matches sample-for-sample (`nativeReverbLfo.test.ts`) once Chromium's default IR NORMALIZATION is reproduced — another measured-not-assumed law, `10^(−58/20) · (44100/rate) / rms`; and the LFO on an `oscillator` primitive plus the seam's new audio-rate param modulation (`connectParam`, Web Audio's node→AudioParam edge). The oscillator is now BAND-LIMITED, which was the prerequisite for any audio-rate use (a naive saw at a musical pitch folds everything above Nyquist back as inharmonic junk): additive wavetables, one per octave, built once at engine construction via inverse FFT and crossfaded by frequency (`nativeOscillator.test.ts` pins harmonic amplitudes against measured Chromium values and probes BETWEEN harmonics, where a naive shape's aliasing would show). Measuring the real node also explained its amplitudes: every table shares one normalization scale chosen so the fullest peaks at 1.0, which is why saw and square read 0.8483× the ideal series (1/1.179, the Gibbs overshoot for a jump of 2) while sine and triangle read 1.0×. Residual: the near-Nyquist range crossover is our own formula rather than Chromium's, so the topmost harmonic or two taper slightly differently — inaudible, and confined to content above ~16 kHz. **All three built-in instruments are ported too** — the analog synth, the sampler and the drum kit build from backend primitives in both their scheduled and live (held-key) forms, so MIDI tracks sound under the native backend. That needed three capabilities beyond DSP: scheduled-source lifecycle (`scheduleSource` — start/stop/ended for GENERATED voices, which buffer voices already had), buffer loop points (the sampler's sustain loop) and exponential param ramps (every drum decay, the kick/tom pitch drops). Tests: `nativeSynth.test.ts`, `nativeSamplerDrums.test.ts`. Device selection is unified per §6 (`enumerateDevices`/`onDeviceChange` on the seam, the host PUSHING its list so the proxy answers from cache, selections namespaced per backend since a Web Audio deviceId and a WASAPI endpoint id have no honest translation). The parity run is `crossBackendParity.test.ts` — composition rather than per-primitive: gain chains, fan-in sums, the mixer's track→panner→bus topology, insert chains, reverb's parallel dry path and a full voice path. It caught a real bug on its first run: Web Audio's StereoPanner has two laws and the native engine applied the stereo one to mono material, making hard-panned mono clips 2× too loud) | `native/audiohost` addon (miniaudio device layer, custom graph/param/voice engine, WASAPI shared-IAudioClient3 default + exclusive toggle); audio utilityProcess + MessagePort transport; asset PCM registration with eviction mirroring the existing asset-eviction policy; builtin DSP ports (biquads, spec-matched compressor, delay, partitioned convolution reverb, LFO, synth voice, click) each verified against Web Audio via the phase-0 parity harness; devices/meters unified per sections 3+6. Behind **Settings ▸ Audio ▸ Audio system: Web Audio / Native**, default Web Audio; Electron-only (`window.superdaw?` guard). | Playback through native is parity-clean; toggle flips live with automatic fallback on addon crash | 8–12 wks |
-| **3 — Native duplex input** — 🚧 **IN PROGRESS**. Shipped: the addon opens a DUPLEX `ma_device` on demand (`input: true` → `ma_device_type_duplex`, capture channels `0` so a multi-input interface presents all of them), delivering capture frames in the SAME callback that renders output — monitoring is pure in-callback DSP, no second stream and no IPC. A new `input` node kind reproduces `audio/input.ts`'s selection rule exactly (mono duplicates one channel to both sides, stereo takes the pair, out-of-range clamps), including the non-obvious parity detail that its output is ALWAYS 2-channel — the Web Audio tap's merger is a 2-channel node even in mono mode, so a hard-panned monitor must read StereoPanner's stereo law on both backends or it would be half as loud natively (`nativeInput.test.ts` pins the 2× directly). Capture rides a lock-free ring per input node, sized and allocated on the JS thread (the convolver's discipline), drained in 100 ms batches; a reader that falls a whole ring behind loses the OLDEST frames and says so through a jump in the batch's start time, which the recorder pads with silence rather than splicing — a take with a hole is obvious, a take whose second half runs early is not. The seam gained `openInput(config) → {node, channelCount, sampleRate, capture(), dispose()}`, implemented on BOTH backends: Web Audio moved its getUserMedia + stream pool + capture worklet behind it (so `audio/recorder.ts` is now a pure chunks→`Recording` accumulator that both backends feed), and the native proxy round-trips one `openInput`/`inputOpened` pair — the one honest RPC, since opening may have to reopen the stream in duplex and the caller cannot know the channel count until it does. That reopen is why the stream clock now carries a `timeBase` across device handles: WASAPI cannot re-point a live stream, and the transport and every scheduled voice read that clock. `setMonitorSource(trackId, node)` became **`setMonitorInput(trackId, handle)`** — the signature the design flagged as unable to survive the process split; the engine still connects `handle.node` itself, so "the engine owns the connection" holds, while the handle's lifetime stays with `trackInputs`. Calibration re-runs natively unchanged because `calibrationRun.ts` now drives the seam instead of an `AudioContext`; its stimulus plays into a new `outputNode()` (post-fader), which is why the native engine now pre-creates node 0 = output and node 1 = master. Consequences worth knowing: ONE capture device per native session (the first open decides it — per-track selection picks CHANNELS on it, and a later track naming a different device reads the same hardware rather than thrashing the stream on every arm), and the capture side is released when the last input closes, so the OS microphone indicator tells the truth. Remaining: measure mic-to-ear on reference hardware (this machine's shared minimum period is 10 ms, so it cannot demonstrate the 128-frame path), and the UI-facing AnalyserNode surface (plugin spectrum, wire scopes) is still dark natively. | Duplex stream, `openInput` channel taps, in-callback monitoring, capture→`Recording` path, calibration re-run natively; per-track monitor latency finally in the target band | Mic-to-ear < 12 ms measured on reference hardware | 3–4 wks |
-| **4 — Default flip + hardening** — 🟡 **PARTIAL**: the xrun health signal is wired (`engine.xruns()` → the status-bar health panel, absent under Web Audio which exposes no such counter), and the live-VST3 door is documented below. The DEFAULT FLIP itself is deliberately NOT done: the exit criterion is a release cycle of real-world soak, which no amount of local testing substitutes for. With phase 3 landed the remaining blocker is soak plus the dark analysis panes (plugin spectrum, wire scopes), which are a visible downgrade to make the default. | Native becomes the Windows default (Web Audio stays as automatic fallback and the browser path); telemetry-free health signals (xrun counters in the meter frame) surface in the status bar; document the door to live VST3-in-callback + PDC as the follow-on project | A release cycle of soak with no elevated crash/fallback rate | 2–3 wks |
+| **3 — Native duplex input** — ✅ **SHIPPED**. The addon opens a DUPLEX `ma_device` on demand (`input: true` → `ma_device_type_duplex`, capture channels `0` so a multi-input interface presents all of them), delivering capture frames in the SAME callback that renders output — monitoring is pure in-callback DSP, no second stream and no IPC. A new `input` node kind reproduces `audio/input.ts`'s selection rule exactly (mono duplicates one channel to both sides, stereo takes the pair, out-of-range clamps), including the non-obvious parity detail that its output is ALWAYS 2-channel — the Web Audio tap's merger is a 2-channel node even in mono mode, so a hard-panned monitor must read StereoPanner's stereo law on both backends or it would be half as loud natively (`nativeInput.test.ts` pins the 2× directly). Capture rides a lock-free ring per input node, sized and allocated on the JS thread (the convolver's discipline), drained in 100 ms batches; a reader that falls a whole ring behind loses the OLDEST frames and says so through a jump in the batch's start time, which the recorder pads with silence rather than splicing — a take with a hole is obvious, a take whose second half runs early is not. The seam gained `openInput(config) → {node, channelCount, sampleRate, capture(), dispose()}`, implemented on BOTH backends: Web Audio moved its getUserMedia + stream pool + capture worklet behind it (so `audio/recorder.ts` is now a pure chunks→`Recording` accumulator that both backends feed), and the native proxy round-trips one `openInput`/`inputOpened` pair — the one honest RPC, since opening may have to reopen the stream in duplex and the caller cannot know the channel count until it does. That reopen is why the stream clock now carries a `timeBase` across device handles: WASAPI cannot re-point a live stream, and the transport and every scheduled voice read that clock. `setMonitorSource(trackId, node)` became **`setMonitorInput(trackId, handle)`** — the signature the design flagged as unable to survive the process split; the engine still connects `handle.node` itself, so "the engine owns the connection" holds, while the handle's lifetime stays with `trackInputs`. Calibration re-runs natively unchanged because `calibrationRun.ts` now drives the seam instead of an `AudioContext`; its stimulus plays into a new `outputNode()` (post-fader), which is why the native engine now pre-creates node 0 = output and node 1 = master — the same output/master split phase 5's PDC compensators and external inserts hang off of. Consequences worth knowing: ONE capture device per native session (the first open decides it — per-track selection picks CHANNELS on it, and a later track naming a different device reads the same hardware rather than thrashing the stream on every arm), and the capture side is released when the last input closes, so the OS microphone indicator tells the truth. Remaining: measure mic-to-ear on reference hardware (this machine's shared minimum period is 10 ms, so it cannot demonstrate the 128-frame path), and the UI-facing AnalyserNode surface (plugin spectrum, wire scopes) is still dark natively. | Duplex stream, `openInput` channel taps, in-callback monitoring, capture→`Recording` path, calibration re-run natively; per-track monitor latency finally in the target band | Mic-to-ear < 12 ms measured on reference hardware | 3–4 wks |
+| **5 — Live VST3 inserts + PDC** — ✅ **SHIPPED**. The audio utilityProcess loads BOTH addons and an external insert becomes an ordinary chain member: `native/shared/vst3bridge.h` (the plain C table, ABI-checked), vst3host's realtime slots (fixed array, per-slot busy flag, SPSC param ring, pre-sized `ParameterChanges`), audiohost's `external` and `pdc` node kinds, the seam's `externalPlugins` capability, `openExternal`/`setPluginParams`/`externalReady` on the host protocol, and the uid → path index pushed by MAIN over the worker's own port. PDC is `audio/pdc.ts` (source + output compensator per chain, folder-bus aware, graph-routed tracks take their longest path). Verified: `pdc.test.ts` (the alignment property, per case), `nativeExternalPdc.test.ts` (sample-exact delay including 0, bypass with no bridge, and a REAL installed VST3 through the callback), `audioHostSession.test.ts` (the protocol end to end against the real bridge), and the phase-0 parity baseline still clean with the compensators in every chain — Chromium's DelayNode at delayTime 0 measures as an exact passthrough (impulse at 10, peak 1.0, one non-zero sample), which is the same number the native `pdc` node gives | as shipped | — |
+| **4 — Default flip + hardening** — 🟡 **PARTIAL**: the xrun health signal is wired (`engine.xruns()` → the status-bar health panel, absent under Web Audio which exposes no such counter). The DEFAULT FLIP itself is deliberately NOT done: the exit criterion is a release cycle of real-world soak, which no amount of local testing substitutes for. With phases 3 and 5 both landed the remaining blocker is soak plus the dark analysis panes (plugin spectrum, wire scopes), which are a visible downgrade to make the default. | Native becomes the Windows default (Web Audio stays as automatic fallback and the browser path); telemetry-free health signals (xrun counters in the meter frame) surface in the status bar | A release cycle of soak with no elevated crash/fallback rate | 2–3 wks |
 
 ### Risks
 
@@ -540,6 +631,9 @@ Each phase ships independently and leaves the product strictly no worse.
 | Memory: PCM resident in renderer (AudioBuffers) *and* audio process | 2 | Medium | Reuse the existing asset-eviction policy in the audio process; register lazily (only assets referenced by clips); chunked transfer. |
 | Exclusive mode silences other apps / our own renderer audio | 3 | Medium | Shared IAudioClient3 default; exclusive clearly labeled; all app audio already flows through the engine (no stray `<audio>` paths found). |
 | Dual-backend maintenance burden — every engine feature lands twice | forever | Medium | The seam keeps feature logic (scheduling, ops, fades math) single-sourced; only DSP primitives and transport are per-backend. Accept it as the cost of keeping export + browser on Web Audio. |
+| Two live behaviours for external inserts — native plays them in the callback, Web Audio previews them 2 s behind (and bypasses them in a bounce) | 5 | Medium | Accepted, not hidden: Web Audio structurally cannot host a VST3 in the renderer's graph, which is the premise of this whole document. Kept honest by making all three paths AGREE ON ALIGNMENT rather than pretending they are the same feature — live compensates, freeze trims, preview reads ahead — and by saying which one is running in the Settings ▸ Audio notice. The engine refuses to run both at once: where the backend hosts externals live, LivePreview stands down entirely, or the same plugin would be applied twice. |
+| A third-party plugin misbehaving on the AUDIO thread (blocking, allocating, crashing) now costs audio, where the windowed preview only cost a window | 5 | Medium | The utilityProcess isolation already covers the crash: main sees the exit and the renderer falls back to Web Audio with a status-bar notice. Blocking/allocating inside `process()` is not something a host can prevent — every DAW carries it — but the blast radius is one process, not the app. The xrun counter (phase 4) is the signal that it is happening. |
+| A plugin misreporting its latency pushes the mix behind the playhead | 5 | Low | Compensation is capped at `PDC_MAX_SEC` (0.5 s, far past a linear-phase mastering EQ's ~8 k samples), and the delay line clamps independently, so a wrong number costs alignment on one track rather than seconds of lag everywhere. |
 | GPL/ASIO temptation | 4+ | Low | Decided here: no ASIO in shipped builds (`package.json:7` GPL-3.0-or-later vs Steinberg ASIO SDK terms). Documented so it is not re-litigated per release. |
 
 ---
@@ -554,7 +648,11 @@ Each phase ships independently and leaves the product strictly no worse.
 - The op/dispatch discipline — the backend is downstream of project
   state exactly as the engine is today; nothing here touches documents,
   sync, or collaboration.
-- `ExternalPluginHost` / freeze / windowed VST3 preview — untouched until
-  the explicitly-out-of-scope live-inserts follow-on.
+- `ExternalPluginHost` / freeze / windowed VST3 preview — still the
+  behaviour under the Web Audio backend, and therefore in the browser
+  build and in every bounce. Phase 5 added a second live path beside
+  them; it did not replace them. (The one change here: both learned to
+  read the latency a plugin reports, so their alignment matches the live
+  native path's.)
 - Offline export and the browser build — Web Audio, permanently and by
   design respectively.

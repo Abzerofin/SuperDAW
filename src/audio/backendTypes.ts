@@ -28,6 +28,12 @@ export type ParamEvent =
  * eleven builtin effects are pure biquad chains). Options at creation
  * (and via configureNode) carry the non-param attributes — a biquad's
  * `type` — which Web Audio also treats as instant plain attributes.
+ *
+ * 'pdc' and 'external' are phase-5's pair: an external-format plugin
+ * running inside the audio callback, and the exact delay line that keeps
+ * everything else aligned with the latency it reports. 'external' only
+ * ever does anything on a backend whose `externalPlugins` is non-null;
+ * elsewhere it is a passthrough, like any unavailable plugin.
  */
 export type NodeKind =
   | 'gain'
@@ -39,14 +45,16 @@ export type NodeKind =
   | 'oscillator'
   /** Channel-select over the live capture stream (§7) — see openInput. */
   | 'input'
+  | 'pdc'
+  | 'external'
 
 export type NodeOptions = Record<string, number | string>
 
 /**
  * Param names are per-kind: 'gain' (gain), 'pan' (stereoPanner),
  * 'frequency' | 'Q' | 'gain' | 'detune' (biquad, Web Audio semantics —
- * lowpass/highpass read Q in dB). Unknown names are ignored, matching
- * the reducer's drop-don't-throw hygiene.
+ * lowpass/highpass read Q in dB), 'delayTime' (delay and pdc). Unknown
+ * names are ignored, matching the reducer's drop-don't-throw hygiene.
  */
 export type ParamName = string
 
@@ -119,6 +127,19 @@ export interface InputHandle {
   ): () => Promise<void>
   /** Release the node, the capture and any device the handle opened. */
   dispose(): void
+}
+
+/**
+ * What an `external` node needs to become a plugin: the descriptor's uid
+ * and the instance's opaque GUI state. Never a filesystem path — the
+ * renderer must not learn one (docs/ARCHITECTURE.md, plugin architecture),
+ * so the host resolves the uid against the index MAIN pushes it.
+ */
+export interface ExternalPluginSpec {
+  readonly uid: string
+  readonly stateBlob?: string | null
+  /** Channel count to negotiate with the plugin. Default 2. */
+  readonly channels?: number
 }
 
 export interface PlaySpec {

@@ -84,7 +84,8 @@ export function initNativeAudio(): void {
       statusNotice.show(
         `Native audio active (WASAPI${data.info.exclusive ? ' exclusive' : ''}, ` +
           `${data.info.sampleRate} Hz, ${data.info.periodFrames}-frame periods). ` +
-          'Experimental: bounces and exports still render through Web Audio.'
+          'VST3 inserts play live, delay-compensated. Experimental: bounces and ' +
+          'exports still render through Web Audio.'
       )
     }
     raw.addEventListener('message', decide)

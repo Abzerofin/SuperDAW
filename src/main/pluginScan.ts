@@ -473,8 +473,22 @@ async function runScan(forced: boolean): Promise<void> {
   await setAppData(QUARANTINE_KEY, pruneToPresent(nextQuarantine, stamps.keys()))
 }
 
+/**
+ * Non-renderer listeners on the index. The audio process resolves live
+ * VST3 inserts against it too, but is told over its OWN port — the paths
+ * in it must never travel through a renderer. A subscription (rather than
+ * this module reaching for the audio host) keeps the dependency one-way.
+ */
+const indexListeners = new Set<() => void>()
+
+export function subscribePluginIndex(listener: () => void): () => void {
+  indexListeners.add(listener)
+  return () => indexListeners.delete(listener)
+}
+
 function notifyRenderers(): void {
   for (const win of BrowserWindow.getAllWindows()) {
     if (!win.isDestroyed()) win.webContents.send('plugins:changed')
   }
+  for (const listener of indexListeners) listener()
 }

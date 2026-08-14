@@ -26,6 +26,7 @@ import type {
   BackendLatencies,
   BackendNodeId,
   DeviceInfo,
+  ExternalPluginSpec,
   InputHandle,
   InputOpenConfig,
   NodeKind,
@@ -84,6 +85,42 @@ export class NativeAudioBackend {
   /** Pending capture flushes, by node id (see the seam's unsubscribe). */
   private captureFlushes = new Map<BackendNodeId, () => void>()
 
+  /** node → reported latency in samples; absent until the host answers. */
+  private externalLatency = new Map<BackendNodeId, number>()
+  private latencyListeners = new Set<() => void>()
+
+  /**
+   * External-format plugins run in the audio process, one lock-free slot
+   * from the callback (docs/NATIVE_AUDIO_BACKEND.md §5). Everything here
+   * is one-way; the only answer is `externalReady`, which the engine uses
+   * to recompute plugin-delay compensation.
+   */
+  readonly externalPlugins = {
+    create: (spec: ExternalPluginSpec): BackendNodeId => {
+      const id = this.nextId++
+      // Open first, then create: the host binds the node to whatever slot
+      // the plugin got (or to none, which bypasses).
+      this.send({
+        t: 'openExternal',
+        id,
+        uid: spec.uid,
+        stateBlob: spec.stateBlob ?? null,
+        channels: spec.channels
+      })
+      this.send({ t: 'createNode', id, kind: 'external' as NodeKind })
+      return id
+    },
+    setParams: (node: BackendNodeId, params: Readonly<Record<string, number>>): void => {
+      this.send({ t: 'setPluginParams', node, params: { ...params } })
+    },
+    latencySamples: (node: BackendNodeId): number | null =>
+      this.externalLatency.get(node) ?? null,
+    onLatencyChange: (listener: () => void): (() => void) => {
+      this.latencyListeners.add(listener)
+      return () => this.latencyListeners.delete(listener)
+    }
+  }
+
   constructor(private port: PortLike) {
     port.onMessage((data) => this.onEvent(data as HostEvent))
     port.start?.()
@@ -127,6 +164,17 @@ export class NativeAudioBackend {
       const settle = this.captureFlushes.get(event.node)
       this.captureFlushes.delete(event.node)
       settle?.()
+      return
+    }
+    if (event.t === 'externalReady') {
+      // A plugin that failed to open reports no latency BECAUSE it is
+      // bypassing — it delays nothing, so 0 is the truthful figure and
+      // compensation stays out of the way.
+      this.externalLatency.set(event.node, event.ok ? event.latencySamples : 0)
+      if (!event.ok && event.message) {
+        console.warn(`external insert bypassed: ${event.message}`)
+      }
+      for (const listener of this.latencyListeners) listener()
       return
     }
     if (event.t === 'frame') {
@@ -211,6 +259,7 @@ export class NativeAudioBackend {
   }
 
   disposeNode(id: BackendNodeId): void {
+    this.externalLatency.delete(id)
     this.send({ t: 'disposeNode', id })
   }
 

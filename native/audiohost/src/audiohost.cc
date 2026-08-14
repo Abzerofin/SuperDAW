@@ -498,6 +498,7 @@ Napi::Value CreateNode(const Napi::CallbackInfo& info) {
   std::string typeName;
   double maxDelay = 1;
   uint32_t channel = 0;
+  int32_t slot = -1;
   if (info.Length() > 2 && info[2].IsObject()) {
     auto opts = info[2].As<Napi::Object>();
     if (opts.Has("type") && opts.Get("type").IsString()) {
@@ -512,6 +513,9 @@ Napi::Value CreateNode(const Napi::CallbackInfo& info) {
     if (opts.Has("channel") && opts.Get("channel").IsNumber()) {
       channel = opts.Get("channel").As<Napi::Number>().Uint32Value();
     }
+    if (opts.Has("slot") && opts.Get("slot").IsNumber()) {
+      slot = opts.Get("slot").As<Napi::Number>().Int32Value();
+    }
   }
   const sdengine::NodeKind nodeKind =
       kind == "stereoPanner" ? sdengine::NodeKind::Panner
@@ -521,8 +525,10 @@ Napi::Value CreateNode(const Napi::CallbackInfo& info) {
       : kind == "convolver"  ? sdengine::NodeKind::Convolver
       : kind == "oscillator" ? sdengine::NodeKind::Oscillator
       : kind == "input"      ? sdengine::NodeKind::Input
+      : kind == "pdc"        ? sdengine::NodeKind::Pdc
+      : kind == "external"   ? sdengine::NodeKind::External
                              : sdengine::NodeKind::Gain;
-  EngineOf(env).CreateNode(id, nodeKind, typeName, maxDelay, channel);
+  EngineOf(env).CreateNode(id, nodeKind, typeName, maxDelay, channel, slot);
   return env.Undefined();
 }
 
@@ -550,6 +556,23 @@ Napi::Value ConfigureNode(const Napi::CallbackInfo& info) {
                                    ? opts.Get("channel").As<Napi::Number>().Uint32Value()
                                    : 0;
       EngineOf(env).ConfigureInput(id, opts.Get("mode").As<Napi::String>(), channel);
+    }
+    // PDC capacity: how much delay this compensator may ever be asked for.
+    // Built on this thread; the render thread only swaps the line in.
+    //
+    // Sized against the HIGHEST rate the line could ever be read at, not
+    // the current device rate: the device may not be open yet (the offline
+    // render hook picks its own rate) and a later device switch can raise
+    // it. Over-allocating a few frames is free; under-allocating would
+    // silently clamp the compensation and misalign the mix.
+    if (opts.Has("maxDelay") && opts.Get("maxDelay").IsNumber()) {
+      const double deviceRate =
+          g_host != nullptr ? static_cast<double>(g_host->sampleRate) : 0.0;
+      EngineOf(env).SetPdcCapacity(id, opts.Get("maxDelay").As<Napi::Number>().DoubleValue(),
+                                   std::max(deviceRate, 192000.0));
+    }
+    if (opts.Has("slot") && opts.Get("slot").IsNumber()) {
+      EngineOf(env).SetExternalSlot(id, opts.Get("slot").As<Napi::Number>().Int32Value());
     }
   }
   return env.Undefined();
@@ -593,6 +616,24 @@ Napi::Value DrainCapture(const Napi::CallbackInfo& info) {
     out.Set(static_cast<uint32_t>(i), entry);
   }
   return out;
+}
+
+/**
+ * attachVst3Bridge(external) — take vst3host's realtime function table
+ * (native/shared/vst3bridge.h) so External nodes can call the plugin from
+ * the audio callback. Passing nothing detaches, which bypasses every
+ * external insert rather than leaving a dangling pointer on the audio
+ * thread. The ABI check lives in the engine.
+ */
+Napi::Value AttachVst3Bridge(const Napi::CallbackInfo& info) {
+  Napi::Env env = info.Env();
+  const superdaw::Vst3RtBridge* bridge = nullptr;
+  if (info.Length() > 0 && info[0].IsExternal()) {
+    bridge = info[0].As<Napi::External<superdaw::Vst3RtBridge>>().Data();
+  }
+  EngineOf(env).SetVst3Bridge(bridge);
+  return Napi::Boolean::New(
+      env, bridge != nullptr && bridge->abi == superdaw::kVst3RtBridgeAbi);
 }
 
 Napi::Value ConnectNodes(const Napi::CallbackInfo& info) {
@@ -803,6 +844,7 @@ static Napi::Object InitModule(Napi::Env env, Napi::Object exports) {
   exports.Set("setTestTone", Napi::Function::New(env, SetTestTone));
   exports.Set("createNode", Napi::Function::New(env, CreateNode));
   exports.Set("configureNode", Napi::Function::New(env, ConfigureNode));
+  exports.Set("attachVst3Bridge", Napi::Function::New(env, AttachVst3Bridge));
   exports.Set("connect", Napi::Function::New(env, ConnectNodes));
   exports.Set("connectParam", Napi::Function::New(env, ConnectParam));
   exports.Set("disconnectParam", Napi::Function::New(env, DisconnectParam));

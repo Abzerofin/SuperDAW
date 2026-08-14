@@ -40,6 +40,14 @@ export interface PluginNodes {
   /** Full teardown, backend registrations included — the builder owns
    *  every node it made. */
   dispose(): void
+  /**
+   * Samples this insert delays the signal by, for plugin-delay
+   * compensation (src/audio/pdc.ts). Absent = none, which is the honest
+   * answer for every builtin: they are Web Audio primitives, and Web
+   * Audio reports no latency for them, so compensating one here would
+   * make live playback disagree with a bounce.
+   */
+  latencySamples?(): number
   /** Optional live-visualization handle (see PluginAnalysis). */
   readonly analysis?: PluginAnalysis
 }

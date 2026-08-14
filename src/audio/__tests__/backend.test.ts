@@ -40,6 +40,8 @@ type Op =
 class MockBackend implements IAudioBackend {
   readonly ops: Op[] = []
   readonly webAudio = null
+  /** No external-plugin hosting: those inserts bypass, as under Web Audio. */
+  readonly externalPlugins = null
   private nextId = 1
   private buffers = new Set<string>()
   timeSec = 0
@@ -230,23 +232,45 @@ suite('engine → backend command stream', () => {
     rig.fire('play')
     await settle()
 
-    // The chain: three gains + a panner, wired input→auto→fader→panner→master.
+    // The chain: a PDC compensator, three gains, a panner, a second PDC
+    // compensator — source→input→auto→fader→panner→out→master. The two
+    // 'pdc' nodes sit at zero delay (an exact passthrough on every
+    // backend) until a plugin actually reports latency; see audio/pdc.ts.
     const created = rig.backend.ops.filter((o) => o.op === 'createNode')
-    expect(created.map((o) => o.kind)).toEqual(['gain', 'gain', 'gain', 'stereoPanner', 'gain'])
-    const [input, auto, fader, panner, fade] = created.map((o) => o.id)
+    expect(created.map((o) => o.kind)).toEqual([
+      'pdc',
+      'gain',
+      'gain',
+      'gain',
+      'stereoPanner',
+      'pdc',
+      'gain'
+    ])
+    const [source, input, auto, fader, panner, out, fade] = created.map((o) => o.id)
     const connects = rig.backend.ops.filter((o) => o.op === 'connect')
     expect(connects).toEqual(
       expect.arrayContaining([
+        { op: 'connect', from: source, to: input },
         { op: 'connect', from: input, to: auto },
         { op: 'connect', from: auto, to: fader },
         { op: 'connect', from: fader, to: panner },
-        { op: 'connect', from: panner, to: 0 },
+        { op: 'connect', from: panner, to: out },
+        { op: 'connect', from: out, to: 0 },
         // No inserts: the chain shorts input → auto after wiring.
         { op: 'connect', from: input, to: auto },
-        // The fade envelope feeds the chain input.
-        { op: 'connect', from: fade, to: input }
+        // The fade envelope feeds the chain's SOURCE compensator — not
+        // `input`, which is also where child tracks arrive and must not
+        // pick up this track's own source compensation.
+        { op: 'connect', from: fade, to: source }
       ])
     )
+    // Both compensators sit at zero — which both backends default to, so
+    // nothing here reports latency and nothing is written at all.
+    const delays = rig.backend.ops
+      .filter((o): o is Extract<Op, { op: 'scheduleParam' }> => o.op === 'scheduleParam')
+      .filter((o) => o.param === 'delayTime')
+      .flatMap((o) => o.events)
+    for (const event of delays) expect(event).toMatchObject({ kind: 'setValue', value: 0 })
 
     // The clip voice: start 0.25 s out, offset 0.125 s into the buffer,
     // half a second long, unresampled, into the fade gain.
@@ -298,7 +322,8 @@ suite('engine → backend command stream', () => {
     expect(stopped.map((o) => (o as Extract<Op, { op: 'stopVoice' }>).voice)).toEqual(
       expect.arrayContaining(played.map((o) => (o as Extract<Op, { op: 'play' }>).voice))
     )
-    const fadeId = rig.backend.ops.filter((o) => o.op === 'createNode')[4].id
+    // [pdc, gain, gain, gain, stereoPanner, pdc, gain] — the fade gain last.
+    const fadeId = rig.backend.ops.filter((o) => o.op === 'createNode')[6].id
     expect(rig.backend.ops).toEqual(
       expect.arrayContaining([{ op: 'disposeNode', id: fadeId }])
     )
@@ -331,7 +356,7 @@ suite('engine → backend command stream', () => {
     // The voice is queued — audibility rides the fader at zero gain.
     expect(rig.backend.ops.filter((o) => o.op === 'play')).toHaveLength(1)
     const created = rig.backend.ops.filter((o) => o.op === 'createNode')
-    const fader = created[2].id
+    const fader = created[3].id // pdc, input, auto, FADER, panner, pdc, fade
     const faderValues = rig.backend.ops
       .filter((o): o is Extract<Op, { op: 'scheduleParam' }> => o.op === 'scheduleParam')
       .filter((o) => o.node === fader)

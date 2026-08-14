@@ -22,11 +22,18 @@ import {
   type TapId,
   type VoiceId
 } from './backend'
+import { externalInsertProvider } from './externalInsert'
 import { clipFadeEvents } from './fades'
 import { buildInstrumentVoice, buildLiveInstrumentVoice, type InstrumentSample } from './instruments'
 import { LivePreview } from './livePreview'
 import { onsetsForPeaks } from './onsets'
-import { pluginRegistry, type PluginAnalysis, type PluginNodes } from './pluginRegistry'
+import { computePdc, pdcDelaysOf } from './pdc'
+import {
+  pluginRegistry,
+  type PluginAnalysis,
+  type PluginNodes,
+  type PluginProvider
+} from './pluginRegistry'
 import type { ExternalPluginHost } from './render'
 import type { LiveVoiceHandle } from './synth'
 import {
@@ -136,6 +143,14 @@ function dropLiveVoice(voices: Map<number, LiveVoiceEntry>, key: number): void {
   voices.delete(key)
 }
 
+/**
+ * Ceiling on plugin-delay compensation. Well past any real plugin (a
+ * linear-phase mastering EQ reports ~8 k samples, 0.17 s at 48 kHz) and
+ * short enough that a plugin misreporting its latency cannot silently
+ * push the whole mix seconds behind the playhead.
+ */
+const PDC_MAX_SEC = 0.5
+
 /** Seconds of finished VST3 audio produced per window. Also the latency. */
 const PREVIEW_WINDOW_SEC = 2
 /** How far ahead of the playhead preview audio is kept queued. */
@@ -172,16 +187,31 @@ function clipAudiblySame(a: Clip, b: Clip): boolean {
 }
 
 interface TrackChain {
-  /** Where sources and synth voices connect; head of the insert chain. */
+  /**
+   * Where sources and synth voices connect — a PDC compensator feeding
+   * `input`. It delays only the track's OWN material: children arrive at
+   * `input` directly and carry their own compensation (src/audio/pdc.ts).
+   * Zero delay is an exact passthrough on both backends, which is what it
+   * is for every project with no latent plugin in it.
+   */
+  source: BackendNodeId
+  /** Head of the insert chain; also the folder bus children feed. */
   input: BackendNodeId
   auto: BackendNodeId
   fader: BackendNodeId
   panner: BackendNodeId
+  /** PDC on the finished signal, between `panner` and the bus. */
+  out: BackendNodeId
   /** Side-tap off the panner for the track's level meter (never in the path). */
   tap: TapId
   meterBuf: Float32Array
-  /** Folder bus this chain's panner feeds (null = master). Folders ARE buses. */
+  /** Folder bus this chain's output feeds (null = master). Folders ARE buses. */
   parentId: TrackId | null
+  /** Seconds of capacity the two compensators have been given so far. */
+  pdcCapacitySec: number
+  /** Last delay written to each, so an unchanged plan writes nothing. */
+  pdcSourceSec: number
+  pdcOutSec: number
 }
 
 /** Master-meter tap length (frequency resolution is irrelevant to a peak). */
@@ -202,6 +232,13 @@ export class AudioEngine {
   private meterBuf: Float32Array | null = null
   private chains = new Map<TrackId, TrackChain>()
   private fxNodes = new Map<PluginInstanceId, PluginNodes>()
+  /**
+   * The stateBlob each EXTERNAL insert was opened with. A GUI-only
+   * plugin's edits exist nowhere else, and a running instance cannot be
+   * told about them, so a changed blob means reopening (liveNodesFor).
+   * Builtins never appear here — their state is entirely in `params`.
+   */
+  private fxStateBlobs = new Map<PluginInstanceId, string | null>()
   /**
    * Per-instance inlet/outlet gains for GRAPH-routed tracks. Routing edges
    * connect outlets to inlets; a bypassed/missing plugin just shorts its
@@ -244,6 +281,16 @@ export class AudioEngine {
    * builtins are already baked into each window).
    */
   private preview: LivePreview | null = null
+  /**
+   * The out-of-process plugin host, kept beside the preview it feeds: on a
+   * backend that can host external plugins IN its callback it becomes the
+   * availability index for live inserts instead, and no preview runs.
+   */
+  private externalHost: ExternalPluginHost | null = null
+  /** Total compensation the mix now carries (src/audio/pdc.ts). */
+  private pdcTotalSec = 0
+  /** Unsubscribe from the backend's plugin-latency reports. */
+  private externalLatencyOff: (() => void) | null = null
   private previewTracks = new Set<TrackId>()
   /** Next window start, per track: timeline ticks and its clock time. */
   private previewNextTicks = new Map<TrackId, number>()
@@ -422,8 +469,12 @@ export class AudioEngine {
     this.stopFxAutomation()
     this.stopPadScheduler()
     this.liveAllNotesOff()
+    this.externalLatencyOff?.()
+    this.externalLatencyOff = null
+    this.pdcTotalSec = 0
     for (const entry of this.fxNodes.values()) entry.dispose()
     this.fxNodes.clear()
+    this.fxStateBlobs.clear()
     this.graphPorts.clear()
     this.chains.clear()
     this.inputWaveTaps.clear()
@@ -450,6 +501,11 @@ export class AudioEngine {
         })
     this.backend = backend
     backend.start()
+    // A plugin cannot report its latency until it has loaded, so the
+    // answer arrives after the node does — and changes the whole
+    // compensation plan when it does.
+    this.externalLatencyOff =
+      backend.externalPlugins?.onLatencyChange(() => this.recomputePdc()) ?? null
     backend.scheduleParam(backend.masterNode(), 'gain', [
       { kind: 'setValue', value: this.store.state.masterVolume, time: 0 }
     ])
@@ -569,9 +625,19 @@ export class AudioEngine {
   /**
    * Seconds the heard output lags the stream clock. The drawn playhead
    * and recorded-take placement both correct by this.
+   *
+   * Plugin-delay compensation is part of it: a latent insert puts the
+   * whole mix that much behind the clock, and the playhead has to lag with
+   * it or it would run ahead of what is audible. Zero unless something in
+   * the project actually reports latency.
    */
   outputLatencySec(): number {
-    return this.backend?.latencies().outputSec ?? 0
+    return (this.backend?.latencies().outputSec ?? 0) + this.pdcTotalSec
+  }
+
+  /** Seconds of plugin-delay compensation the mix currently carries. */
+  pdcLatencySec(): number {
+    return this.pdcTotalSec
   }
 
   /**
@@ -699,7 +765,7 @@ export class AudioEngine {
     const seq = ++this.liveVoiceSeq
     const handle = buildLiveInstrumentVoice(
       backend,
-      this.chain(trackId).input,
+      this.chain(trackId).source,
       key,
       Math.min(1, Math.max(0, velocity)),
       track.synth,
@@ -1299,7 +1365,11 @@ export class AudioEngine {
    */
   setExternalHost(host: ExternalPluginHost | null): void {
     this.teardownPreview()
+    this.externalHost = host
     this.preview = host ? new LivePreview(this.store, this.assets, host) : null
+    // A backend that hosts external plugins live makes every preview node
+    // stale; rewire so those inserts become real chain members.
+    this.syncPlugins()
   }
 
   /**
@@ -1312,6 +1382,11 @@ export class AudioEngine {
     const backend = this.backend
     this.previewTracks = new Set()
     if (!backend || !this.preview || !this.transport.isPlaying) return out
+    // Two live behaviours, and only ever one at a time: where the backend
+    // can host external plugins in its own callback they are ordinary
+    // inserts, so the 2-second windowed preview must stand down entirely
+    // or the same plugin would be applied twice.
+    if (this.hostsExternalPluginsLive()) return out
     // Preview windows advance linearly and cannot wrap, so while the cycle
     // region is active previewed tracks would sail past the loop end.
     // They play dry instead (builtins live, VST3 bypassed) — as before
@@ -1946,7 +2021,10 @@ export class AudioEngine {
     state: ProjectState = this.store.state
   ): BackendNodeId {
     const backend = this.backend!
-    const chainInput = this.chain(trackId).input
+    // Sources land on the chain's PDC compensator, not its insert head:
+    // children of a folder feed `input` directly and must not pick up the
+    // folder's own source compensation (src/audio/pdc.ts).
+    const chainInput = this.chain(trackId).source
     // Looked up in the pass's own state: a track-loop ghost repeat carries
     // shifted clip positions, so its fades land on the repeat, not the
     // original.
@@ -2391,34 +2469,47 @@ export class AudioEngine {
     const existing = this.chains.get(trackId)
     if (existing) return existing
     const backend = this.ensureBackend()
+    // The two PDC compensators are always present and start at zero delay,
+    // which both backends pass through exactly. Always-present means a
+    // latency change is a param write rather than a rewire — no rebuilding
+    // the graph, and no already-scheduled voice left on an old node.
+    const source = backend.createNode('pdc')
     const input = backend.createNode('gain')
     const auto = backend.createNode('gain')
     const fader = backend.createNode('gain')
     const panner = backend.createNode('stereoPanner')
+    const out = backend.createNode('pdc')
     backend.scheduleParam(fader, 'gain', [
       { kind: 'setValue', value: this.effectiveGain(trackId), time: 0 }
     ])
     backend.scheduleParam(panner, 'pan', [
       { kind: 'setValue', value: this.store.state.tracks[trackId]?.pan ?? 0, time: 0 }
     ])
+    backend.connect(source, input)
     backend.connect(input, auto)
     backend.connect(auto, fader)
     backend.connect(fader, panner)
+    backend.connect(panner, out)
     const parentId = this.store.state.tracks[trackId]?.parentId ?? null
-    backend.connect(panner, this.busFor(parentId))
+    backend.connect(out, this.busFor(parentId))
     // Metering is a side-tap: the tap has no onward connection, so it
     // observes the post-fader/pan signal without altering the path. A peak
     // meter needs no frequency resolution — 256 samples per read is a 4×
     // cheaper scan than the old 1024 across every track every frame.
     const tap = backend.createTap(panner, TRACK_TAP_FRAMES)
     const chain: TrackChain = {
+      source,
       input,
       auto,
       fader,
       panner,
+      out,
       tap,
       meterBuf: new Float32Array(TRACK_TAP_FRAMES),
-      parentId
+      parentId,
+      pdcCapacitySec: 0,
+      pdcSourceSec: 0,
+      pdcOutSec: 0
     }
     this.chains.set(trackId, chain)
     this.wireInserts(trackId, chain)
@@ -2459,6 +2550,7 @@ export class AudioEngine {
       if (!state.plugins[instanceId]) {
         entry.dispose() // the builder owns all its nodes, adopted included
         this.fxNodes.delete(instanceId)
+        this.fxStateBlobs.delete(instanceId)
       }
     }
     for (const [instanceId, ports] of this.graphPorts) {
@@ -2474,6 +2566,9 @@ export class AudioEngine {
       const chain = this.chains.get(trackId)
       if (chain) this.wireInserts(trackId, chain)
     }
+    // The insert set just changed, so the latency of at least one path
+    // may have; the plan is cheap enough to redo whole.
+    this.recomputePdc()
   }
 
   private wireInserts(trackId: TrackId, chain: TrackChain): void {
@@ -2563,23 +2658,168 @@ export class AudioEngine {
   /**
    * The live nodes for an instance, created/applied on demand. Null =
    * not local, OR the provider cannot run on this backend (an effect
-   * still needing Web Audio escapes, asked to run natively) — both
-   * bypass identically.
+   * still needing Web Audio escapes, asked to run natively; an external
+   * plugin on a backend that cannot host one) — all bypass identically.
    */
   private liveNodesFor(instance: PluginInstance, now: number): PluginNodes | null {
+    const backend = this.backend
+    if (!backend) return null
+    // A GUI-only plugin's edits live ONLY in the opaque stateBlob, which a
+    // running instance cannot be told about — it is restored at open. So a
+    // blob that changed (an editor closed, a collaborator's preset load)
+    // means reopening. Params never need this; they are pushed live.
+    const blob = instance.stateBlob ?? null
+    if (this.fxNodes.has(instance.id) && this.fxStateBlobs.has(instance.id)) {
+      if (this.fxStateBlobs.get(instance.id) !== blob) {
+        this.fxNodes.get(instance.id)!.dispose()
+        this.fxNodes.delete(instance.id)
+        this.fxStateBlobs.delete(instance.id)
+      }
+    }
     let entry = this.fxNodes.get(instance.id)
     if (!entry) {
-      const backend = this.backend
-      if (!backend) return null
-      const resolved = pluginRegistry.resolve(instance.descriptor)
-      if (!resolved) return null
-      const nodes = resolved.provider.create(backend)
+      const provider =
+        pluginRegistry.resolve(instance.descriptor)?.provider ??
+        this.externalProviderFor(instance)
+      if (!provider) return null
+      const nodes = provider.create(backend)
       if (!nodes) return null
       entry = nodes
       this.fxNodes.set(instance.id, entry)
+      if (provider !== pluginRegistry.resolve(instance.descriptor)?.provider) {
+        this.fxStateBlobs.set(instance.id, blob)
+      }
     }
     entry.apply(instance.params, now)
     return entry
+  }
+
+  /**
+   * An installed external-format plugin (VST3) as an insert, when the
+   * backend can host one in its own audio callback. Null everywhere else,
+   * which is what keeps the freeze / windowed-preview route in charge
+   * under Web Audio. Minted per instance because the plugin needs the
+   * instance's stateBlob at open time (see audio/externalInsert.ts).
+   */
+  private externalProviderFor(instance: PluginInstance): PluginProvider | null {
+    if (!this.backend?.externalPlugins) return null
+    if (!this.externalHost?.has(instance.descriptor)) return null
+    return externalInsertProvider(instance)
+  }
+
+  /** True when external inserts run live, so LivePreview must stand down. */
+  private hostsExternalPluginsLive(): boolean {
+    return this.backend?.externalPlugins != null && this.externalHost != null
+  }
+
+  // ---------- Plugin-delay compensation ----------
+
+  /**
+   * Samples one track's insert chain delays its signal by: the sum along a
+   * linear chain, the longest path through a routing graph (parallel
+   * branches are summed at `auto`, so the slowest one sets the arrival).
+   * A frozen track bypasses its inserts entirely, so it delays nothing.
+   */
+  private chainLatencySamples(trackId: TrackId): number {
+    const state = this.store.state
+    if (!state.tracks[trackId] || state.tracks[trackId].frozenAssetId) return 0
+    const inserts = pluginsOfTrack(state, trackId)
+    const latencyOf = (instance: PluginInstance): number => {
+      if (!instance.enabled) return 0
+      const entry = this.fxNodes.get(instance.id)
+      return Math.max(0, Math.round(entry?.latencySamples?.() ?? 0))
+    }
+    const routes = routesOfTrack(state, trackId)
+    if (routes.length === 0) {
+      let total = 0
+      for (const instance of inserts) total += latencyOf(instance)
+      return total
+    }
+    // Longest path from 'in' to 'out' over the drawn wires: parallel
+    // branches sum at `auto`, so the slowest one decides when the track
+    // has fully arrived. Memoized; null means "no path to out from here",
+    // which is what a dead-end branch and a user-drawn loop both are.
+    const byId = new Map(inserts.map((instance) => [instance.id, instance]))
+    const outgoing = new Map<string, string[]>()
+    for (const route of routes) {
+      const list = outgoing.get(route.from)
+      if (list) list.push(route.to)
+      else outgoing.set(route.from, [route.to])
+    }
+    const best = new Map<string, number | null>()
+    const visiting = new Set<string>()
+    const longest = (node: string): number | null => {
+      if (node === 'out') return 0
+      const known = best.get(node)
+      if (known !== undefined) return known
+      if (visiting.has(node)) return null
+      visiting.add(node)
+      const instance = byId.get(node)
+      const own = node === 'in' || !instance ? 0 : latencyOf(instance)
+      let deepest: number | null = null
+      for (const next of outgoing.get(node) ?? []) {
+        const reach = longest(next)
+        if (reach !== null) deepest = Math.max(deepest ?? 0, reach)
+      }
+      visiting.delete(node)
+      const value = deepest === null ? null : own + deepest
+      best.set(node, value)
+      return value
+    }
+    return longest('in') ?? 0
+  }
+
+  /**
+   * Recompute and push every compensator (src/audio/pdc.ts). Cheap and
+   * idempotent — a param write per track — so it runs on anything that can
+   * change the answer: the plugin set, a folder move, and the host
+   * reporting a plugin's latency once it has actually loaded.
+   */
+  private recomputePdc(): void {
+    const backend = this.backend
+    if (!backend?.running()) return
+    const state = this.store.state
+    const plan = computePdc(
+      [...this.chains.keys()].map((trackId) => ({
+        id: trackId,
+        parentId: state.tracks[trackId]?.parentId ?? null,
+        latencySamples: this.chainLatencySamples(trackId)
+      }))
+    )
+    const rate = backend.start().sampleRate || 48000
+    for (const [trackId, chain] of this.chains) {
+      const delays = pdcDelaysOf(plan, trackId)
+      const needSec = Math.max(delays.sourceSamples, delays.outputSamples) / rate
+      if (needSec > chain.pdcCapacitySec) {
+        // Grow in doublings so a chain settles on a capacity instead of
+        // rebuilding its line on every small change (recapacitating clears
+        // it, which is a discontinuity).
+        let capacity = Math.max(chain.pdcCapacitySec, 0.05)
+        while (capacity < needSec) capacity *= 2
+        capacity = Math.min(capacity, PDC_MAX_SEC)
+        backend.configureNode(chain.source, { maxDelay: capacity })
+        backend.configureNode(chain.out, { maxDelay: capacity })
+        chain.pdcCapacitySec = capacity
+      }
+      const at = backend.now()
+      // Only write what CHANGED: this runs on every plugin edit and every
+      // folder move, and an AudioParam keeps every event it is given.
+      const sourceSec = Math.min(delays.sourceSamples / rate, PDC_MAX_SEC)
+      const outSec = Math.min(delays.outputSamples / rate, PDC_MAX_SEC)
+      if (sourceSec !== chain.pdcSourceSec) {
+        chain.pdcSourceSec = sourceSec
+        backend.scheduleParam(chain.source, 'delayTime', [
+          { kind: 'setValue', value: sourceSec, time: at }
+        ])
+      }
+      if (outSec !== chain.pdcOutSec) {
+        chain.pdcOutSec = outSec
+        backend.scheduleParam(chain.out, 'delayTime', [
+          { kind: 'setValue', value: outSec, time: at }
+        ])
+      }
+    }
+    this.pdcTotalSec = plan.totalSamples / rate
   }
 
   private isAudible(trackId: TrackId): boolean {
@@ -2643,6 +2883,7 @@ export class AudioEngine {
     const backend = this.backend
     if (!backend) return
     this.smooth(backend.masterNode(), 'gain', this.store.state.masterVolume)
+    const chainCount = this.chains.size
     const audible = this.audibilityResolver()
     const panAutomated = this.automationIndex().panByTrack
     for (const [trackId, chain] of this.chains) {
@@ -2656,10 +2897,12 @@ export class AudioEngine {
           backend.disconnect(monitor, chain.input)
           this.monitors.delete(trackId)
         }
+        backend.disposeNode(chain.source)
         backend.disposeNode(chain.input)
         backend.disposeNode(chain.auto)
         backend.disposeNode(chain.fader)
         backend.disposeNode(chain.panner)
+        backend.disposeNode(chain.out)
         backend.disposeTap(chain.tap)
         this.inputWaveTaps.delete(chain.input)
         for (const instance of Object.values(this.prevPlugins)) {
@@ -2684,17 +2927,19 @@ export class AudioEngine {
       if (!this.chains.has(trackId)) this.chain(trackId)
     }
     // Re-route outputs whose folder changed (drag into/out of a folder).
+    let rerouted = false
     for (const [trackId, chain] of this.chains) {
       const parentId = this.store.state.tracks[trackId]?.parentId ?? null
       if (parentId !== chain.parentId) {
-        backend.disconnect(chain.panner)
-        backend.connect(chain.panner, this.busFor(parentId))
-        // The blanket disconnect severed the meter tap; re-tap the panner.
-        backend.disposeTap(chain.tap)
-        chain.tap = backend.createTap(chain.panner, TRACK_TAP_FRAMES)
+        backend.disconnect(chain.out)
+        backend.connect(chain.out, this.busFor(parentId))
         chain.parentId = parentId
+        rerouted = true
       }
     }
+    // A move changes which paths share a bus, so it changes the whole
+    // compensation plan — as does any chain this pass just created.
+    if (rerouted || this.chains.size !== chainCount) this.recomputePdc()
   }
 
   /**
