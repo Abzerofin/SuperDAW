@@ -25,6 +25,7 @@ export interface AudiohostAddon {
     exclusive?: boolean
   }): { sampleRate: number; outputChannels: number; periodFrames: number; periodCount: number; exclusive: boolean }
   stop(): void
+  enumerateDevices(): Array<{ id: string; label: string; kind: 'input' | 'output'; isDefault: boolean }>
   now(): number
   latencySec(): number
   stats(): { xruns: number }
@@ -83,7 +84,20 @@ export function createAudioHostSession(
     })
   }
 
+  const pushDevices = (): void => {
+    try {
+      post({ t: 'devices', devices: addon.enumerateDevices() })
+    } catch {
+      // enumeration can fail transiently on a device storm — the next
+      // refresh picks it up; never take the audio process down for it.
+    }
+  }
+
+  /** Remembered so a device switch can reopen with the same settings. */
+  let lastStart: HostStartOptions = {}
+
   const start = (opts: HostStartOptions): void => {
+    lastStart = opts
     try {
       const info = addon.start({
         deviceId: opts.deviceId ?? null,
@@ -91,6 +105,7 @@ export function createAudioHostSession(
         exclusive: opts.exclusive
       })
       post({ t: 'started', info, latencySec: addon.latencySec() })
+      pushDevices()
       if (!options.manualFrames && frameTimer === null) {
         frameTimer = setInterval(pumpFrame, HOST_FRAME_INTERVAL_MS)
       }
@@ -112,6 +127,15 @@ export function createAudioHostSession(
         if (frameTimer !== null) clearInterval(frameTimer)
         frameTimer = null
         addon.stop()
+        break
+      case 'refreshDevices':
+        pushDevices()
+        break
+      case 'setOutputDevice':
+        // WASAPI has no live sink switch: reopen on the new device. The
+        // graph and its buffers live in the engine, not the stream, so
+        // they survive — only the device handle changes.
+        start({ ...lastStart, deviceId: c.deviceId })
         break
       case 'createNode':
         addon.createNode(c.id, c.kind, c.opts)

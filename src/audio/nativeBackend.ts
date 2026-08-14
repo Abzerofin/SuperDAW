@@ -24,6 +24,7 @@
 import type {
   BackendLatencies,
   BackendNodeId,
+  DeviceInfo,
   NodeKind,
   NodeOptions,
   ParamEvent,
@@ -58,6 +59,8 @@ export class NativeAudioBackend {
   private tapFrames = new Map<TapId, number>()
   private tapSnapshots = new Map<TapId, Float32Array>()
   private endedListeners = new Set<(id: VoiceId) => void>()
+  private deviceListeners = new Set<() => void>()
+  private devices: DeviceInfo[] = []
 
   constructor(private port: PortLike) {
     port.onMessage((data) => this.onEvent(data as HostEvent))
@@ -79,6 +82,11 @@ export class NativeAudioBackend {
   }
 
   private onEvent(event: HostEvent): void {
+    if (event.t === 'devices') {
+      this.devices = event.devices
+      for (const listener of this.deviceListeners) listener()
+      return
+    }
     if (event.t === 'frame') {
       this.baseStream = event.now
       this.baseWallMs = performance.now()
@@ -112,9 +120,23 @@ export class NativeAudioBackend {
   }
 
   async setOutputDevice(deviceId: string | null): Promise<boolean> {
-    // Per-backend device selection is the §6 unification, still ahead of
-    // this stage — the native stream opens on the system default.
-    return deviceId === null
+    // WASAPI cannot re-point a live stream, so the host reopens on the
+    // new device; the graph and its buffers live in the engine, not the
+    // stream, so playback machinery survives the swap.
+    this.send({ t: 'setOutputDevice', deviceId })
+    return true
+  }
+
+  async enumerateDevices(): Promise<DeviceInfo[]> {
+    // Served from the pushed cache — no RPC in the UI's path. A refresh
+    // is requested alongside, so the next call sees any change.
+    this.send({ t: 'refreshDevices' })
+    return this.devices
+  }
+
+  onDeviceChange(listener: () => void): () => void {
+    this.deviceListeners.add(listener)
+    return () => this.deviceListeners.delete(listener)
   }
 
   createNode(kind: NodeKind, opts?: NodeOptions): BackendNodeId {

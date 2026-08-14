@@ -14,6 +14,7 @@ import type { AssetEvent, AssetStore } from './assets'
 import {
   WebAudioBackend,
   type BackendNodeId,
+  type DeviceInfo,
   type IAudioBackend,
   type ParamEvent,
   type TapId,
@@ -517,6 +518,21 @@ export class AudioEngine {
    */
   outputLatencySec(): number {
     return this.backend?.latencies().outputSec ?? 0
+  }
+
+  /** Devices the ACTIVE backend can open (§6) — the store reads this. */
+  async enumerateDevices(): Promise<DeviceInfo[]> {
+    return this.ensureBackend().enumerateDevices()
+  }
+
+  /** Hot-plug notification from the active backend. */
+  onDeviceChange(listener: () => void): () => void {
+    return this.ensureBackend().onDeviceChange(listener)
+  }
+
+  /** Which backend is live, so selections persist under the right key. */
+  backendKind(): 'web' | 'native' {
+    return this.ensureBackend().webAudio ? 'web' : 'native'
   }
 
   private async applyOutputDevice(): Promise<boolean> {

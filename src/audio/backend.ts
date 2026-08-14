@@ -37,6 +37,7 @@
 import type {
   BackendLatencies,
   BackendNodeId,
+  DeviceInfo,
   NodeKind,
   NodeOptions,
   ParamEvent,
@@ -50,6 +51,7 @@ import type {
 export type {
   BackendLatencies,
   BackendNodeId,
+  DeviceInfo,
   NodeKind,
   NodeOptions,
   ParamEvent,
@@ -71,6 +73,13 @@ export interface IAudioBackend {
   latencies(): BackendLatencies
   /** Route output to a device (null = system default). Live, no restart. */
   setOutputDevice(deviceId: string | null): Promise<boolean>
+  /**
+   * Devices this backend can open (§6). The store above it stays the one
+   * the UI reads; only the plumbing differs per backend.
+   */
+  enumerateDevices(): Promise<DeviceInfo[]>
+  /** Hot-plug notification; returns an unsubscribe. */
+  onDeviceChange(listener: () => void): () => void
 
   // ---- graph ----
   createNode(kind: NodeKind, opts?: NodeOptions): BackendNodeId
@@ -288,6 +297,39 @@ export class WebAudioBackend implements IAudioBackend {
     } catch {
       return false
     }
+  }
+
+  async enumerateDevices(): Promise<DeviceInfo[]> {
+    if (!navigator.mediaDevices?.enumerateDevices) return []
+    let devices: MediaDeviceInfo[]
+    try {
+      devices = await navigator.mediaDevices.enumerateDevices()
+    } catch {
+      return []
+    }
+    const out: DeviceInfo[] = []
+    let inputs = 0
+    let outputs = 0
+    for (const device of devices) {
+      if (device.kind !== 'audioinput' && device.kind !== 'audiooutput') continue
+      const kind = device.kind === 'audioinput' ? 'input' : 'output'
+      const index = kind === 'input' ? inputs++ : outputs++
+      out.push({
+        id: device.deviceId,
+        // Labels are hidden until a capture grant; number them meanwhile.
+        label: device.label || `${kind === 'input' ? 'Input' : 'Output'} device ${index + 1}`,
+        kind,
+        isDefault: device.deviceId === 'default' || device.deviceId === ''
+      })
+    }
+    return out
+  }
+
+  onDeviceChange(listener: () => void): () => void {
+    const target = navigator.mediaDevices
+    if (!target?.addEventListener) return () => {}
+    target.addEventListener('devicechange', listener)
+    return () => target.removeEventListener('devicechange', listener)
   }
 
   createNode(kind: NodeKind, opts?: NodeOptions): BackendNodeId {

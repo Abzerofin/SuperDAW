@@ -53,6 +53,19 @@ export interface StreamInfo {
   outputChannels: number
 }
 
+/**
+ * A device the active backend can open (§6). Native ids are stable and
+ * labels always present; Web Audio's are origin-scoped hashes whose
+ * labels stay hidden until a capture grant — which is why selections are
+ * persisted per backend rather than translated between them.
+ */
+export interface DeviceInfo {
+  readonly id: string
+  readonly label: string
+  readonly kind: 'input' | 'output'
+  readonly isDefault: boolean
+}
+
 export interface BackendLatencies {
   /** Seconds the heard output lags the stream clock (feeds the playhead). */
   outputSec: number

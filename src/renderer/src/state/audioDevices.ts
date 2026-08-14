@@ -25,16 +25,15 @@ interface StoredSelection {
   outputDeviceId: string | null
 }
 
-const STORAGE_KEY = 'audioDevices'
+/**
+ * Selections are namespaced PER BACKEND (§6): a Web Audio deviceId is an
+ * origin-scoped hash and a native one is a WASAPI endpoint id, so there
+ * is no honest translation between them — each backend remembers its own.
+ * Older single-scope values are read once as the web scope's.
+ */
+type StoredSelections = Partial<Record<'web' | 'native', StoredSelection>> & Partial<StoredSelection>
 
-function describe(device: MediaDeviceInfo, index: number, kind: string): AudioDeviceInfo {
-  return {
-    deviceId: device.deviceId,
-    // Labels are hidden until a mic permission is granted; number them.
-    label: device.label || `${kind} ${index + 1}`,
-    groupId: device.groupId
-  }
-}
+const STORAGE_KEY = 'audioDevices'
 
 class AudioDeviceStore {
   inputs: AudioDeviceInfo[] = []
@@ -54,33 +53,39 @@ class AudioDeviceStore {
     void this.init()
   }
 
+  /** Which backend's selections these are (see StoredSelections). */
+  private scope: 'web' | 'native' = 'web'
+  private stored: StoredSelections = {}
+
   private async init(): Promise<void> {
-    const stored = await appStorageGet<StoredSelection>(STORAGE_KEY)
-    if (stored) {
-      this.inputDeviceId = stored.inputDeviceId ?? null
-      this.outputDeviceId = stored.outputDeviceId ?? null
-    }
+    this.stored = (await appStorageGet<StoredSelections>(STORAGE_KEY)) ?? {}
+    this.scope = audioEngine.backendKind()
+    const mine =
+      this.stored[this.scope] ??
+      // Pre-namespacing values belong to the Web Audio scope.
+      (this.scope === 'web'
+        ? { inputDeviceId: this.stored.inputDeviceId ?? null, outputDeviceId: this.stored.outputDeviceId ?? null }
+        : undefined)
+    this.inputDeviceId = mine?.inputDeviceId ?? null
+    this.outputDeviceId = mine?.outputDeviceId ?? null
     if (this.outputDeviceId) void audioEngine.setOutputDevice(this.outputDeviceId)
-    navigator.mediaDevices?.addEventListener?.('devicechange', () => void this.refresh(true))
+    audioEngine.onDeviceChange(() => void this.refresh(true))
     await this.refresh(false)
   }
 
-  /** Re-enumerate; optionally handle selected devices that disappeared. */
+  /** Re-enumerate through the ACTIVE backend; optionally handle losses. */
   async refresh(handleLoss: boolean): Promise<void> {
-    if (!navigator.mediaDevices?.enumerateDevices) return
-    let devices: MediaDeviceInfo[]
-    try {
-      devices = await navigator.mediaDevices.enumerateDevices()
-    } catch {
-      return
-    }
-    this.labelsVisible = devices.some((d) => d.label !== '')
+    const devices = await audioEngine.enumerateDevices()
+    if (devices.length === 0 && this.inputs.length === 0 && this.outputs.length === 0) return
+    // Native labels are always real; Web Audio hides them until a grant.
+    this.labelsVisible =
+      audioEngine.backendKind() === 'native' || devices.some((d) => !/ device \d+$/.test(d.label))
     this.inputs = devices
-      .filter((d) => d.kind === 'audioinput')
-      .map((d, i) => describe(d, i, 'Input device'))
+      .filter((d) => d.kind === 'input')
+      .map((d) => ({ deviceId: d.id, label: d.label, groupId: '' }))
     this.outputs = devices
-      .filter((d) => d.kind === 'audiooutput')
-      .map((d, i) => describe(d, i, 'Output device'))
+      .filter((d) => d.kind === 'output')
+      .map((d) => ({ deviceId: d.id, label: d.label, groupId: '' }))
 
     if (handleLoss) {
       if (this.inputDeviceId && !this.inputs.some((d) => d.deviceId === this.inputDeviceId)) {
@@ -143,10 +148,14 @@ class AudioDeviceStore {
   }
 
   private persist(): void {
-    void appStorageSet(STORAGE_KEY, {
-      inputDeviceId: this.inputDeviceId,
-      outputDeviceId: this.outputDeviceId
-    } satisfies StoredSelection)
+    this.stored = {
+      ...this.stored,
+      [this.scope]: {
+        inputDeviceId: this.inputDeviceId,
+        outputDeviceId: this.outputDeviceId
+      }
+    }
+    void appStorageSet(STORAGE_KEY, this.stored)
   }
 
   subscribe = (listener: () => void): (() => void) => {

@@ -7,7 +7,7 @@
  * health counters — at UI cadence, never per audio block.
  */
 
-import type { NodeKind, NodeOptions, ParamEvent, ParamName } from './backendTypes'
+import type { DeviceInfo, NodeKind, NodeOptions, ParamEvent, ParamName } from './backendTypes'
 
 export interface HostStartOptions {
   deviceId?: string | null
@@ -19,6 +19,10 @@ export interface HostStartOptions {
 export type HostCommand =
   | { t: 'start'; opts: HostStartOptions }
   | { t: 'stop' }
+  /** Re-enumerate and push a fresh `devices` event. */
+  | { t: 'refreshDevices' }
+  /** Reopen the stream on another output device (null = system default). */
+  | { t: 'setOutputDevice'; deviceId: string | null }
   | { t: 'createNode'; id: number; kind: NodeKind; opts?: NodeOptions }
   | { t: 'configureNode'; id: number; opts: NodeOptions }
   | { t: 'connect'; from: number; to: number }
@@ -57,6 +61,12 @@ export interface HostStreamInfo {
 export type HostEvent =
   | { t: 'started'; info: HostStreamInfo; latencySec: number }
   | { t: 'startFailed'; message: string }
+  /**
+   * The device list, PUSHED rather than answered: keeping every message
+   * one-way means the proxy can serve enumerateDevices() from cache
+   * without an RPC round-trip inside the UI's path.
+   */
+  | { t: 'devices'; devices: DeviceInfo[] }
   | {
       t: 'frame'
       /** Stream time when the frame was assembled (the clock base). */

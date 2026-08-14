@@ -70,6 +70,12 @@ class MockBackend implements IAudioBackend {
   scheduleSource(): VoiceId {
     return this.nextId++
   }
+  async enumerateDevices(): Promise<[]> {
+    return []
+  }
+  onDeviceChange(): () => void {
+    return () => {}
+  }
   connect(from: BackendNodeId, to: BackendNodeId): void {
     this.ops.push({ op: 'connect', from, to })
   }
