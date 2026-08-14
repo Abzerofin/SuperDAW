@@ -31,6 +31,8 @@ export interface AudiohostAddon {
   createNode(id: number, kind: string, opts?: Record<string, number | string>): void
   configureNode(id: number, opts: Record<string, number | string>): void
   connect(from: number, to: number): void
+  connectParam(from: number, to: number, param: string): void
+  disconnectParam(from: number, to: number, param: string): void
   disconnect(from: number, to?: number): void
   disposeNode(id: number): void
   scheduleParam(node: number, param: string, events: unknown[]): void
@@ -118,6 +120,12 @@ export function createAudioHostSession(
         break
       case 'connect':
         addon.connect(c.from, c.to)
+        break
+      case 'connectParam':
+        addon.connectParam(c.from, c.to, c.param)
+        break
+      case 'disconnectParam':
+        addon.disconnectParam(c.from, c.to, c.param)
         break
       case 'disconnect':
         addon.disconnect(c.from, c.to)

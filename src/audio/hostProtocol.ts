@@ -22,6 +22,8 @@ export type HostCommand =
   | { t: 'createNode'; id: number; kind: NodeKind; opts?: NodeOptions }
   | { t: 'configureNode'; id: number; opts: NodeOptions }
   | { t: 'connect'; from: number; to: number }
+  | { t: 'connectParam'; from: number; to: number; param: ParamName }
+  | { t: 'disconnectParam'; from: number; to: number; param: ParamName }
   | { t: 'disconnect'; from: number; to?: number }
   | { t: 'disposeNode'; id: number }
   | { t: 'scheduleParam'; node: number; param: ParamName; events: ParamEvent[] }

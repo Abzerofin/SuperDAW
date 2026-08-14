@@ -163,7 +163,164 @@ class ParamTimeline {
 
 // ----------------------------------------------------------------- graph
 
-enum class NodeKind : uint8_t { Gain, Panner, Biquad, Delay, Compressor };
+enum class NodeKind : uint8_t {
+  Gain,
+  Panner,
+  Biquad,
+  Delay,
+  Compressor,
+  Convolver,
+  Oscillator
+};
+
+/** Web Audio oscillator waveforms. */
+enum class OscType : uint8_t { Sine, Square, Sawtooth, Triangle };
+
+inline OscType ParseOscType(const std::string& name) {
+  if (name == "square") return OscType::Square;
+  if (name == "sawtooth") return OscType::Sawtooth;
+  if (name == "triangle") return OscType::Triangle;
+  return OscType::Sine;
+}
+
+/**
+ * One oscillator sample from a normalized phase in [0, 1).
+ *
+ * Web Audio band-limits square/sawtooth/triangle (PeriodicWave summed to
+ * the Nyquist); these are the naive shapes. The only consumer today is
+ * the tremolo LFO at a few Hz driving a gain — where the audible
+ * difference is the absence of Gibbs ringing at the corners, i.e. the
+ * modulation is marginally CLEANER than Chromium's rather than wrong.
+ * A band-limited table belongs with the first audio-rate oscillator
+ * (the synth voices), not here.
+ */
+inline double OscillatorSample(OscType type, double phase) {
+  switch (type) {
+    case OscType::Square:
+      return phase < 0.5 ? 1.0 : -1.0;
+    case OscType::Sawtooth:
+      return 2.0 * phase - 1.0;
+    case OscType::Triangle:
+      return phase < 0.5 ? 4.0 * phase - 1.0 : 3.0 - 4.0 * phase;
+    case OscType::Sine:
+    default:
+      return std::sin(2.0 * kPi * phase);
+  }
+}
+
+// ------------------------------------------------------------------ FFT
+
+/** In-place iterative radix-2 complex FFT (length a power of two). */
+inline void Fft(std::vector<float>& re, std::vector<float>& im, bool inverse) {
+  const size_t n = re.size();
+  for (size_t i = 1, j = 0; i < n; i++) {
+    size_t bit = n >> 1;
+    for (; j & bit; bit >>= 1) j ^= bit;
+    j ^= bit;
+    if (i < j) {
+      std::swap(re[i], re[j]);
+      std::swap(im[i], im[j]);
+    }
+  }
+  for (size_t len = 2; len <= n; len <<= 1) {
+    const double angle = (inverse ? 1 : -1) * 2.0 * kPi / static_cast<double>(len);
+    const double stepRe = std::cos(angle);
+    const double stepIm = std::sin(angle);
+    const size_t half = len >> 1;
+    for (size_t i = 0; i < n; i += len) {
+      double wRe = 1, wIm = 0;
+      for (size_t k = 0; k < half; k++) {
+        const size_t a = i + k;
+        const size_t b = a + half;
+        const double vRe = re[b] * wRe - im[b] * wIm;
+        const double vIm = re[b] * wIm + im[b] * wRe;
+        re[b] = static_cast<float>(re[a] - vRe);
+        im[b] = static_cast<float>(im[a] - vIm);
+        re[a] = static_cast<float>(re[a] + vRe);
+        im[a] = static_cast<float>(im[a] + vIm);
+        const double nextRe = wRe * stepRe - wIm * stepIm;
+        wIm = wRe * stepIm + wIm * stepRe;
+        wRe = nextRe;
+      }
+    }
+  }
+  if (inverse) {
+    for (size_t i = 0; i < n; i++) {
+      re[i] /= static_cast<float>(n);
+      im[i] /= static_cast<float>(n);
+    }
+  }
+}
+
+/**
+ * Uniform partitioned overlap-save convolution — one partition per
+ * render block, so the reverb adds NO latency (the first partition
+ * covers the current block immediately).
+ *
+ * Convolution is exact math, so unlike the compressor this can match
+ * Chromium sample-for-sample. The one non-obvious part is that
+ * ConvolverNode NORMALIZES its impulse response by default; the scale
+ * was measured off the real node and is reproduced in BuildFrom (see
+ * kConvolverGainCalibration).
+ *
+ * Cost note: a 1.8 s tail at 48 kHz is ~675 partitions, i.e. ~350k
+ * multiply-accumulates per block per channel — a few percent of a core
+ * per instance. Fine for one or two reverbs; a non-uniform partition
+ * scheme is the optimization if many are ever needed at once.
+ */
+constexpr size_t kConvFft = kBlockFrames * 2;
+/** −58 dB, recovered by measuring ConvolverNode (see the tests). */
+constexpr double kConvolverGainCalibration = 0.0012589254117941673;
+constexpr double kConvolverCalibrationRate = 44100.0;
+
+struct ConvolverState {
+  // Per IR partition, per channel: the partition's spectrum.
+  std::vector<std::vector<float>> irRe[2], irIm[2];
+  // Frequency-delay line of past input spectra, per channel.
+  std::vector<std::vector<float>> fdlRe[2], fdlIm[2];
+  size_t partitions = 0;
+  size_t head = 0;
+  // The previous block's input, for overlap-save's leading half.
+  float tail[2][kBlockFrames] = {};
+  bool ready = false;
+
+  void BuildFrom(const std::vector<std::vector<float>>& channels, double sampleRate) {
+    ready = false;
+    if (channels.empty() || channels[0].empty()) return;
+    const size_t length = channels[0].size();
+
+    // Chromium's normalization: RMS across every channel and sample.
+    double power = 0;
+    for (const auto& ch : channels) {
+      for (float v : ch) power += static_cast<double>(v) * v;
+    }
+    power = std::sqrt(power / (static_cast<double>(channels.size()) * length));
+    if (!(power > 1.25e-4)) power = 1.25e-4;
+    const double scale = (kConvolverGainCalibration / power) *
+                         (kConvolverCalibrationRate / sampleRate);
+
+    partitions = (length + kBlockFrames - 1) / kBlockFrames;
+    head = 0;
+    for (size_t ch = 0; ch < 2; ch++) {
+      const auto& src = channels[std::min(ch, channels.size() - 1)];
+      irRe[ch].assign(partitions, std::vector<float>(kConvFft, 0.0f));
+      irIm[ch].assign(partitions, std::vector<float>(kConvFft, 0.0f));
+      fdlRe[ch].assign(partitions, std::vector<float>(kConvFft, 0.0f));
+      fdlIm[ch].assign(partitions, std::vector<float>(kConvFft, 0.0f));
+      for (size_t p = 0; p < partitions; p++) {
+        auto& re = irRe[ch][p];
+        auto& im = irIm[ch][p];
+        for (size_t i = 0; i < kBlockFrames; i++) {
+          const size_t at = p * kBlockFrames + i;
+          re[i] = at < src.size() ? static_cast<float>(src[at] * scale) : 0.0f;
+        }
+        Fft(re, im, false);
+      }
+      std::fill(tail[ch], tail[ch] + kBlockFrames, 0.0f);
+    }
+    ready = true;
+  }
+};
 
 // ------------------------------------------------------- compressor curve
 
@@ -303,7 +460,19 @@ struct Node {
   // 6 ms lookahead the detector runs ahead of the audio it attenuates.
   CompressorCurve curve;
   double envelopeGain = 1;
+  // Convolver: built on the JS thread and swapped in by command, so the
+  // render thread never does the (large) partition-spectra allocation.
+  std::shared_ptr<ConvolverState> conv;
+  // Oscillator: waveform + running phase in [0, 1).
+  OscType oscType = OscType::Sine;
+  double phase = 0;
   std::vector<uint32_t> inputs;  // node ids feeding this node
+  /**
+   * Nodes feeding a PARAM rather than the audio input, per slot — Web
+   * Audio's audio-rate modulation (an LFO driving a gain). The connected
+   * signal is downmixed to mono and ADDED to the timeline's value.
+   */
+  std::vector<uint32_t> paramInputs[5];
   // Per-block scratch (stereo interleaved) — render thread only.
   float block[kBlockFrames * 2] = {};
   /**
@@ -450,6 +619,8 @@ struct Command {
     CreateNode,
     ConfigureNode,
     Connect,
+    ConnectParam,
+    DisconnectParam,
     Disconnect,
     DisconnectAll,
     DisposeNode,
@@ -465,8 +636,9 @@ struct Command {
   double x = 0;         // stopVoice atTime (<0 = immediate)
   std::string str;      // param name / biquad type
   ParamEvent event{};
-  std::shared_ptr<SharedBuffer> buffer;  // Play
-  Voice voice{};                         // Play template
+  std::shared_ptr<SharedBuffer> buffer;    // Play
+  std::shared_ptr<ConvolverState> convState;  // ConfigureNode (convolver IR)
+  Voice voice{};                           // Play template
 };
 
 /*
@@ -507,10 +679,41 @@ class Engine {
     Push(std::move(c));
   }
 
+  /**
+   * Point a convolver at a registered buffer. The partition spectra are
+   * built HERE, on the JS thread — the render thread only swaps in the
+   * finished state. False = no such buffer.
+   */
+  bool SetConvolverBuffer(uint32_t id, const std::string& bufferId, double sampleRate) {
+    std::shared_ptr<SharedBuffer> buffer;
+    {
+      std::lock_guard<std::mutex> lock(buffersMutex_);
+      auto it = buffers_.find(bufferId);
+      if (it == buffers_.end()) return false;
+      buffer = it->second;
+    }
+    auto state = std::make_shared<ConvolverState>();
+    state->BuildFrom(buffer->channels, sampleRate > 0 ? sampleRate : buffer->sampleRate);
+    Command c{Command::Op::ConfigureNode};
+    c.a = id;
+    c.convState = std::move(state);
+    Push(std::move(c));
+    return true;
+  }
+
   void Connect(uint32_t from, uint32_t to) {
     Command c{Command::Op::Connect};
     c.a = from;
     c.b = to;
+    Push(std::move(c));
+  }
+
+  /** Audio-rate modulation: `from`'s signal adds to `to`'s named param. */
+  void ConnectParam(uint32_t from, uint32_t to, const std::string& param, bool disconnect) {
+    Command c{disconnect ? Command::Op::DisconnectParam : Command::Op::ConnectParam};
+    c.a = from;
+    c.b = to;
+    c.str = param;
     Push(std::move(c));
   }
 
@@ -735,30 +938,64 @@ class Engine {
     for (Command& c : batch) Execute(c);
   }
 
-  /** (kind, name) → the node's timeline slot; null = unknown, ignored. */
-  static ParamTimeline* ParamSlot(Node& node, const std::string& name) {
+  /** (kind, name) → timeline slot index 0..4; -1 = unknown, ignored. */
+  static int ParamSlotIndex(const Node& node, const std::string& name) {
     switch (node.kind) {
       case NodeKind::Gain:
-        return name == "gain" ? &node.p0 : nullptr;
+        return name == "gain" ? 0 : -1;
       case NodeKind::Panner:
-        return name == "pan" ? &node.p0 : nullptr;
+        return name == "pan" ? 0 : -1;
       case NodeKind::Biquad:
-        if (name == "frequency") return &node.p0;
-        if (name == "Q") return &node.p1;
-        if (name == "gain") return &node.p2;
-        if (name == "detune") return &node.p3;
-        return nullptr;
+        if (name == "frequency") return 0;
+        if (name == "Q") return 1;
+        if (name == "gain") return 2;
+        if (name == "detune") return 3;
+        return -1;
       case NodeKind::Delay:
-        return name == "delayTime" ? &node.p0 : nullptr;
+        return name == "delayTime" ? 0 : -1;
       case NodeKind::Compressor:
-        if (name == "threshold") return &node.p0;
-        if (name == "knee") return &node.p1;
-        if (name == "ratio") return &node.p2;
-        if (name == "attack") return &node.p3;
-        if (name == "release") return &node.p4;
-        return nullptr;
+        if (name == "threshold") return 0;
+        if (name == "knee") return 1;
+        if (name == "ratio") return 2;
+        if (name == "attack") return 3;
+        if (name == "release") return 4;
+        return -1;
+      case NodeKind::Oscillator:
+        if (name == "frequency") return 0;
+        if (name == "detune") return 1;
+        return -1;
+      case NodeKind::Convolver:
+        return -1;
     }
-    return nullptr;
+    return -1;
+  }
+
+  static ParamTimeline* SlotTimeline(Node& node, int slot) {
+    switch (slot) {
+      case 0: return &node.p0;
+      case 1: return &node.p1;
+      case 2: return &node.p2;
+      case 3: return &node.p3;
+      case 4: return &node.p4;
+      default: return nullptr;
+    }
+  }
+
+  static ParamTimeline* ParamSlot(Node& node, const std::string& name) {
+    return SlotTimeline(node, ParamSlotIndex(node, name));
+  }
+
+  /** Summed modulation from param-connected sources at sample `i`. */
+  double ParamMod(const Node& node, int slot, uint32_t i) {
+    if (slot < 0 || node.paramInputs[slot].empty()) return 0;
+    double sum = 0;
+    for (uint32_t sourceId : node.paramInputs[slot]) {
+      auto it = nodes_.find(sourceId);
+      if (it == nodes_.end()) continue;
+      // Web Audio downmixes a param connection's signal to mono.
+      sum += 0.5 * (it->second->block[i * 2] + it->second->block[i * 2 + 1]);
+    }
+    return sum;
   }
 
   void Execute(Command& c) {
@@ -774,6 +1011,10 @@ class Engine {
         } else if (c.nodeKind == NodeKind::Delay) {
           node->p0 = ParamTimeline(0.0);  // delayTime seconds
           node->maxDelaySec = c.x > 0 ? c.x : 1;
+        } else if (c.nodeKind == NodeKind::Oscillator) {
+          node->p0 = ParamTimeline(440.0);  // frequency Hz
+          node->p1 = ParamTimeline(0.0);    // detune cents
+          node->oscType = c.str.empty() ? OscType::Sine : ParseOscType(c.str);
         } else if (c.nodeKind == NodeKind::Compressor) {
           // Web Audio's DynamicsCompressorNode defaults.
           node->p0 = ParamTimeline(-24.0);  // threshold dB
@@ -793,8 +1034,13 @@ class Engine {
       }
       case Command::Op::ConfigureNode: {
         Node* node = Get(c.a);
-        if (node && node->kind == NodeKind::Biquad) {
+        if (!node) break;
+        if (node->kind == NodeKind::Biquad && !c.str.empty()) {
           node->biquadType = ParseBiquadType(c.str);
+        } else if (node->kind == NodeKind::Oscillator && !c.str.empty()) {
+          node->oscType = ParseOscType(c.str);
+        } else if (node->kind == NodeKind::Convolver && c.convState) {
+          node->conv = std::move(c.convState);  // swap, never build, here
         }
         break;
       }
@@ -803,6 +1049,24 @@ class Engine {
         if (!to || !Get(c.a)) break;
         auto& inputs = to->inputs;
         if (std::find(inputs.begin(), inputs.end(), c.a) == inputs.end()) inputs.push_back(c.a);
+        break;
+      }
+      case Command::Op::ConnectParam: {
+        Node* to = Get(c.b);
+        if (!to || !Get(c.a)) break;
+        const int slot = ParamSlotIndex(*to, c.str);
+        if (slot < 0) break;
+        auto& list = to->paramInputs[slot];
+        if (std::find(list.begin(), list.end(), c.a) == list.end()) list.push_back(c.a);
+        break;
+      }
+      case Command::Op::DisconnectParam: {
+        Node* to = Get(c.b);
+        if (!to) break;
+        const int slot = ParamSlotIndex(*to, c.str);
+        if (slot < 0) break;
+        auto& list = to->paramInputs[slot];
+        list.erase(std::remove(list.begin(), list.end(), c.a), list.end());
         break;
       }
       case Command::Op::Disconnect: {
@@ -822,6 +1086,9 @@ class Engine {
         for (auto& [id, node] : nodes_) {
           auto& inputs = node->inputs;
           inputs.erase(std::remove(inputs.begin(), inputs.end(), c.a), inputs.end());
+          for (auto& list : node->paramInputs) {
+            list.erase(std::remove(list.begin(), list.end(), c.a), list.end());
+          }
         }
         nodes_.erase(c.a);
         break;
@@ -939,6 +1206,28 @@ class Engine {
     Node* node = Get(id);
     if (!node || node->rendered) return;
     node->rendered = true;  // set BEFORE recursion: cycles read silence
+    // Param modulators must be rendered before the params are read.
+    for (const auto& list : node->paramInputs) {
+      for (uint32_t sourceId : list) RenderNode(sourceId, blockTime, frames, sampleRate);
+    }
+    if (node->kind == NodeKind::Oscillator) {
+      // A source: no inputs, writes its waveform to both channels (so a
+      // param connection's mono downmix sees exactly this signal).
+      const double frameDur = 1.0 / sampleRate;
+      for (uint32_t i = 0; i < frames; i++) {
+        const double t = blockTime + i * frameDur;
+        double freq = node->p0.ValueAt(t) + ParamMod(*node, 0, i);
+        const double detune = node->p1.ValueAt(t);
+        if (detune != 0) freq *= std::pow(2.0, detune / 1200.0);
+        const float v = static_cast<float>(OscillatorSample(node->oscType, node->phase));
+        node->block[i * 2] = v;
+        node->block[i * 2 + 1] = v;
+        node->phase += freq / sampleRate;
+        if (node->phase >= 1.0) node->phase -= std::floor(node->phase);
+        if (node->phase < 0) node->phase -= std::floor(node->phase);
+      }
+      return;
+    }
     if (node->kind == NodeKind::Delay) {
       // The read side is a SOURCE: it depends only on PAST blocks, which
       // is what breaks feedback cycles at one-block granularity — Web
@@ -952,7 +1241,8 @@ class Engine {
       const double minDelay = static_cast<double>(frames);
       const double maxDelay = static_cast<double>(size - frames - 1);
       for (uint32_t i = 0; i < frames; i++) {
-        double delayFrames = node->p0.ValueAt(blockTime + i * frameDur) * sampleRate;
+        double delayFrames =
+            (node->p0.ValueAt(blockTime + i * frameDur) + ParamMod(*node, 0, i)) * sampleRate;
         if (delayFrames < minDelay) delayFrames = minDelay;
         if (delayFrames > maxDelay) delayFrames = maxDelay;
         double pos = static_cast<double>(node->ringWrite) + i - delayFrames;
@@ -975,7 +1265,53 @@ class Engine {
       for (uint32_t i = 0; i < frames * 2; i++) node->block[i] += input->block[i];
     }
     const double frameDur = 1.0 / sampleRate;
-    if (node->kind == NodeKind::Compressor) {
+    if (node->kind == NodeKind::Convolver) {
+      // Overlap-save: this block's input joins the previous block's as the
+      // FFT's two halves; the circular-convolution result's SECOND half is
+      // the true linear convolution (the first is the aliased part).
+      ConvolverState* conv = node->conv.get();
+      if (!conv || !conv->ready || conv->partitions == 0) {
+        std::fill(node->block, node->block + frames * 2, 0.0f);
+        return;
+      }
+      std::vector<float> re(kConvFft), im(kConvFft, 0.0f);
+      std::vector<float> accRe(kConvFft), accIm(kConvFft);
+      for (size_t ch = 0; ch < 2; ch++) {
+        for (size_t i = 0; i < kBlockFrames; i++) {
+          re[i] = conv->tail[ch][i];
+          re[kBlockFrames + i] =
+              i < frames ? node->block[i * 2 + ch] : 0.0f;
+          im[i] = 0.0f;
+          im[kBlockFrames + i] = 0.0f;
+        }
+        // Keep this block's input as the next block's leading half.
+        for (size_t i = 0; i < kBlockFrames; i++) {
+          conv->tail[ch][i] = i < frames ? node->block[i * 2 + ch] : 0.0f;
+        }
+        Fft(re, im, false);
+        conv->fdlRe[ch][conv->head] = re;
+        conv->fdlIm[ch][conv->head] = im;
+
+        std::fill(accRe.begin(), accRe.end(), 0.0f);
+        std::fill(accIm.begin(), accIm.end(), 0.0f);
+        for (size_t p = 0; p < conv->partitions; p++) {
+          const size_t slot = (conv->head + conv->partitions - p) % conv->partitions;
+          const auto& xr = conv->fdlRe[ch][slot];
+          const auto& xi = conv->fdlIm[ch][slot];
+          const auto& hr = conv->irRe[ch][p];
+          const auto& hi = conv->irIm[ch][p];
+          for (size_t b = 0; b < kConvFft; b++) {
+            accRe[b] += xr[b] * hr[b] - xi[b] * hi[b];
+            accIm[b] += xr[b] * hi[b] + xi[b] * hr[b];
+          }
+        }
+        Fft(accRe, accIm, true);
+        for (uint32_t i = 0; i < frames; i++) {
+          node->block[i * 2 + ch] = accRe[kBlockFrames + i];
+        }
+      }
+      conv->head = (conv->head + 1) % conv->partitions;
+    } else if (node->kind == NodeKind::Compressor) {
       // Chromium's static curve exactly (see CompressorCurve), driven by a
       // peak detector reading 6 ms AHEAD of the audio it attenuates — the
       // lookahead ring — with one-pole attack/release smoothing on the
@@ -1024,14 +1360,15 @@ class Engine {
       }
     } else if (node->kind == NodeKind::Gain) {
       for (uint32_t i = 0; i < frames; i++) {
-        const float g = static_cast<float>(node->p0.ValueAt(blockTime + i * frameDur));
+        const float g = static_cast<float>(node->p0.ValueAt(blockTime + i * frameDur) +
+                                           ParamMod(*node, 0, i));
         node->block[i * 2] *= g;
         node->block[i * 2 + 1] *= g;
       }
     } else if (node->kind == NodeKind::Panner) {
       // The spec's equal-power stereo pan.
       for (uint32_t i = 0; i < frames; i++) {
-        double p = node->p0.ValueAt(blockTime + i * frameDur);
+        double p = node->p0.ValueAt(blockTime + i * frameDur) + ParamMod(*node, 0, i);
         p = p < -1 ? -1 : (p > 1 ? 1 : p);
         const double x = p <= 0 ? p + 1 : p;
         const float gl = static_cast<float>(std::cos(x * kPi / 2));

@@ -2,6 +2,7 @@ import type { EffectType } from '@core/model/effects'
 import { EFFECT_TYPES, LFO_WAVE_TYPES, PARAEQ_BANDS, PARAEQ_FILTER_TYPES } from '@core/model/effects'
 import { builtinEffectDescriptor } from '@core/plugins/builtin'
 import type { BackendNodeId, IAudioBackend } from './backend'
+import { impulseBufferId, makeImpulse } from './impulse'
 import type { PluginAnalysis, PluginNodes, PluginProvider } from './pluginRegistry'
 
 /**
@@ -298,49 +299,47 @@ const BUILDERS: Record<EffectType, Builder> = {
   },
 
   reverb(backend) {
-    const wa = backend.webAudio
-    if (!wa) return null
-    const ctx = wa.ctx
-    const inGain = ctx.createGain()
-    const mixed = ctx.createGain()
-    const dry = ctx.createGain()
-    const wet = ctx.createGain()
-    const convolver = ctx.createConvolver()
-    const outGain = ctx.createGain()
-    const analyser = ctx.createAnalyser()
-    analyser.fftSize = 2048
-    analyser.smoothingTimeConstant = 0.8
+    const input = backend.createNode('gain')
+    const mixed = backend.createNode('gain')
+    const dry = backend.createNode('gain')
+    const wet = backend.createNode('gain')
+    const convolver = backend.createNode('convolver')
     let impulseDecay = -1
-    inGain.connect(dry)
-    dry.connect(mixed)
-    inGain.connect(convolver)
-    convolver.connect(wet)
-    wet.connect(mixed)
-    mixed.connect(outGain)
-    mixed.connect(analyser)
-    const input = wa.adoptNode(inGain)
-    const output = wa.adoptNode(outGain)
+    backend.connect(input, dry)
+    backend.connect(dry, mixed)
+    backend.connect(input, convolver)
+    backend.connect(convolver, wet)
+    backend.connect(wet, mixed)
+    const { out, analysis, disposeTap } = tapOut(backend, mixed)
+    // Impulse buffers are shared by decay across every reverb instance —
+    // the tail is deterministic (seeded), so two reverbs at the same decay
+    // are the same data.
+    const registered: string[] = []
     return {
       input,
-      output,
-      analysis: { spectrum: analyser },
+      output: out,
+      analysis,
       apply(p, when) {
         const decay = p.decay ?? 1.8
         // Regenerate the impulse only when decay actually changes.
         if (Math.abs(decay - impulseDecay) > 0.05) {
           impulseDecay = decay
-          convolver.buffer = makeImpulse(ctx, decay)
+          const sampleRate = backend.start().sampleRate
+          const bufferId = impulseBufferId(decay, sampleRate)
+          if (!backend.hasBuffer(bufferId)) {
+            backend.registerBuffer(bufferId, makeImpulse(sampleRate, decay), sampleRate)
+            registered.push(bufferId)
+          }
+          backend.configureNode(convolver, { buffer: bufferId })
         }
         const mix = p.mix ?? 0.25
-        wet.gain.setTargetAtTime(mix, when, SMOOTH)
-        dry.gain.setTargetAtTime(1 - mix * 0.5, when, SMOOTH)
+        smooth(backend, wet, 'gain', mix, when)
+        smooth(backend, dry, 'gain', 1 - mix * 0.5, when)
       },
       dispose() {
-        for (const node of [inGain, mixed, outGain, analyser, dry, wet, convolver]) {
-          node.disconnect()
-        }
-        backend.disposeNode(input)
-        backend.disposeNode(output)
+        for (const id of [input, mixed, dry, wet, convolver, out]) backend.disposeNode(id)
+        for (const bufferId of registered) backend.releaseBuffer(bufferId)
+        disposeTap()
       }
     }
   },
@@ -351,51 +350,43 @@ const BUILDERS: Record<EffectType, Builder> = {
   notch: basicFilter('notch', 1000),
 
   lfo(backend) {
-    const wa = backend.webAudio
-    if (!wa) return null
-    const ctx = wa.ctx
     // Amplitude LFO (tremolo): an oscillator drives the carrier gain's
-    // AudioParam. Base gain sits at 1 - depth/2 and the oscillator swings
-    // ±depth/2 around it, so the level sweeps [1-depth, 1] and never goes
-    // negative (a phase flip would sound like ring modulation).
-    const carrier = ctx.createGain()
-    const depthGain = ctx.createGain()
-    depthGain.gain.value = 0
-    const osc = ctx.createOscillator()
-    osc.type = 'sine'
-    osc.frequency.value = 4
-    const outGain = ctx.createGain()
-    const analyser = ctx.createAnalyser()
-    analyser.fftSize = 2048
-    analyser.smoothingTimeConstant = 0.8
-    osc.connect(depthGain)
-    depthGain.connect(carrier.gain)
-    osc.start()
-    carrier.connect(outGain)
-    carrier.connect(analyser)
-    const input = wa.adoptNode(carrier)
-    const output = wa.adoptNode(outGain)
+    // param through the seam's modulation edge. Base gain sits at
+    // 1 - depth/2 and the oscillator swings ±depth/2 around it, so the
+    // level sweeps [1-depth, 1] and never goes negative (a phase flip
+    // would sound like ring modulation).
+    const carrier = backend.createNode('gain')
+    const depthGain = backend.createNode('gain')
+    setNow(backend, depthGain, 'gain', 0)
+    const osc = backend.createNode('oscillator', { type: 'sine' })
+    setNow(backend, osc, 'frequency', 4)
+    let currentWave = 'sine'
+    backend.connect(osc, depthGain)
+    backend.connectParam(depthGain, carrier, 'gain')
+    const { out, analysis, disposeTap } = tapOut(backend, carrier)
     return {
-      input,
-      output,
-      analysis: { spectrum: analyser },
+      input: carrier,
+      output: out,
+      analysis,
       apply(p, when) {
-        osc.frequency.setTargetAtTime(p.rate ?? 4, when, SMOOTH)
+        smooth(backend, osc, 'frequency', p.rate ?? 4, when)
         const waveIndex = Math.max(
           0,
           Math.min(LFO_WAVE_TYPES.length - 1, Math.round(p.wave ?? 0))
         )
         const wave = LFO_WAVE_TYPES[waveIndex]
-        if (osc.type !== wave) osc.type = wave // not an AudioParam; instant
+        if (currentWave !== wave) {
+          currentWave = wave
+          backend.configureNode(osc, { type: wave }) // not a param; instant
+        }
         const depth = Math.max(0, Math.min(1, p.depth ?? 0.5))
-        carrier.gain.setTargetAtTime(1 - depth / 2, when, SMOOTH)
-        depthGain.gain.setTargetAtTime(depth / 2, when, SMOOTH)
+        smooth(backend, carrier, 'gain', 1 - depth / 2, when)
+        smooth(backend, depthGain, 'gain', depth / 2, when)
       },
       dispose() {
-        osc.stop()
-        for (const node of [osc, depthGain, carrier, outGain, analyser]) node.disconnect()
-        backend.disposeNode(input)
-        backend.disposeNode(output)
+        backend.disconnectParam(depthGain, carrier, 'gain')
+        for (const id of [osc, depthGain, carrier, out]) backend.disposeNode(id)
+        disposeTap()
       }
     }
   }
@@ -408,23 +399,3 @@ export function builtinEffectProviders(): PluginProvider[] {
   }))
 }
 
-/** Stereo exponentially-decaying noise impulse. */
-function makeImpulse(ctx: BaseAudioContext, decaySeconds: number): AudioBuffer {
-  const length = Math.max(1, Math.round(ctx.sampleRate * decaySeconds))
-  const buffer = ctx.createBuffer(2, length, ctx.sampleRate)
-  // Seeded per (rate, decay, channel), NOT Math.random(): reverb must
-  // render identically on every run and machine — bounces and freezes are
-  // shared artifacts, and parity/native verification diffs renders exactly.
-  for (let ch = 0; ch < 2; ch++) {
-    const data = buffer.getChannelData(ch)
-    let seed = (0x2545f491 ^ Math.round(ctx.sampleRate * decaySeconds)) + ch * 0x9e3779b9
-    for (let i = 0; i < length; i++) {
-      seed = (seed + 0x6d2b79f5) | 0
-      let t = Math.imul(seed ^ (seed >>> 15), 1 | seed)
-      t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t
-      const noise = (((t ^ (t >>> 14)) >>> 0) / 4294967296) * 2 - 1
-      data[i] = noise * Math.pow(1 - i / length, 2.5)
-    }
-  }
-  return buffer
-}

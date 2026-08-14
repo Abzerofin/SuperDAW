@@ -407,12 +407,18 @@ Napi::Value CreateNode(const Napi::CallbackInfo& info) {
       : kind == "biquad"     ? sdengine::NodeKind::Biquad
       : kind == "delay"      ? sdengine::NodeKind::Delay
       : kind == "compressor" ? sdengine::NodeKind::Compressor
+      : kind == "convolver"  ? sdengine::NodeKind::Convolver
+      : kind == "oscillator" ? sdengine::NodeKind::Oscillator
                              : sdengine::NodeKind::Gain;
   EngineOf(env).CreateNode(id, nodeKind, biquadType, maxDelay);
   return env.Undefined();
 }
 
-/** configureNode(id, opts) — instant attribute changes (biquad type). */
+/**
+ * configureNode(id, opts) — instant attribute changes: a biquad's `type`,
+ * or a convolver's `buffer` (a registered buffer id; its partition
+ * spectra are built on THIS thread, never the audio thread).
+ */
 Napi::Value ConfigureNode(const Napi::CallbackInfo& info) {
   Napi::Env env = info.Env();
   const uint32_t id = info[0].As<Napi::Number>().Uint32Value();
@@ -420,6 +426,12 @@ Napi::Value ConfigureNode(const Napi::CallbackInfo& info) {
     auto opts = info[1].As<Napi::Object>();
     if (opts.Has("type") && opts.Get("type").IsString()) {
       EngineOf(env).ConfigureNode(id, opts.Get("type").As<Napi::String>());
+    }
+    if (opts.Has("buffer") && opts.Get("buffer").IsString()) {
+      const double rate = g_host != nullptr && g_host->sampleRate > 0
+                              ? static_cast<double>(g_host->sampleRate)
+                              : 0.0;
+      EngineOf(env).SetConvolverBuffer(id, opts.Get("buffer").As<Napi::String>(), rate);
     }
   }
   return env.Undefined();
@@ -429,6 +441,23 @@ Napi::Value ConnectNodes(const Napi::CallbackInfo& info) {
   Napi::Env env = info.Env();
   EngineOf(env).Connect(info[0].As<Napi::Number>().Uint32Value(),
                         info[1].As<Napi::Number>().Uint32Value());
+  return env.Undefined();
+}
+
+/** connectParam(from, to, paramName) — audio-rate modulation. */
+Napi::Value ConnectParam(const Napi::CallbackInfo& info) {
+  Napi::Env env = info.Env();
+  EngineOf(env).ConnectParam(info[0].As<Napi::Number>().Uint32Value(),
+                             info[1].As<Napi::Number>().Uint32Value(),
+                             info[2].As<Napi::String>(), false);
+  return env.Undefined();
+}
+
+Napi::Value DisconnectParam(const Napi::CallbackInfo& info) {
+  Napi::Env env = info.Env();
+  EngineOf(env).ConnectParam(info[0].As<Napi::Number>().Uint32Value(),
+                             info[1].As<Napi::Number>().Uint32Value(),
+                             info[2].As<Napi::String>(), true);
   return env.Undefined();
 }
 
@@ -575,6 +604,8 @@ static Napi::Object InitModule(Napi::Env env, Napi::Object exports) {
   exports.Set("createNode", Napi::Function::New(env, CreateNode));
   exports.Set("configureNode", Napi::Function::New(env, ConfigureNode));
   exports.Set("connect", Napi::Function::New(env, ConnectNodes));
+  exports.Set("connectParam", Napi::Function::New(env, ConnectParam));
+  exports.Set("disconnectParam", Napi::Function::New(env, DisconnectParam));
   exports.Set("disconnect", Napi::Function::New(env, DisconnectNodes));
   exports.Set("disposeNode", Napi::Function::New(env, DisposeNode));
   exports.Set("scheduleParam", Napi::Function::New(env, ScheduleParam));

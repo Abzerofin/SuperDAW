@@ -77,6 +77,13 @@ export interface IAudioBackend {
   /** Instant non-param attributes (a biquad's type) — Web Audio semantics. */
   configureNode(id: BackendNodeId, opts: NodeOptions): void
   connect(from: BackendNodeId, to: BackendNodeId): void
+  /**
+   * Audio-rate modulation: `from`'s signal is downmixed to mono and ADDED
+   * to `to`'s named param (an LFO driving a gain). Web Audio's
+   * node→AudioParam connection.
+   */
+  connectParam(from: BackendNodeId, to: BackendNodeId, param: ParamName): void
+  disconnectParam(from: BackendNodeId, to: BackendNodeId, param: ParamName): void
   /** No `to`: sever EVERY outgoing connection (Web Audio disconnect()). */
   disconnect(from: BackendNodeId, to?: BackendNodeId): void
   disposeNode(id: BackendNodeId): void
@@ -283,10 +290,17 @@ export class WebAudioBackend implements IAudioBackend {
             ? ctx.createDelay(typeof opts?.maxDelay === 'number' ? opts.maxDelay : 1)
             : kind === 'compressor'
               ? ctx.createDynamicsCompressor()
-              : ctx.createBiquadFilter()
+              : kind === 'convolver'
+                ? ctx.createConvolver()
+                : kind === 'oscillator'
+                  ? ctx.createOscillator()
+                  : ctx.createBiquadFilter()
     const id = this.nextId++
     this.nodes.set(id, node)
     if (opts) this.configureNode(id, opts)
+    // Oscillator primitives run from creation — the native engine's
+    // equivalent has no separate start, so neither does the seam.
+    if (node instanceof OscillatorNode) node.start()
     return id
   }
 
@@ -294,6 +308,13 @@ export class WebAudioBackend implements IAudioBackend {
     const node = this.node(id)
     if (node instanceof BiquadFilterNode && typeof opts.type === 'string') {
       node.type = opts.type as BiquadFilterType
+    } else if (node instanceof OscillatorNode && typeof opts.type === 'string') {
+      node.type = opts.type as OscillatorType
+    } else if (node instanceof ConvolverNode && typeof opts.buffer === 'string') {
+      // `normalize` stays at its default (true): the native backend
+      // reproduces exactly that scaling, so both agree.
+      const buffer = this.buffers.get(opts.buffer)
+      if (buffer) node.buffer = buffer
     }
   }
 
@@ -305,6 +326,39 @@ export class WebAudioBackend implements IAudioBackend {
 
   connect(from: BackendNodeId, to: BackendNodeId): void {
     this.node(from).connect(this.node(to))
+  }
+
+  /** The AudioParam a (node, name) pair addresses, for modulation edges. */
+  private paramOf(id: BackendNodeId, param: ParamName): AudioParam | undefined {
+    const node = this.node(id)
+    if (node instanceof GainNode) return param === 'gain' ? node.gain : undefined
+    if (node instanceof StereoPannerNode) return param === 'pan' ? node.pan : undefined
+    if (node instanceof DelayNode) return param === 'delayTime' ? node.delayTime : undefined
+    if (node instanceof OscillatorNode) {
+      return param === 'frequency' ? node.frequency : param === 'detune' ? node.detune : undefined
+    }
+    if (node instanceof BiquadFilterNode) {
+      if (param === 'frequency') return node.frequency
+      if (param === 'Q') return node.Q
+      if (param === 'gain') return node.gain
+      if (param === 'detune') return node.detune
+    }
+    return undefined
+  }
+
+  connectParam(from: BackendNodeId, to: BackendNodeId, param: ParamName): void {
+    const target = this.paramOf(to, param)
+    if (target) this.node(from).connect(target)
+  }
+
+  disconnectParam(from: BackendNodeId, to: BackendNodeId, param: ParamName): void {
+    const target = this.paramOf(to, param)
+    if (!target) return
+    try {
+      this.node(from).disconnect(target)
+    } catch {
+      // already disconnected — fine
+    }
   }
 
   disconnect(from: BackendNodeId, to?: BackendNodeId): void {
@@ -348,6 +402,9 @@ export class WebAudioBackend implements IAudioBackend {
       else if (param === 'detune') target = node.detune
     } else if (node instanceof DelayNode) {
       if (param === 'delayTime') target = node.delayTime
+    } else if (node instanceof OscillatorNode) {
+      if (param === 'frequency') target = node.frequency
+      else if (param === 'detune') target = node.detune
     } else if (node instanceof DynamicsCompressorNode) {
       if (param === 'threshold') target = node.threshold
       else if (param === 'knee') target = node.knee

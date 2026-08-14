@@ -65,6 +65,8 @@ class MockBackend implements IAudioBackend {
     return id
   }
   configureNode(): void {}
+  connectParam(): void {}
+  disconnectParam(): void {}
   connect(from: BackendNodeId, to: BackendNodeId): void {
     this.ops.push({ op: 'connect', from, to })
   }

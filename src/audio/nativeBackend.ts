@@ -131,6 +131,14 @@ export class NativeAudioBackend {
     this.send({ t: 'connect', from, to })
   }
 
+  connectParam(from: BackendNodeId, to: BackendNodeId, param: ParamName): void {
+    this.send({ t: 'connectParam', from, to, param })
+  }
+
+  disconnectParam(from: BackendNodeId, to: BackendNodeId, param: ParamName): void {
+    this.send({ t: 'disconnectParam', from, to, param })
+  }
+
   disconnect(from: BackendNodeId, to?: BackendNodeId): void {
     this.send({ t: 'disconnect', from, to })
   }
