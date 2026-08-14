@@ -25,7 +25,9 @@ import type {
   BackendLatencies,
   BackendNodeId,
   NodeKind,
+  NodeOptions,
   ParamEvent,
+  ParamName,
   PlaySpec,
   StreamInfo,
   TapId,
@@ -115,10 +117,14 @@ export class NativeAudioBackend {
     return deviceId === null
   }
 
-  createNode(kind: NodeKind): BackendNodeId {
+  createNode(kind: NodeKind, opts?: NodeOptions): BackendNodeId {
     const id = this.nextId++
-    this.send({ t: 'createNode', id, kind })
+    this.send({ t: 'createNode', id, kind, opts })
     return id
+  }
+
+  configureNode(id: BackendNodeId, opts: NodeOptions): void {
+    this.send({ t: 'configureNode', id, opts })
   }
 
   connect(from: BackendNodeId, to: BackendNodeId): void {
@@ -137,7 +143,7 @@ export class NativeAudioBackend {
     return 0
   }
 
-  scheduleParam(node: BackendNodeId, param: 'gain' | 'pan', events: readonly ParamEvent[]): void {
+  scheduleParam(node: BackendNodeId, param: ParamName, events: readonly ParamEvent[]): void {
     this.send({ t: 'scheduleParam', node, param, events: [...events] })
   }
 

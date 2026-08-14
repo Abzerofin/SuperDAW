@@ -28,7 +28,8 @@ export interface AudiohostAddon {
   now(): number
   latencySec(): number
   stats(): { xruns: number }
-  createNode(id: number, kind: string): void
+  createNode(id: number, kind: string, opts?: Record<string, number | string>): void
+  configureNode(id: number, opts: Record<string, number | string>): void
   connect(from: number, to: number): void
   disconnect(from: number, to?: number): void
   disposeNode(id: number): void
@@ -110,7 +111,10 @@ export function createAudioHostSession(
         addon.stop()
         break
       case 'createNode':
-        addon.createNode(c.id, c.kind)
+        addon.createNode(c.id, c.kind, c.opts)
+        break
+      case 'configureNode':
+        addon.configureNode(c.id, c.opts)
         break
       case 'connect':
         addon.connect(c.from, c.to)

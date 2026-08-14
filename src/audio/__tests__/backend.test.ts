@@ -64,6 +64,7 @@ class MockBackend implements IAudioBackend {
     this.ops.push({ op: 'createNode', kind, id })
     return id
   }
+  configureNode(): void {}
   connect(from: BackendNodeId, to: BackendNodeId): void {
     this.ops.push({ op: 'connect', from, to })
   }

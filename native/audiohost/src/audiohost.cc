@@ -385,13 +385,37 @@ sdengine::ParamEvent UnpackEvent(const Napi::Object& raw) {
   return event;
 }
 
-/** createNode(id, 'gain' | 'stereoPanner') — ids are caller-minted (≥ 1). */
+/** createNode(id, kind, opts?) — ids are caller-minted (≥ 1); opts.type
+ *  configures a biquad's filter type. */
 Napi::Value CreateNode(const Napi::CallbackInfo& info) {
   Napi::Env env = info.Env();
   const uint32_t id = info[0].As<Napi::Number>().Uint32Value();
   const std::string kind = info[1].As<Napi::String>();
-  EngineOf(env).CreateNode(
-      id, kind == "stereoPanner" ? sdengine::NodeKind::Panner : sdengine::NodeKind::Gain);
+  std::string biquadType;
+  if (info.Length() > 2 && info[2].IsObject()) {
+    auto opts = info[2].As<Napi::Object>();
+    if (opts.Has("type") && opts.Get("type").IsString()) {
+      biquadType = opts.Get("type").As<Napi::String>();
+    }
+  }
+  const sdengine::NodeKind nodeKind = kind == "stereoPanner"
+                                          ? sdengine::NodeKind::Panner
+                                          : kind == "biquad" ? sdengine::NodeKind::Biquad
+                                                             : sdengine::NodeKind::Gain;
+  EngineOf(env).CreateNode(id, nodeKind, biquadType);
+  return env.Undefined();
+}
+
+/** configureNode(id, opts) — instant attribute changes (biquad type). */
+Napi::Value ConfigureNode(const Napi::CallbackInfo& info) {
+  Napi::Env env = info.Env();
+  const uint32_t id = info[0].As<Napi::Number>().Uint32Value();
+  if (info.Length() > 1 && info[1].IsObject()) {
+    auto opts = info[1].As<Napi::Object>();
+    if (opts.Has("type") && opts.Get("type").IsString()) {
+      EngineOf(env).ConfigureNode(id, opts.Get("type").As<Napi::String>());
+    }
+  }
   return env.Undefined();
 }
 
@@ -416,14 +440,14 @@ Napi::Value DisposeNode(const Napi::CallbackInfo& info) {
   return env.Undefined();
 }
 
-/** scheduleParam(nodeId, 'gain' | 'pan', events[]) */
+/** scheduleParam(nodeId, paramName, events[]) — names resolve per kind. */
 Napi::Value ScheduleParam(const Napi::CallbackInfo& info) {
   Napi::Env env = info.Env();
   const uint32_t node = info[0].As<Napi::Number>().Uint32Value();
-  const bool pan = std::string(info[1].As<Napi::String>()) == "pan";
+  const std::string param = info[1].As<Napi::String>();
   auto events = info[2].As<Napi::Array>();
   for (uint32_t i = 0; i < events.Length(); i++) {
-    EngineOf(env).ScheduleParam(node, pan, UnpackEvent(events.Get(i).As<Napi::Object>()));
+    EngineOf(env).ScheduleParam(node, param, UnpackEvent(events.Get(i).As<Napi::Object>()));
   }
   return env.Undefined();
 }
@@ -543,6 +567,7 @@ static Napi::Object InitModule(Napi::Env env, Napi::Object exports) {
   exports.Set("stats", Napi::Function::New(env, Stats));
   exports.Set("setTestTone", Napi::Function::New(env, SetTestTone));
   exports.Set("createNode", Napi::Function::New(env, CreateNode));
+  exports.Set("configureNode", Napi::Function::New(env, ConfigureNode));
   exports.Set("connect", Napi::Function::New(env, ConnectNodes));
   exports.Set("disconnect", Napi::Function::New(env, DisconnectNodes));
   exports.Set("disposeNode", Napi::Function::New(env, DisposeNode));

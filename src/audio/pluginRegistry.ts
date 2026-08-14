@@ -1,5 +1,6 @@
 import type { PluginDescriptor, PluginRuntimeStatus } from '@core/plugins/descriptor'
 import { matchDescriptor } from '@core/plugins/descriptor'
+import type { BackendNodeId, IAudioBackend } from './backend'
 import { builtinEffectProviders } from './effects'
 
 /**
@@ -31,10 +32,13 @@ export interface PluginAnalysis {
 }
 
 export interface PluginNodes {
-  readonly input: AudioNode
-  readonly output: AudioNode
-  /** Push param values into live AudioParams, smoothed (no zippering). */
+  /** Backend node ids — the seam's currency, so wiring is backend-blind. */
+  readonly input: BackendNodeId
+  readonly output: BackendNodeId
+  /** Push param values into the live nodes, smoothed (no zippering). */
   apply(params: Readonly<Record<string, number>>, when: number): void
+  /** Full teardown, backend registrations included — the builder owns
+   *  every node it made. */
   dispose(): void
   /** Optional live-visualization handle (see PluginAnalysis). */
   readonly analysis?: PluginAnalysis
@@ -42,7 +46,12 @@ export interface PluginNodes {
 
 export interface PluginProvider {
   readonly descriptor: PluginDescriptor
-  create(ctx: BaseAudioContext): PluginNodes
+  /**
+   * Build against a backend. Null = this provider cannot run there (an
+   * effect still needing Web Audio escapes, asked to run natively) — the
+   * engine bypasses it cleanly, exactly like a missing plugin.
+   */
+  create(backend: IAudioBackend): PluginNodes | null
 }
 
 export interface Resolution {

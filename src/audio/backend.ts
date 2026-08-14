@@ -38,7 +38,9 @@ import type {
   BackendLatencies,
   BackendNodeId,
   NodeKind,
+  NodeOptions,
   ParamEvent,
+  ParamName,
   PlaySpec,
   StreamInfo,
   TapId,
@@ -49,7 +51,9 @@ export type {
   BackendLatencies,
   BackendNodeId,
   NodeKind,
+  NodeOptions,
   ParamEvent,
+  ParamName,
   PlaySpec,
   StreamInfo,
   TapId,
@@ -69,15 +73,18 @@ export interface IAudioBackend {
   setOutputDevice(deviceId: string | null): Promise<boolean>
 
   // ---- graph ----
-  createNode(kind: NodeKind): BackendNodeId
+  createNode(kind: NodeKind, opts?: NodeOptions): BackendNodeId
+  /** Instant non-param attributes (a biquad's type) — Web Audio semantics. */
+  configureNode(id: BackendNodeId, opts: NodeOptions): void
   connect(from: BackendNodeId, to: BackendNodeId): void
   /** No `to`: sever EVERY outgoing connection (Web Audio disconnect()). */
   disconnect(from: BackendNodeId, to?: BackendNodeId): void
   disposeNode(id: BackendNodeId): void
   /** The node every track chain ultimately feeds (master gain). */
   masterNode(): BackendNodeId
-  /** Append param events in order — AudioParam semantics (see above). */
-  scheduleParam(node: BackendNodeId, param: 'gain' | 'pan', events: readonly ParamEvent[]): void
+  /** Append param events in order — AudioParam semantics (see above);
+   *  names resolve per node kind, unknown names are ignored. */
+  scheduleParam(node: BackendNodeId, param: ParamName, events: readonly ParamEvent[]): void
 
   // ---- buffers + voices ----
   registerBuffer(id: string, channels: readonly Float32Array[], sampleRate: number): void
@@ -265,12 +272,25 @@ export class WebAudioBackend implements IAudioBackend {
     }
   }
 
-  createNode(kind: NodeKind): BackendNodeId {
+  createNode(kind: NodeKind, opts?: NodeOptions): BackendNodeId {
     const ctx = this.ensureCtx()
-    const node = kind === 'gain' ? ctx.createGain() : ctx.createStereoPanner()
+    const node =
+      kind === 'gain'
+        ? ctx.createGain()
+        : kind === 'stereoPanner'
+          ? ctx.createStereoPanner()
+          : ctx.createBiquadFilter()
     const id = this.nextId++
     this.nodes.set(id, node)
+    if (opts) this.configureNode(id, opts)
     return id
+  }
+
+  configureNode(id: BackendNodeId, opts: NodeOptions): void {
+    const node = this.node(id)
+    if (node instanceof BiquadFilterNode && typeof opts.type === 'string') {
+      node.type = opts.type as BiquadFilterType
+    }
   }
 
   private node(id: BackendNodeId): AudioNode {
@@ -308,11 +328,22 @@ export class WebAudioBackend implements IAudioBackend {
     return this.masterId!
   }
 
-  scheduleParam(id: BackendNodeId, param: 'gain' | 'pan', events: readonly ParamEvent[]): void {
+  scheduleParam(id: BackendNodeId, param: ParamName, events: readonly ParamEvent[]): void {
     const node = this.node(id)
-    const target =
-      param === 'gain' ? (node as GainNode).gain : (node as StereoPannerNode).pan
-    applyParamEvents(target, events)
+    // Per-kind name resolution; unknown names are ignored (the reducer's
+    // drop-don't-throw hygiene, so both backends shrug identically).
+    let target: AudioParam | undefined
+    if (node instanceof GainNode) {
+      if (param === 'gain') target = node.gain
+    } else if (node instanceof StereoPannerNode) {
+      if (param === 'pan') target = node.pan
+    } else if (node instanceof BiquadFilterNode) {
+      if (param === 'frequency') target = node.frequency
+      else if (param === 'Q') target = node.Q
+      else if (param === 'gain') target = node.gain
+      else if (param === 'detune') target = node.detune
+    }
+    if (target) applyParamEvents(target, events)
   }
 
   registerBuffer(id: string, channels: readonly Float32Array[], sampleRate: number): void {

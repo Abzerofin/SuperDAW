@@ -1,4 +1,4 @@
-import type { Clip, ClipId, PluginInstance, PluginInstanceId, ProjectState, Route, Track, TrackId } from '@core/model/types'
+﻿import type { Clip, ClipId, PluginInstance, PluginInstanceId, ProjectState, Route, Track, TrackId } from '@core/model/types'
 import {
   automationValueAt,
   isNoteTrackKind,
@@ -181,13 +181,6 @@ interface TrackChain {
   parentId: TrackId | null
 }
 
-/** An insert's live Web Audio nodes plus their backend-adopted ports. */
-interface FxEntry {
-  readonly nodes: PluginNodes
-  readonly inputId: BackendNodeId
-  readonly outputId: BackendNodeId
-}
-
 /** Master-meter tap length (frequency resolution is irrelevant to a peak). */
 const MASTER_TAP_FRAMES = 2048
 /** Track-meter tap length — a 4× cheaper scan than the old 1024. */
@@ -205,7 +198,7 @@ export class AudioEngine {
   private masterTap: TapId | null = null
   private meterBuf: Float32Array | null = null
   private chains = new Map<TrackId, TrackChain>()
-  private fxNodes = new Map<PluginInstanceId, FxEntry>()
+  private fxNodes = new Map<PluginInstanceId, PluginNodes>()
   /**
    * Per-instance inlet/outlet gains for GRAPH-routed tracks. Routing edges
    * connect outlets to inlets; a bypassed/missing plugin just shorts its
@@ -421,7 +414,7 @@ export class AudioEngine {
     this.stopFxAutomation()
     this.stopPadScheduler()
     this.liveAllNotesOff()
-    for (const entry of this.fxNodes.values()) entry.nodes.dispose()
+    for (const entry of this.fxNodes.values()) entry.dispose()
     this.fxNodes.clear()
     this.graphPorts.clear()
     this.chains.clear()
@@ -864,7 +857,7 @@ export class AudioEngine {
     const instance = this.store.state.plugins[instanceId]
     const entry = this.fxNodes.get(instanceId)
     if (backend && instance && entry) {
-      entry.nodes.apply({ ...instance.params, ...partial }, backend.now())
+      entry.apply({ ...instance.params, ...partial }, backend.now())
     }
   }
 
@@ -1090,7 +1083,7 @@ export class AudioEngine {
    * cards' rAF loops, never through React state.
    */
   pluginAnalysis(instanceId: PluginInstanceId): PluginAnalysis | null {
-    return this.fxNodes.get(instanceId)?.nodes.analysis ?? null
+    return this.fxNodes.get(instanceId)?.analysis ?? null
   }
 
   /**
@@ -1106,7 +1099,7 @@ export class AudioEngine {
   private inputWaveTaps = new Map<BackendNodeId, AnalyserNode>()
 
   graphSourceAnalyser(trackId: TrackId, from: 'in' | PluginInstanceId): AnalyserNode | null {
-    if (from !== 'in') return this.fxNodes.get(from)?.nodes.analysis?.spectrum ?? null
+    if (from !== 'in') return this.fxNodes.get(from)?.analysis?.spectrum ?? null
     const escapes = this.backend?.webAudio
     if (!escapes) return null
     const chain = this.chains.get(trackId)
@@ -1446,7 +1439,7 @@ export class AudioEngine {
     const state = this.store.state
     for (const instanceId of this.automationIndex().byInstance.keys()) {
       const instance = state.plugins[instanceId]
-      if (instance) this.fxNodes.get(instance.id)?.nodes.apply(instance.params, backend.now())
+      if (instance) this.fxNodes.get(instance.id)?.apply(instance.params, backend.now())
     }
   }
 
@@ -1473,7 +1466,7 @@ export class AudioEngine {
         const def = defs?.[param]
         merged[param] = def ? denormalizeParam(def, v) : v
       }
-      entry.nodes.apply(merged, backend.now())
+      entry.apply(merged, backend.now())
     }
   }
 
@@ -1616,7 +1609,7 @@ export class AudioEngine {
         } else if (before.params !== instance.params && this.backend) {
           // Remote peer edits and committed ops land here; local drags
           // already previewed the same values through the same call.
-          this.fxNodes.get(id)?.nodes.apply(instance.params, now)
+          this.fxNodes.get(id)?.apply(instance.params, now)
         }
       }
       for (const [id, instance] of Object.entries(prev)) {
@@ -2357,9 +2350,7 @@ export class AudioEngine {
     const state = this.store.state
     for (const [instanceId, entry] of this.fxNodes) {
       if (!state.plugins[instanceId]) {
-        entry.nodes.dispose()
-        backend.disposeNode(entry.inputId)
-        backend.disposeNode(entry.outputId)
+        entry.dispose() // the builder owns all its nodes, adopted included
         this.fxNodes.delete(instanceId)
       }
     }
@@ -2394,7 +2385,7 @@ export class AudioEngine {
     }
     for (const instance of inserts) {
       const entry = this.fxNodes.get(instance.id)
-      if (entry) backend.disconnect(entry.outputId)
+      if (entry) backend.disconnect(entry.output)
       const ports = this.graphPorts.get(instance.id)
       if (ports) {
         backend.disconnect(ports.inlet)
@@ -2420,8 +2411,8 @@ export class AudioEngine {
       if (!instance.enabled) continue
       const entry = this.liveNodesFor(instance, now)
       if (!entry) continue // MISSING here: bypass until a provider appears
-      backend.connect(prev, entry.inputId)
-      prev = entry.outputId
+      backend.connect(prev, entry.input)
+      prev = entry.output
     }
     backend.connect(prev, chain.auto)
   }
@@ -2449,8 +2440,8 @@ export class AudioEngine {
       }
       const entry = instance.enabled ? this.liveNodesFor(instance, now) : null
       if (entry) {
-        backend.connect(ports.inlet, entry.inputId)
-        backend.connect(entry.outputId, ports.outlet)
+        backend.connect(ports.inlet, entry.input)
+        backend.connect(entry.output, ports.outlet)
       } else {
         backend.connect(ports.inlet, ports.outlet)
       }
@@ -2463,27 +2454,24 @@ export class AudioEngine {
   }
 
   /**
-   * The live builtin nodes for an instance, created/applied on demand
-   * (null = not local). Builders create Web Audio nodes (the phase-2 DSP
-   * ports move them behind the seam); their input/output are adopted as
-   * backend nodes so all WIRING stays in the seam's currency.
+   * The live nodes for an instance, created/applied on demand. Null =
+   * not local, OR the provider cannot run on this backend (an effect
+   * still needing Web Audio escapes, asked to run natively) — both
+   * bypass identically.
    */
-  private liveNodesFor(instance: PluginInstance, now: number): FxEntry | null {
+  private liveNodesFor(instance: PluginInstance, now: number): PluginNodes | null {
     let entry = this.fxNodes.get(instance.id)
     if (!entry) {
-      const escapes = this.backend?.webAudio
-      if (!escapes) return null // non-Web-Audio backend: bypass until phase 2
+      const backend = this.backend
+      if (!backend) return null
       const resolved = pluginRegistry.resolve(instance.descriptor)
       if (!resolved) return null
-      const nodes = resolved.provider.create(escapes.ctx)
-      entry = {
-        nodes,
-        inputId: escapes.adoptNode(nodes.input),
-        outputId: escapes.adoptNode(nodes.output)
-      }
+      const nodes = resolved.provider.create(backend)
+      if (!nodes) return null
+      entry = nodes
       this.fxNodes.set(instance.id, entry)
     }
-    entry.nodes.apply(instance.params, now)
+    entry.apply(instance.params, now)
     return entry
   }
 
@@ -2570,9 +2558,7 @@ export class AudioEngine {
           if (instance.trackId === trackId) {
             const entry = this.fxNodes.get(instance.id)
             if (entry) {
-              entry.nodes.dispose()
-              backend.disposeNode(entry.inputId)
-              backend.disposeNode(entry.outputId)
+              entry.dispose()
               this.fxNodes.delete(instance.id)
             }
           }

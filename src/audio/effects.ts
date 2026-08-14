@@ -1,37 +1,69 @@
 import type { EffectType } from '@core/model/effects'
 import { EFFECT_TYPES, LFO_WAVE_TYPES, PARAEQ_BANDS, PARAEQ_FILTER_TYPES } from '@core/model/effects'
 import { builtinEffectDescriptor } from '@core/plugins/builtin'
-import type { PluginNodes, PluginProvider } from './pluginRegistry'
+import type { BackendNodeId, IAudioBackend } from './backend'
+import type { PluginAnalysis, PluginNodes, PluginProvider } from './pluginRegistry'
 
 /**
- * Web Audio node builders for the builtin insert effects, exposed as
- * PluginProviders. Each builder returns an input/output pair plus `apply`
- * to push param values into live AudioParams (smoothed — knob drags must
- * not zipper) and `dispose` for teardown.
+ * Builders for the builtin insert effects, exposed as PluginProviders.
+ *
+ * The FILTER family (paraeq, eq3, lowpass/highpass/bandpass/notch) builds
+ * from backend primitives — createNode('biquad') + scheduleParam — so ONE
+ * definition runs on the Web Audio backend today and the native backend
+ * identically (docs/NATIVE_AUDIO_BACKEND.md §3: primitives are ported,
+ * effects are not duplicated). The remaining effects (compressor,
+ * limiter, delay, reverb, lfo) still build Web Audio node graphs behind
+ * the `backend.webAudio` escape and return null on backends without it —
+ * the engine bypasses them like missing plugins until their primitives
+ * land. Analysis taps are Web-Audio-only either way (the UI consumes
+ * AnalyserNodes; phase 2's tap system replaces that app-wide).
  */
 
 const SMOOTH = 0.02
 
 const dbToGain = (db: number): number => Math.pow(10, db / 20)
 
+/** One smoothed value push — the AudioParam setTargetAtTime idiom. */
+function smooth(
+  backend: IAudioBackend,
+  node: BackendNodeId,
+  param: string,
+  value: number,
+  when: number
+): void {
+  backend.scheduleParam(node, param, [
+    { kind: 'setTarget', value, time: when, timeConstant: SMOOTH }
+  ])
+}
+
+function setNow(backend: IAudioBackend, node: BackendNodeId, param: string, value: number): void {
+  backend.scheduleParam(node, param, [{ kind: 'setValue', value, time: 0 }])
+}
+
 /**
- * A spectrum/level tap that survives the engine's rewiring: the engine
- * calls `output.disconnect()` on every chain rewire, severing ALL of the
- * output node's connections — so the analyser must hang off an internal
- * node, behind a dedicated pass-through output gain.
+ * A pass-through output gain with (where Web Audio exists) a spectrum
+ * analyser hanging off the FEEDING node: the engine calls
+ * `disconnect(output)` on every chain rewire, severing ALL of the output
+ * node's connections — so the analyser must tap the internal node, which
+ * rewires never touch.
  */
-function tap(
-  ctx: BaseAudioContext,
-  from: AudioNode,
-  fftSize = 2048
-): { out: GainNode; analyser: AnalyserNode } {
-  const out = ctx.createGain()
-  const analyser = ctx.createAnalyser()
-  analyser.fftSize = fftSize
+function tapOut(
+  backend: IAudioBackend,
+  from: BackendNodeId
+): { out: BackendNodeId; analysis?: PluginAnalysis; disposeTap(): void } {
+  const out = backend.createNode('gain')
+  backend.connect(from, out)
+  const wa = backend.webAudio
+  if (!wa) return { out, disposeTap: () => {} }
+  const analyser = wa.ctx.createAnalyser()
+  analyser.fftSize = 2048
   analyser.smoothingTimeConstant = 0.8
-  from.connect(out)
-  from.connect(analyser)
-  return { out, analyser }
+  wa.nodeOf(from).connect(analyser)
+  return {
+    out,
+    analysis: { spectrum: analyser },
+    disposeTap: () => analyser.disconnect()
+  }
 }
 
 /**
@@ -39,50 +71,51 @@ function tap(
  * paraeq Q convention: the param is linear RBJ Q, converted to dB where
  * Web Audio expects it (lowpass/highpass).
  */
-function basicFilter(type: BiquadFilterType, defaultCutoff: number) {
-  return (ctx: BaseAudioContext): PluginNodes => {
-    const filter = ctx.createBiquadFilter()
-    filter.type = type
-    filter.frequency.value = defaultCutoff
-    const { out, analyser } = tap(ctx, filter)
+function basicFilter(type: 'lowpass' | 'highpass' | 'bandpass' | 'notch', defaultCutoff: number) {
+  return (backend: IAudioBackend): PluginNodes => {
+    const filter = backend.createNode('biquad', { type })
+    setNow(backend, filter, 'frequency', defaultCutoff)
+    const { out, analysis, disposeTap } = tapOut(backend, filter)
     return {
       input: filter,
       output: out,
-      analysis: { spectrum: analyser },
+      analysis,
       apply(p, when) {
-        filter.frequency.setTargetAtTime(p.cutoff ?? defaultCutoff, when, SMOOTH)
+        smooth(backend, filter, 'frequency', p.cutoff ?? defaultCutoff, when)
         const q = p.resonance ?? 0.71
         const nodeQ = type === 'lowpass' || type === 'highpass' ? 20 * Math.log10(q) : q
-        filter.Q.setTargetAtTime(nodeQ, when, SMOOTH)
+        smooth(backend, filter, 'Q', nodeQ, when)
       },
       dispose() {
-        filter.disconnect()
-        out.disconnect()
-        analyser.disconnect()
+        backend.disposeNode(filter)
+        backend.disposeNode(out)
+        disposeTap()
       }
     }
   }
 }
 
-const BUILDERS: Record<EffectType, (ctx: BaseAudioContext) => PluginNodes> = {
-  paraeq(ctx) {
+type Builder = (backend: IAudioBackend) => PluginNodes | null
+
+const BUILDERS: Record<EffectType, Builder> = {
+  paraeq(backend) {
     // One biquad per band slot, chained. Disabled slots are parked as
     // zero-gain peaking filters — audibly transparent — so the chain
     // never needs rewiring when bands are placed or removed.
-    const filters: BiquadFilterNode[] = []
+    const filters: BackendNodeId[] = []
+    const currentTypes: string[] = []
     for (let i = 0; i < PARAEQ_BANDS; i++) {
-      const f = ctx.createBiquadFilter()
-      f.type = 'peaking'
-      f.gain.value = 0
-      if (i > 0) filters[i - 1].connect(f)
+      const f = backend.createNode('biquad', { type: 'peaking' })
+      currentTypes.push('peaking')
+      setNow(backend, f, 'gain', 0)
+      if (i > 0) backend.connect(filters[i - 1], f)
       filters.push(f)
     }
-    // Spectrum tap behind a pass-through output (see tap()).
-    const { out, analyser } = tap(ctx, filters[filters.length - 1])
+    const { out, analysis, disposeTap } = tapOut(backend, filters[filters.length - 1])
     return {
       input: filters[0],
       output: out,
-      analysis: { spectrum: analyser },
+      analysis,
       apply(p, when) {
         filters.forEach((f, i) => {
           const n = i + 1
@@ -92,59 +125,62 @@ const BUILDERS: Record<EffectType, (ctx: BaseAudioContext) => PluginNodes> = {
             Math.min(PARAEQ_FILTER_TYPES.length - 1, Math.round(p[`b${n}type`] ?? 0))
           )
           const type = on ? PARAEQ_FILTER_TYPES[typeIndex] : 'peaking'
-          if (f.type !== type) f.type = type // not an AudioParam; switches are instant
-          f.frequency.setTargetAtTime(p[`b${n}freq`] ?? 1000, when, SMOOTH)
-          f.gain.setTargetAtTime(on ? (p[`b${n}gain`] ?? 0) : 0, when, SMOOTH)
+          if (currentTypes[i] !== type) {
+            currentTypes[i] = type
+            backend.configureNode(f, { type }) // not a param; switches are instant
+          }
+          smooth(backend, f, 'frequency', p[`b${n}freq`] ?? 1000, when)
+          smooth(backend, f, 'gain', on ? (p[`b${n}gain`] ?? 0) : 0, when)
           // Web Audio interprets Q in dB for lowpass/highpass; our param is
           // the linear RBJ Q, so convert to keep the drawn curve honest.
           const q = p[`b${n}q`] ?? 1
           const nodeQ = type === 'lowpass' || type === 'highpass' ? 20 * Math.log10(q) : q
-          f.Q.setTargetAtTime(nodeQ, when, SMOOTH)
+          smooth(backend, f, 'Q', nodeQ, when)
         })
       },
       dispose() {
-        for (const f of filters) f.disconnect()
-        out.disconnect()
-        analyser.disconnect()
+        for (const f of filters) backend.disposeNode(f)
+        backend.disposeNode(out)
+        disposeTap()
       }
     }
   },
 
-  eq3(ctx) {
-    const low = ctx.createBiquadFilter()
-    low.type = 'lowshelf'
-    low.frequency.value = 200
-    const mid = ctx.createBiquadFilter()
-    mid.type = 'peaking'
-    mid.Q.value = 0.9
-    const high = ctx.createBiquadFilter()
-    high.type = 'highshelf'
-    high.frequency.value = 4000
-    low.connect(mid)
-    mid.connect(high)
-    // Spectrum tap behind a pass-through output (see tap()).
-    const { out, analyser } = tap(ctx, high)
+  eq3(backend) {
+    const low = backend.createNode('biquad', { type: 'lowshelf' })
+    setNow(backend, low, 'frequency', 200)
+    const mid = backend.createNode('biquad', { type: 'peaking' })
+    setNow(backend, mid, 'Q', 0.9)
+    const high = backend.createNode('biquad', { type: 'highshelf' })
+    setNow(backend, high, 'frequency', 4000)
+    backend.connect(low, mid)
+    backend.connect(mid, high)
+    const { out, analysis, disposeTap } = tapOut(backend, high)
     return {
       input: low,
       output: out,
-      analysis: { spectrum: analyser },
+      analysis,
       apply(p, when) {
-        low.gain.setTargetAtTime(p.low ?? 0, when, SMOOTH)
-        mid.gain.setTargetAtTime(p.mid ?? 0, when, SMOOTH)
-        mid.frequency.setTargetAtTime(p.midFreq ?? 1000, when, SMOOTH)
-        high.gain.setTargetAtTime(p.high ?? 0, when, SMOOTH)
+        smooth(backend, low, 'gain', p.low ?? 0, when)
+        smooth(backend, mid, 'gain', p.mid ?? 0, when)
+        smooth(backend, mid, 'frequency', p.midFreq ?? 1000, when)
+        smooth(backend, high, 'gain', p.high ?? 0, when)
       },
       dispose() {
-        low.disconnect()
-        mid.disconnect()
-        high.disconnect()
-        out.disconnect()
-        analyser.disconnect()
+        backend.disposeNode(low)
+        backend.disposeNode(mid)
+        backend.disposeNode(high)
+        backend.disposeNode(out)
+        disposeTap()
       }
     }
   },
 
-  compressor(ctx) {
+  compressor(backend) {
+    // DynamicsCompressor has no native port yet — Web Audio only.
+    const wa = backend.webAudio
+    if (!wa) return null
+    const ctx = wa.ctx
     // Input gain (unity) exists so the card can watch the PRE-compression
     // level — the dot riding the transfer curve. Internal connections
     // survive rewires; only `input`'s inbound and `output`'s outbound
@@ -155,13 +191,20 @@ const BUILDERS: Record<EffectType, (ctx: BaseAudioContext) => PluginNodes> = {
     const comp = ctx.createDynamicsCompressor()
     comp.knee.value = 12
     const makeup = ctx.createGain()
+    const outGain = ctx.createGain()
+    const analyser = ctx.createAnalyser()
+    analyser.fftSize = 2048
+    analyser.smoothingTimeConstant = 0.8
     inGain.connect(inTap)
     inGain.connect(comp)
     comp.connect(makeup)
-    const { out, analyser } = tap(ctx, makeup)
+    makeup.connect(outGain)
+    makeup.connect(analyser)
+    const input = wa.adoptNode(inGain)
+    const output = wa.adoptNode(outGain)
     return {
-      input: inGain,
-      output: out,
+      input,
+      output,
       analysis: { spectrum: analyser, input: inTap, reductionDb: () => comp.reduction },
       apply(p, when) {
         comp.threshold.setTargetAtTime(p.threshold ?? -24, when, SMOOTH)
@@ -171,12 +214,17 @@ const BUILDERS: Record<EffectType, (ctx: BaseAudioContext) => PluginNodes> = {
         makeup.gain.setTargetAtTime(dbToGain(p.makeup ?? 0), when, SMOOTH)
       },
       dispose() {
-        for (const node of [inGain, inTap, comp, makeup, out, analyser]) node.disconnect()
+        for (const node of [inGain, inTap, comp, makeup, outGain, analyser]) node.disconnect()
+        backend.disposeNode(input)
+        backend.disposeNode(output)
       }
     }
   },
 
-  limiter(ctx) {
+  limiter(backend) {
+    const wa = backend.webAudio
+    if (!wa) return null
+    const ctx = wa.ctx
     // A hard-kneed, fast, high-ratio compressor — the standard native-node
     // brickwall approximation.
     const inGain = ctx.createGain()
@@ -186,41 +234,60 @@ const BUILDERS: Record<EffectType, (ctx: BaseAudioContext) => PluginNodes> = {
     comp.knee.value = 0
     comp.ratio.value = 20
     comp.attack.value = 0.002
+    const outGain = ctx.createGain()
+    const analyser = ctx.createAnalyser()
+    analyser.fftSize = 2048
+    analyser.smoothingTimeConstant = 0.8
     inGain.connect(inTap)
     inGain.connect(comp)
-    const { out, analyser } = tap(ctx, comp)
+    comp.connect(outGain)
+    comp.connect(analyser)
+    const input = wa.adoptNode(inGain)
+    const output = wa.adoptNode(outGain)
     return {
-      input: inGain,
-      output: out,
+      input,
+      output,
       analysis: { spectrum: analyser, input: inTap, reductionDb: () => comp.reduction },
       apply(p, when) {
         comp.threshold.setTargetAtTime(p.ceiling ?? -1, when, SMOOTH)
         comp.release.setTargetAtTime(p.release ?? 0.1, when, SMOOTH)
       },
       dispose() {
-        for (const node of [inGain, inTap, comp, out, analyser]) node.disconnect()
+        for (const node of [inGain, inTap, comp, outGain, analyser]) node.disconnect()
+        backend.disposeNode(input)
+        backend.disposeNode(output)
       }
     }
   },
 
-  delay(ctx) {
-    const input = ctx.createGain()
+  delay(backend) {
+    const wa = backend.webAudio
+    if (!wa) return null
+    const ctx = wa.ctx
+    const inGain = ctx.createGain()
     const mixed = ctx.createGain()
     const dry = ctx.createGain()
     const wet = ctx.createGain()
     const delay = ctx.createDelay(2)
     const feedback = ctx.createGain()
-    input.connect(dry)
+    const outGain = ctx.createGain()
+    const analyser = ctx.createAnalyser()
+    analyser.fftSize = 2048
+    analyser.smoothingTimeConstant = 0.8
+    inGain.connect(dry)
     dry.connect(mixed)
-    input.connect(delay)
+    inGain.connect(delay)
     delay.connect(wet)
     wet.connect(mixed)
     delay.connect(feedback)
     feedback.connect(delay)
-    const { out, analyser } = tap(ctx, mixed)
+    mixed.connect(outGain)
+    mixed.connect(analyser)
+    const input = wa.adoptNode(inGain)
+    const output = wa.adoptNode(outGain)
     return {
       input,
-      output: out,
+      output,
       analysis: { spectrum: analyser },
       apply(p, when) {
         delay.delayTime.setTargetAtTime(p.time ?? 0.3, when, SMOOTH)
@@ -230,29 +297,41 @@ const BUILDERS: Record<EffectType, (ctx: BaseAudioContext) => PluginNodes> = {
         dry.gain.setTargetAtTime(1 - mix * 0.5, when, SMOOTH)
       },
       dispose() {
-        for (const node of [input, mixed, out, analyser, dry, wet, delay, feedback]) {
+        for (const node of [inGain, mixed, outGain, analyser, dry, wet, delay, feedback]) {
           node.disconnect()
         }
+        backend.disposeNode(input)
+        backend.disposeNode(output)
       }
     }
   },
 
-  reverb(ctx) {
-    const input = ctx.createGain()
+  reverb(backend) {
+    const wa = backend.webAudio
+    if (!wa) return null
+    const ctx = wa.ctx
+    const inGain = ctx.createGain()
     const mixed = ctx.createGain()
     const dry = ctx.createGain()
     const wet = ctx.createGain()
     const convolver = ctx.createConvolver()
+    const outGain = ctx.createGain()
+    const analyser = ctx.createAnalyser()
+    analyser.fftSize = 2048
+    analyser.smoothingTimeConstant = 0.8
     let impulseDecay = -1
-    input.connect(dry)
+    inGain.connect(dry)
     dry.connect(mixed)
-    input.connect(convolver)
+    inGain.connect(convolver)
     convolver.connect(wet)
     wet.connect(mixed)
-    const { out, analyser } = tap(ctx, mixed)
+    mixed.connect(outGain)
+    mixed.connect(analyser)
+    const input = wa.adoptNode(inGain)
+    const output = wa.adoptNode(outGain)
     return {
       input,
-      output: out,
+      output,
       analysis: { spectrum: analyser },
       apply(p, when) {
         const decay = p.decay ?? 1.8
@@ -266,7 +345,11 @@ const BUILDERS: Record<EffectType, (ctx: BaseAudioContext) => PluginNodes> = {
         dry.gain.setTargetAtTime(1 - mix * 0.5, when, SMOOTH)
       },
       dispose() {
-        for (const node of [input, mixed, out, analyser, dry, wet, convolver]) node.disconnect()
+        for (const node of [inGain, mixed, outGain, analyser, dry, wet, convolver]) {
+          node.disconnect()
+        }
+        backend.disposeNode(input)
+        backend.disposeNode(output)
       }
     }
   },
@@ -276,7 +359,10 @@ const BUILDERS: Record<EffectType, (ctx: BaseAudioContext) => PluginNodes> = {
   bandpass: basicFilter('bandpass', 1000),
   notch: basicFilter('notch', 1000),
 
-  lfo(ctx) {
+  lfo(backend) {
+    const wa = backend.webAudio
+    if (!wa) return null
+    const ctx = wa.ctx
     // Amplitude LFO (tremolo): an oscillator drives the carrier gain's
     // AudioParam. Base gain sits at 1 - depth/2 and the oscillator swings
     // ±depth/2 around it, so the level sweeps [1-depth, 1] and never goes
@@ -287,13 +373,20 @@ const BUILDERS: Record<EffectType, (ctx: BaseAudioContext) => PluginNodes> = {
     const osc = ctx.createOscillator()
     osc.type = 'sine'
     osc.frequency.value = 4
+    const outGain = ctx.createGain()
+    const analyser = ctx.createAnalyser()
+    analyser.fftSize = 2048
+    analyser.smoothingTimeConstant = 0.8
     osc.connect(depthGain)
     depthGain.connect(carrier.gain)
     osc.start()
-    const { out, analyser } = tap(ctx, carrier)
+    carrier.connect(outGain)
+    carrier.connect(analyser)
+    const input = wa.adoptNode(carrier)
+    const output = wa.adoptNode(outGain)
     return {
-      input: carrier,
-      output: out,
+      input,
+      output,
       analysis: { spectrum: analyser },
       apply(p, when) {
         osc.frequency.setTargetAtTime(p.rate ?? 4, when, SMOOTH)
@@ -309,7 +402,9 @@ const BUILDERS: Record<EffectType, (ctx: BaseAudioContext) => PluginNodes> = {
       },
       dispose() {
         osc.stop()
-        for (const node of [osc, depthGain, carrier, out, analyser]) node.disconnect()
+        for (const node of [osc, depthGain, carrier, outGain, analyser]) node.disconnect()
+        backend.disposeNode(input)
+        backend.disposeNode(output)
       }
     }
   }

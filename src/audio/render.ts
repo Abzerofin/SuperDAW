@@ -11,6 +11,7 @@ import {
 } from '@core/model/types'
 import { denormalizeParam } from '@core/model/effects'
 import { paramDefsOf } from '@core/plugins/builtin'
+import { WebAudioBackend } from './backend'
 import { applyClipFades } from './fades'
 import { buildInstrumentVoice, type InstrumentSample } from './instruments'
 import { onsetsForPeaks } from './onsets'
@@ -153,13 +154,19 @@ function buildInserts(
   /** Timeline tick at ctx time 0 — anchors insert-param automation. */
   anchorTicks = 0
 ): AudioNode {
+  // A per-render backend adapter over this offline context: the builders
+  // (backend-primitive filters included) run through the identical seam
+  // the live engine uses, so bounces keep matching playback.
+  const rb = new WebAudioBackend({ contextFactory: () => ctx as AudioContext })
+  const escapes = rb.webAudio
   const localNodes = (instance: PluginInstance): { input: AudioNode; output: AudioNode } | null => {
     const resolved = pluginRegistry.resolve(instance.descriptor)
     if (!resolved) return null // MISSING on this client: bypass, as in live playback
-    const nodes = resolved.provider.create(ctx)
+    const nodes = resolved.provider.create(rb)
+    if (!nodes) return null
     nodes.apply(instance.params, 0)
     applyInsertAutomation(nodes, state, instance, anchorTicks)
-    return nodes
+    return { input: escapes.nodeOf(nodes.input), output: escapes.nodeOf(nodes.output) }
   }
 
   const routes = routesOfTrack(state, trackId)
@@ -676,16 +683,19 @@ async function renderInsertSegment(
   instances: PluginInstance[]
 ): Promise<AudioBuffer> {
   const ctx = new OfflineAudioContext(2, buffer.length, buffer.sampleRate)
+  const rb = new WebAudioBackend({ contextFactory: () => ctx as unknown as AudioContext })
+  const escapes = rb.webAudio
   const source = ctx.createBufferSource()
   source.buffer = buffer
   let prev: AudioNode = source
   for (const instance of instances) {
     const resolved = pluginRegistry.resolve(instance.descriptor)
     if (!resolved) continue
-    const nodes = resolved.provider.create(ctx)
+    const nodes = resolved.provider.create(rb)
+    if (!nodes) continue
     nodes.apply(instance.params, 0)
-    prev.connect(nodes.input)
-    prev = nodes.output
+    prev.connect(escapes.nodeOf(nodes.input))
+    prev = escapes.nodeOf(nodes.output)
   }
   prev.connect(ctx.destination)
   source.start(0)

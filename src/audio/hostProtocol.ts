@@ -7,7 +7,7 @@
  * health counters — at UI cadence, never per audio block.
  */
 
-import type { ParamEvent } from './backendTypes'
+import type { NodeKind, NodeOptions, ParamEvent, ParamName } from './backendTypes'
 
 export interface HostStartOptions {
   deviceId?: string | null
@@ -19,11 +19,12 @@ export interface HostStartOptions {
 export type HostCommand =
   | { t: 'start'; opts: HostStartOptions }
   | { t: 'stop' }
-  | { t: 'createNode'; id: number; kind: 'gain' | 'stereoPanner' }
+  | { t: 'createNode'; id: number; kind: NodeKind; opts?: NodeOptions }
+  | { t: 'configureNode'; id: number; opts: NodeOptions }
   | { t: 'connect'; from: number; to: number }
   | { t: 'disconnect'; from: number; to?: number }
   | { t: 'disposeNode'; id: number }
-  | { t: 'scheduleParam'; node: number; param: 'gain' | 'pan'; events: ParamEvent[] }
+  | { t: 'scheduleParam'; node: number; param: ParamName; events: ParamEvent[] }
   | { t: 'registerBuffer'; id: string; sampleRate: number; channels: Float32Array[] }
   | { t: 'releaseBuffer'; id: string }
   | {

@@ -20,8 +20,24 @@ export type ParamEvent =
   | { kind: 'setCurve'; curve: Float32Array; time: number; duration: number }
   | { kind: 'cancel'; afterTime: number }
 
-/** Graph primitives the engine instantiates itself (see backend.ts). */
-export type NodeKind = 'gain' | 'stereoPanner'
+/**
+ * Graph primitives. 'gain' and 'stereoPanner' are the mixer's own; the
+ * DSP kinds arrive with the phase-2 ports (biquad first — six of the
+ * eleven builtin effects are pure biquad chains). Options at creation
+ * (and via configureNode) carry the non-param attributes — a biquad's
+ * `type` — which Web Audio also treats as instant plain attributes.
+ */
+export type NodeKind = 'gain' | 'stereoPanner' | 'biquad'
+
+export type NodeOptions = Record<string, number | string>
+
+/**
+ * Param names are per-kind: 'gain' (gain), 'pan' (stereoPanner),
+ * 'frequency' | 'Q' | 'gain' | 'detune' (biquad, Web Audio semantics —
+ * lowpass/highpass read Q in dB). Unknown names are ignored, matching
+ * the reducer's drop-don't-throw hygiene.
+ */
+export type ParamName = string
 
 export interface StreamInfo {
   sampleRate: number

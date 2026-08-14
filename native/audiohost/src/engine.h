@@ -163,18 +163,152 @@ class ParamTimeline {
 
 // ----------------------------------------------------------------- graph
 
-enum class NodeKind : uint8_t { Gain, Panner };
+enum class NodeKind : uint8_t { Gain, Panner, Biquad };
+
+/** Web Audio biquad types (the spec's normative coefficient formulas). */
+enum class BiquadType : uint8_t {
+  Lowpass,
+  Highpass,
+  Bandpass,
+  Notch,
+  Peaking,
+  Lowshelf,
+  Highshelf,
+  Allpass
+};
+
+inline BiquadType ParseBiquadType(const std::string& name) {
+  if (name == "lowpass") return BiquadType::Lowpass;
+  if (name == "highpass") return BiquadType::Highpass;
+  if (name == "bandpass") return BiquadType::Bandpass;
+  if (name == "notch") return BiquadType::Notch;
+  if (name == "lowshelf") return BiquadType::Lowshelf;
+  if (name == "highshelf") return BiquadType::Highshelf;
+  if (name == "allpass") return BiquadType::Allpass;
+  return BiquadType::Peaking;
+}
 
 struct Node {
   NodeKind kind = NodeKind::Gain;
   bool alive = true;
-  ParamTimeline gain{1.0};
-  ParamTimeline pan{0.0};
+  /**
+   * Named param timelines by slot, defaults set at creation:
+   *   gain:    p0 = gain (1)
+   *   panner:  p0 = pan (0)
+   *   biquad:  p0 = frequency (350), p1 = Q (1), p2 = gain dB (0),
+   *            p3 = detune cents (0) — Web Audio's defaults.
+   */
+  ParamTimeline p0{1.0};
+  ParamTimeline p1{0.0};
+  ParamTimeline p2{0.0};
+  ParamTimeline p3{0.0};
+  BiquadType biquadType = BiquadType::Peaking;
+  // Biquad state: DF1 histories per stereo channel.
+  double bx1[2] = {}, bx2[2] = {}, by1[2] = {}, by2[2] = {};
   std::vector<uint32_t> inputs;  // node ids feeding this node
   // Per-block scratch (stereo interleaved) — render thread only.
   float block[kBlockFrames * 2] = {};
   bool rendered = false;
 };
+
+/** Normalized biquad coefficients (a0 divided through). */
+struct BiquadCoefficients {
+  double b0 = 1, b1 = 0, b2 = 0, a1 = 0, a2 = 0;
+};
+
+/**
+ * The Web Audio spec's coefficient formulas, verbatim: lowpass/highpass
+ * read Q in dB (alpha = sin/2 · 10^(−Q/20)), the shelves use S = 1, and
+ * A = 10^(gain/40) where gain applies. `freq` is already clamped to
+ * (0, nyquist); parity with Chromium is the acceptance test.
+ */
+inline BiquadCoefficients ComputeBiquad(BiquadType type, double freq, double sampleRate,
+                                        double q, double gainDb) {
+  const double w0 = 2.0 * kPi * freq / sampleRate;
+  const double cosw = std::cos(w0);
+  const double sinw = std::sin(w0);
+  const double A = std::pow(10.0, gainDb / 40.0);
+  const double alphaQdB = (sinw / 2.0) * std::pow(10.0, -q / 20.0);
+  const double qClamped = q > 1e-9 ? q : 1e-9;
+  const double alphaQ = sinw / (2.0 * qClamped);
+  const double alphaS = (sinw / 2.0) * std::sqrt(2.0);
+  const double twoRootAAlphaS = 2.0 * std::sqrt(A) * alphaS;
+
+  double b0 = 1, b1 = 0, b2 = 0, a0 = 1, a1 = 0, a2 = 0;
+  switch (type) {
+    case BiquadType::Lowpass:
+      b0 = (1 - cosw) / 2;
+      b1 = 1 - cosw;
+      b2 = b0;
+      a0 = 1 + alphaQdB;
+      a1 = -2 * cosw;
+      a2 = 1 - alphaQdB;
+      break;
+    case BiquadType::Highpass:
+      b0 = (1 + cosw) / 2;
+      b1 = -(1 + cosw);
+      b2 = b0;
+      a0 = 1 + alphaQdB;
+      a1 = -2 * cosw;
+      a2 = 1 - alphaQdB;
+      break;
+    case BiquadType::Bandpass:
+      b0 = alphaQ;
+      b1 = 0;
+      b2 = -alphaQ;
+      a0 = 1 + alphaQ;
+      a1 = -2 * cosw;
+      a2 = 1 - alphaQ;
+      break;
+    case BiquadType::Notch:
+      b0 = 1;
+      b1 = -2 * cosw;
+      b2 = 1;
+      a0 = 1 + alphaQ;
+      a1 = -2 * cosw;
+      a2 = 1 - alphaQ;
+      break;
+    case BiquadType::Allpass:
+      b0 = 1 - alphaQ;
+      b1 = -2 * cosw;
+      b2 = 1 + alphaQ;
+      a0 = 1 + alphaQ;
+      a1 = -2 * cosw;
+      a2 = 1 - alphaQ;
+      break;
+    case BiquadType::Peaking:
+      b0 = 1 + alphaQ * A;
+      b1 = -2 * cosw;
+      b2 = 1 - alphaQ * A;
+      a0 = 1 + alphaQ / A;
+      a1 = -2 * cosw;
+      a2 = 1 - alphaQ / A;
+      break;
+    case BiquadType::Lowshelf:
+      b0 = A * ((A + 1) - (A - 1) * cosw + twoRootAAlphaS);
+      b1 = 2 * A * ((A - 1) - (A + 1) * cosw);
+      b2 = A * ((A + 1) - (A - 1) * cosw - twoRootAAlphaS);
+      a0 = (A + 1) + (A - 1) * cosw + twoRootAAlphaS;
+      a1 = -2 * ((A - 1) + (A + 1) * cosw);
+      a2 = (A + 1) + (A - 1) * cosw - twoRootAAlphaS;
+      break;
+    case BiquadType::Highshelf:
+      b0 = A * ((A + 1) + (A - 1) * cosw + twoRootAAlphaS);
+      b1 = -2 * A * ((A - 1) + (A + 1) * cosw);
+      b2 = A * ((A + 1) + (A - 1) * cosw - twoRootAAlphaS);
+      a0 = (A + 1) - (A - 1) * cosw + twoRootAAlphaS;
+      a1 = 2 * ((A - 1) - (A + 1) * cosw);
+      a2 = (A + 1) - (A - 1) * cosw - twoRootAAlphaS;
+      break;
+  }
+  BiquadCoefficients out;
+  out.b0 = b0 / a0;
+  out.b1 = b1 / a0;
+  out.b2 = b2 / a0;
+  out.a1 = a1 / a0;
+  out.a2 = a2 / a0;
+  return out;
+}
 
 struct SharedBuffer {
   std::vector<std::vector<float>> channels;
@@ -209,6 +343,7 @@ struct Tap {
 struct Command {
   enum class Op : uint8_t {
     CreateNode,
+    ConfigureNode,
     Connect,
     Disconnect,
     DisconnectAll,
@@ -220,9 +355,10 @@ struct Command {
     DisposeTap
   } op;
   uint32_t a = 0;  // node / voice / tap id
-  uint32_t b = 0;  // target node / param selector (0 = gain, 1 = pan) / frames
+  uint32_t b = 0;  // target node / frames
   NodeKind nodeKind = NodeKind::Gain;
-  double x = 0;  // stopVoice atTime (<0 = immediate)
+  double x = 0;         // stopVoice atTime (<0 = immediate)
+  std::string str;      // param name / biquad type
   ParamEvent event{};
   std::shared_ptr<SharedBuffer> buffer;  // Play
   Voice voice{};                         // Play template
@@ -249,10 +385,18 @@ class Engine {
   // an id round-trip per createNode/play would put renderer→host RPC
   // latency inside the scheduling path for no reason.
 
-  void CreateNode(uint32_t id, NodeKind kind) {
+  void CreateNode(uint32_t id, NodeKind kind, const std::string& biquadType = "") {
     Command c{Command::Op::CreateNode};
     c.a = id;
     c.nodeKind = kind;
+    c.str = biquadType;
+    Push(std::move(c));
+  }
+
+  void ConfigureNode(uint32_t id, const std::string& biquadType) {
+    Command c{Command::Op::ConfigureNode};
+    c.a = id;
+    c.str = biquadType;
     Push(std::move(c));
   }
 
@@ -277,10 +421,10 @@ class Engine {
     Push(std::move(c));
   }
 
-  void ScheduleParam(uint32_t node, bool pan, ParamEvent event) {
+  void ScheduleParam(uint32_t node, const std::string& param, ParamEvent event) {
     Command c{Command::Op::ScheduleParam};
     c.a = node;
-    c.b = pan ? 1 : 0;
+    c.str = param;
     c.event = std::move(event);
     Push(std::move(c));
   }
@@ -454,12 +598,48 @@ class Engine {
     for (Command& c : batch) Execute(c);
   }
 
+  /** (kind, name) → the node's timeline slot; null = unknown, ignored. */
+  static ParamTimeline* ParamSlot(Node& node, const std::string& name) {
+    switch (node.kind) {
+      case NodeKind::Gain:
+        return name == "gain" ? &node.p0 : nullptr;
+      case NodeKind::Panner:
+        return name == "pan" ? &node.p0 : nullptr;
+      case NodeKind::Biquad:
+        if (name == "frequency") return &node.p0;
+        if (name == "Q") return &node.p1;
+        if (name == "gain") return &node.p2;
+        if (name == "detune") return &node.p3;
+        return nullptr;
+    }
+    return nullptr;
+  }
+
   void Execute(Command& c) {
     switch (c.op) {
       case Command::Op::CreateNode: {
         auto node = std::make_unique<Node>();
         node->kind = c.nodeKind;
+        // Per-kind param defaults (Web Audio's own).
+        if (c.nodeKind == NodeKind::Gain) {
+          node->p0 = ParamTimeline(1.0);
+        } else if (c.nodeKind == NodeKind::Panner) {
+          node->p0 = ParamTimeline(0.0);
+        } else {
+          node->p0 = ParamTimeline(350.0);  // frequency
+          node->p1 = ParamTimeline(1.0);    // Q
+          node->p2 = ParamTimeline(0.0);    // gain dB
+          node->p3 = ParamTimeline(0.0);    // detune cents
+          node->biquadType = c.str.empty() ? BiquadType::Peaking : ParseBiquadType(c.str);
+        }
         nodes_[c.a] = std::move(node);
+        break;
+      }
+      case Command::Op::ConfigureNode: {
+        Node* node = Get(c.a);
+        if (node && node->kind == NodeKind::Biquad) {
+          node->biquadType = ParseBiquadType(c.str);
+        }
         break;
       }
       case Command::Op::Connect: {
@@ -492,7 +672,8 @@ class Engine {
       case Command::Op::ScheduleParam: {
         Node* node = Get(c.a);
         if (!node) break;
-        (c.b == 1 ? node->pan : node->gain).Apply(c.event);
+        ParamTimeline* slot = ParamSlot(*node, c.str);
+        if (slot) slot->Apply(c.event);
         break;
       }
       case Command::Op::Play: {
@@ -601,14 +782,14 @@ class Engine {
     const double frameDur = 1.0 / sampleRate;
     if (node->kind == NodeKind::Gain) {
       for (uint32_t i = 0; i < frames; i++) {
-        const float g = static_cast<float>(node->gain.ValueAt(blockTime + i * frameDur));
+        const float g = static_cast<float>(node->p0.ValueAt(blockTime + i * frameDur));
         node->block[i * 2] *= g;
         node->block[i * 2 + 1] *= g;
       }
-    } else {
+    } else if (node->kind == NodeKind::Panner) {
       // The spec's equal-power stereo pan.
       for (uint32_t i = 0; i < frames; i++) {
-        double p = node->pan.ValueAt(blockTime + i * frameDur);
+        double p = node->p0.ValueAt(blockTime + i * frameDur);
         p = p < -1 ? -1 : (p > 1 ? 1 : p);
         const double x = p <= 0 ? p + 1 : p;
         const float gl = static_cast<float>(std::cos(x * kPi / 2));
@@ -622,6 +803,35 @@ class Engine {
           node->block[i * 2] = L * gl;
           node->block[i * 2 + 1] = R + L * gr;
         }
+      }
+    } else {
+      // Biquad: coefficients from the timelines at the block start
+      // (k-rate — Chromium recomputes per render quantum too), DF1 per
+      // channel with per-node histories.
+      double freq = node->p0.ValueAt(blockTime);
+      const double detune = node->p3.ValueAt(blockTime);
+      if (detune != 0) freq *= std::pow(2.0, detune / 1200.0);
+      const double nyquist = sampleRate / 2;
+      freq = freq < 0 ? 0 : (freq > nyquist ? nyquist : freq);
+      const BiquadCoefficients k = ComputeBiquad(
+          node->biquadType, freq, sampleRate, node->p1.ValueAt(blockTime),
+          node->p2.ValueAt(blockTime));
+      for (size_t ch = 0; ch < 2; ch++) {
+        double x1 = node->bx1[ch], x2 = node->bx2[ch];
+        double y1 = node->by1[ch], y2 = node->by2[ch];
+        for (uint32_t i = 0; i < frames; i++) {
+          const double x = node->block[i * 2 + ch];
+          const double y = k.b0 * x + k.b1 * x1 + k.b2 * x2 - k.a1 * y1 - k.a2 * y2;
+          node->block[i * 2 + ch] = static_cast<float>(y);
+          x2 = x1;
+          x1 = x;
+          y2 = y1;
+          y1 = y;
+        }
+        node->bx1[ch] = x1;
+        node->bx2[ch] = x2;
+        node->by1[ch] = y1;
+        node->by2[ch] = y2;
       }
     }
   }
