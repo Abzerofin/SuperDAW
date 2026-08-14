@@ -67,6 +67,30 @@ function tapOut(
 }
 
 /**
+ * The dynamics cards' extra observation points: a PRE-compression level
+ * tap and the live gain-reduction readout. Both are Web-Audio-shaped
+ * (an AnalyserNode; the node's own `reduction`), so under other backends
+ * they are simply absent and the card draws what it can — the same
+ * stance the spectrum tap takes.
+ */
+function dynamicsTaps(
+  backend: IAudioBackend,
+  input: BackendNodeId,
+  compressor: BackendNodeId
+): { analysis: Partial<PluginAnalysis>; dispose(): void } {
+  const wa = backend.webAudio
+  if (!wa) return { analysis: {}, dispose: () => {} }
+  const inTap = wa.ctx.createAnalyser()
+  inTap.fftSize = 1024
+  wa.nodeOf(input).connect(inTap)
+  const node = wa.nodeOf(compressor) as DynamicsCompressorNode
+  return {
+    analysis: { input: inTap, reductionDb: () => node.reduction },
+    dispose: () => inTap.disconnect()
+  }
+}
+
+/**
  * One biquad as a standalone insert — the basic filter family. Shares the
  * paraeq Q convention: the param is linear RBJ Q, converted to dB where
  * Web Audio expects it (lowpass/highpass).
@@ -177,85 +201,60 @@ const BUILDERS: Record<EffectType, Builder> = {
   },
 
   compressor(backend) {
-    // DynamicsCompressor has no native port yet — Web Audio only.
-    const wa = backend.webAudio
-    if (!wa) return null
-    const ctx = wa.ctx
     // Input gain (unity) exists so the card can watch the PRE-compression
-    // level — the dot riding the transfer curve. Internal connections
-    // survive rewires; only `input`'s inbound and `output`'s outbound
-    // edges are engine-managed.
-    const inGain = ctx.createGain()
-    const inTap = ctx.createAnalyser()
-    inTap.fftSize = 1024
-    const comp = ctx.createDynamicsCompressor()
-    comp.knee.value = 12
-    const makeup = ctx.createGain()
-    const outGain = ctx.createGain()
-    const analyser = ctx.createAnalyser()
-    analyser.fftSize = 2048
-    analyser.smoothingTimeConstant = 0.8
-    inGain.connect(inTap)
-    inGain.connect(comp)
-    comp.connect(makeup)
-    makeup.connect(outGain)
-    makeup.connect(analyser)
-    const input = wa.adoptNode(inGain)
-    const output = wa.adoptNode(outGain)
+    // level — the dot riding the transfer curve.
+    const input = backend.createNode('gain')
+    const comp = backend.createNode('compressor')
+    setNow(backend, comp, 'knee', 12)
+    const makeup = backend.createNode('gain')
+    backend.connect(input, comp)
+    backend.connect(comp, makeup)
+    const { out, analysis: spectrumOnly, disposeTap } = tapOut(backend, makeup)
+    // The pre-compression tap and the gain-reduction readout are UI-only
+    // and Web-Audio-shaped (an AnalyserNode, the node's own `reduction`).
+    const inTap = dynamicsTaps(backend, input, comp)
     return {
       input,
-      output,
-      analysis: { spectrum: analyser, input: inTap, reductionDb: () => comp.reduction },
+      output: out,
+      analysis: spectrumOnly ? { ...spectrumOnly, ...inTap.analysis } : undefined,
       apply(p, when) {
-        comp.threshold.setTargetAtTime(p.threshold ?? -24, when, SMOOTH)
-        comp.ratio.setTargetAtTime(p.ratio ?? 4, when, SMOOTH)
-        comp.attack.setTargetAtTime(p.attack ?? 0.01, when, SMOOTH)
-        comp.release.setTargetAtTime(p.release ?? 0.25, when, SMOOTH)
-        makeup.gain.setTargetAtTime(dbToGain(p.makeup ?? 0), when, SMOOTH)
+        smooth(backend, comp, 'threshold', p.threshold ?? -24, when)
+        smooth(backend, comp, 'ratio', p.ratio ?? 4, when)
+        smooth(backend, comp, 'attack', p.attack ?? 0.01, when)
+        smooth(backend, comp, 'release', p.release ?? 0.25, when)
+        smooth(backend, makeup, 'gain', dbToGain(p.makeup ?? 0), when)
       },
       dispose() {
-        for (const node of [inGain, inTap, comp, makeup, outGain, analyser]) node.disconnect()
-        backend.disposeNode(input)
-        backend.disposeNode(output)
+        for (const id of [input, comp, makeup, out]) backend.disposeNode(id)
+        disposeTap()
+        inTap.dispose()
       }
     }
   },
 
   limiter(backend) {
-    const wa = backend.webAudio
-    if (!wa) return null
-    const ctx = wa.ctx
-    // A hard-kneed, fast, high-ratio compressor — the standard native-node
-    // brickwall approximation.
-    const inGain = ctx.createGain()
-    const inTap = ctx.createAnalyser()
-    inTap.fftSize = 1024
-    const comp = ctx.createDynamicsCompressor()
-    comp.knee.value = 0
-    comp.ratio.value = 20
-    comp.attack.value = 0.002
-    const outGain = ctx.createGain()
-    const analyser = ctx.createAnalyser()
-    analyser.fftSize = 2048
-    analyser.smoothingTimeConstant = 0.8
-    inGain.connect(inTap)
-    inGain.connect(comp)
-    comp.connect(outGain)
-    comp.connect(analyser)
-    const input = wa.adoptNode(inGain)
-    const output = wa.adoptNode(outGain)
+    // A hard-kneed, fast, high-ratio compressor — the standard brickwall
+    // approximation over the same primitive.
+    const input = backend.createNode('gain')
+    const comp = backend.createNode('compressor')
+    setNow(backend, comp, 'knee', 0)
+    setNow(backend, comp, 'ratio', 20)
+    setNow(backend, comp, 'attack', 0.002)
+    backend.connect(input, comp)
+    const { out, analysis: spectrumOnly, disposeTap } = tapOut(backend, comp)
+    const inTap = dynamicsTaps(backend, input, comp)
     return {
       input,
-      output,
-      analysis: { spectrum: analyser, input: inTap, reductionDb: () => comp.reduction },
+      output: out,
+      analysis: spectrumOnly ? { ...spectrumOnly, ...inTap.analysis } : undefined,
       apply(p, when) {
-        comp.threshold.setTargetAtTime(p.ceiling ?? -1, when, SMOOTH)
-        comp.release.setTargetAtTime(p.release ?? 0.1, when, SMOOTH)
+        smooth(backend, comp, 'threshold', p.ceiling ?? -1, when)
+        smooth(backend, comp, 'release', p.release ?? 0.1, when)
       },
       dispose() {
-        for (const node of [inGain, inTap, comp, outGain, analyser]) node.disconnect()
-        backend.disposeNode(input)
-        backend.disposeNode(output)
+        for (const id of [input, comp, out]) backend.disposeNode(id)
+        disposeTap()
+        inTap.dispose()
       }
     }
   },

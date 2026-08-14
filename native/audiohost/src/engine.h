@@ -163,7 +163,94 @@ class ParamTimeline {
 
 // ----------------------------------------------------------------- graph
 
-enum class NodeKind : uint8_t { Gain, Panner, Biquad, Delay };
+enum class NodeKind : uint8_t { Gain, Panner, Biquad, Delay, Compressor };
+
+// ------------------------------------------------------- compressor curve
+
+/**
+ * Chromium's DynamicsCompressor static curve, reconstructed and verified
+ * empirically against the real node (see the audiohost README and
+ * src/main/__tests__/nativeCompressor.test.ts):
+ *
+ *   KneeCurve(x, k) = T + (1 − e^(−k(x − T))) / k      (linear amplitude)
+ *   k solved so the dB-domain slope at the knee's end equals 1/ratio
+ *   above the knee: linear in dB with slope 1/ratio, anchored there
+ *   automatic makeup = (1 / Saturate(1))^0.6
+ *
+ * The makeup is the surprising part — Chromium BOOSTS below-threshold
+ * material (8.2 dB at the default-ish settings), which is why a plain
+ * textbook compressor would not match. Predicted vs measured agrees to
+ * three decimals across the (threshold, knee, ratio) grid, so this is a
+ * recovered algorithm rather than an approximation.
+ */
+struct CompressorCurve {
+  double linearThreshold = 0;
+  double k = 1;
+  double kneeEndDb = 0;
+  double kneeEndOutDb = 0;
+  double slope = 1;
+  double makeupGain = 1;
+  // The inputs this was derived from, so it recomputes only on change.
+  double forThresholdDb = 1e300, forKneeDb = 0, forRatio = 0;
+};
+
+inline double DbToLinear(double db) { return std::pow(10.0, db / 20.0); }
+inline double LinearToDb(double x) {
+  return x > 1e-30 ? 20.0 * std::log10(x) : -600.0;
+}
+
+inline double KneeCurveAt(double x, double linearThreshold, double k) {
+  if (x < linearThreshold) return x;
+  return linearThreshold + (1.0 - std::exp(-k * (x - linearThreshold))) / k;
+}
+
+/** dB-domain slope of the knee curve at x. */
+inline double KneeSlopeAt(double x, double linearThreshold, double k) {
+  const double y = KneeCurveAt(x, linearThreshold, k);
+  if (y <= 0) return 1;
+  return (x / y) * std::exp(-k * (x - linearThreshold));
+}
+
+/** Output dB for an input dB through the static curve (makeup excluded). */
+inline double CompressorCurveDb(const CompressorCurve& c, double inputDb) {
+  if (inputDb <= c.forThresholdDb) return inputDb;
+  if (inputDb >= c.kneeEndDb) return c.kneeEndOutDb + (inputDb - c.kneeEndDb) * c.slope;
+  return LinearToDb(KneeCurveAt(DbToLinear(inputDb), c.linearThreshold, c.k));
+}
+
+inline void UpdateCompressorCurve(CompressorCurve& c, double thresholdDb, double kneeDb,
+                                  double ratio) {
+  if (c.forThresholdDb == thresholdDb && c.forKneeDb == kneeDb && c.forRatio == ratio) return;
+  c.forThresholdDb = thresholdDb;
+  c.forKneeDb = kneeDb;
+  c.forRatio = ratio;
+
+  c.slope = ratio > 0 ? 1.0 / ratio : 1.0;
+  c.linearThreshold = DbToLinear(thresholdDb);
+  c.kneeEndDb = thresholdDb + kneeDb;
+  const double kneeEndLinear = DbToLinear(c.kneeEndDb);
+
+  if (kneeDb > 0) {
+    // Binary search for k giving slope == 1/ratio at the knee's end
+    // (Chromium's KAtSlope). Monotone in k, so bisection converges.
+    double lo = 0.1, hi = 10000.0;
+    for (int i = 0; i < 60; i++) {
+      const double mid = (lo + hi) / 2;
+      if (KneeSlopeAt(kneeEndLinear, c.linearThreshold, mid) > c.slope) lo = mid;
+      else hi = mid;
+    }
+    c.k = (lo + hi) / 2;
+    c.kneeEndOutDb = LinearToDb(KneeCurveAt(kneeEndLinear, c.linearThreshold, c.k));
+  } else {
+    c.k = 1e9;  // a hard knee: the curve collapses onto the threshold
+    c.kneeEndOutDb = thresholdDb;
+  }
+
+  // Automatic makeup, normalized off the 0 dBFS point — evaluated through
+  // the full curve, since 0 dBFS can land inside the knee (a high
+  // threshold with a wide knee), not only above it.
+  c.makeupGain = std::pow(DbToLinear(-CompressorCurveDb(c, 0.0)), 0.6);
+}
 
 /** Web Audio biquad types (the spec's normative coefficient formulas). */
 enum class BiquadType : uint8_t {
@@ -202,6 +289,7 @@ struct Node {
   ParamTimeline p1{0.0};
   ParamTimeline p2{0.0};
   ParamTimeline p3{0.0};
+  ParamTimeline p4{0.0};
   BiquadType biquadType = BiquadType::Peaking;
   // Biquad state: DF1 histories per stereo channel.
   double bx1[2] = {}, bx2[2] = {}, by1[2] = {}, by2[2] = {};
@@ -211,6 +299,10 @@ struct Node {
   std::vector<float> ring[2];
   size_t ringWrite = 0;
   double maxDelaySec = 1;
+  // Compressor state: derived curve, envelope gain (linear, ≤ 1) and the
+  // 6 ms lookahead the detector runs ahead of the audio it attenuates.
+  CompressorCurve curve;
+  double envelopeGain = 1;
   std::vector<uint32_t> inputs;  // node ids feeding this node
   // Per-block scratch (stereo interleaved) — render thread only.
   float block[kBlockFrames * 2] = {};
@@ -658,6 +750,13 @@ class Engine {
         return nullptr;
       case NodeKind::Delay:
         return name == "delayTime" ? &node.p0 : nullptr;
+      case NodeKind::Compressor:
+        if (name == "threshold") return &node.p0;
+        if (name == "knee") return &node.p1;
+        if (name == "ratio") return &node.p2;
+        if (name == "attack") return &node.p3;
+        if (name == "release") return &node.p4;
+        return nullptr;
     }
     return nullptr;
   }
@@ -675,6 +774,13 @@ class Engine {
         } else if (c.nodeKind == NodeKind::Delay) {
           node->p0 = ParamTimeline(0.0);  // delayTime seconds
           node->maxDelaySec = c.x > 0 ? c.x : 1;
+        } else if (c.nodeKind == NodeKind::Compressor) {
+          // Web Audio's DynamicsCompressorNode defaults.
+          node->p0 = ParamTimeline(-24.0);  // threshold dB
+          node->p1 = ParamTimeline(30.0);   // knee dB
+          node->p2 = ParamTimeline(12.0);   // ratio
+          node->p3 = ParamTimeline(0.003);  // attack sec
+          node->p4 = ParamTimeline(0.25);   // release sec
         } else {
           node->p0 = ParamTimeline(350.0);  // frequency
           node->p1 = ParamTimeline(1.0);    // Q
@@ -869,7 +975,54 @@ class Engine {
       for (uint32_t i = 0; i < frames * 2; i++) node->block[i] += input->block[i];
     }
     const double frameDur = 1.0 / sampleRate;
-    if (node->kind == NodeKind::Gain) {
+    if (node->kind == NodeKind::Compressor) {
+      // Chromium's static curve exactly (see CompressorCurve), driven by a
+      // peak detector reading 6 ms AHEAD of the audio it attenuates — the
+      // lookahead ring — with one-pole attack/release smoothing on the
+      // gain. Steady-state levels therefore match the Web Audio node;
+      // transient SHAPE can differ slightly (Chromium's envelope has an
+      // adaptive-release refinement this does not reproduce), which is
+      // why the port is measured rather than assumed: see the test.
+      const double thresholdDb = node->p0.ValueAt(blockTime);
+      const double kneeDb = node->p1.ValueAt(blockTime);
+      const double ratio = node->p2.ValueAt(blockTime);
+      UpdateCompressorCurve(node->curve, thresholdDb, kneeDb, ratio);
+      const double attack = std::max(1e-4, node->p3.ValueAt(blockTime));
+      const double release = std::max(1e-4, node->p4.ValueAt(blockTime));
+      const double attackCoeff = std::exp(-1.0 / (attack * sampleRate));
+      const double releaseCoeff = std::exp(-1.0 / (release * sampleRate));
+
+      const size_t lookFrames =
+          static_cast<size_t>(std::max(1.0, std::round(0.006 * sampleRate)));
+      if (node->ring[0].size() != lookFrames) {
+        node->ring[0].assign(lookFrames, 0.0f);
+        node->ring[1].assign(lookFrames, 0.0f);
+        node->ringWrite = 0;
+      }
+      for (uint32_t i = 0; i < frames; i++) {
+        const float inL = node->block[i * 2];
+        const float inR = node->block[i * 2 + 1];
+        // Detector on the CURRENT sample; audio out is the delayed one.
+        const double peak = std::max(std::fabs(inL), std::fabs(inR));
+        const double targetGain =
+            peak > 1e-9
+                ? DbToLinear(CompressorCurveDb(node->curve, LinearToDb(peak)) - LinearToDb(peak))
+                : 1.0;
+        const double coeff = targetGain < node->envelopeGain ? attackCoeff : releaseCoeff;
+        node->envelopeGain = coeff * node->envelopeGain + (1 - coeff) * targetGain;
+
+        const size_t at = node->ringWrite;
+        const float delayedL = node->ring[0][at];
+        const float delayedR = node->ring[1][at];
+        node->ring[0][at] = inL;
+        node->ring[1][at] = inR;
+        node->ringWrite = (at + 1) % lookFrames;
+
+        const double g = node->envelopeGain * node->curve.makeupGain;
+        node->block[i * 2] = static_cast<float>(delayedL * g);
+        node->block[i * 2 + 1] = static_cast<float>(delayedR * g);
+      }
+    } else if (node->kind == NodeKind::Gain) {
       for (uint32_t i = 0; i < frames; i++) {
         const float g = static_cast<float>(node->p0.ValueAt(blockTime + i * frameDur));
         node->block[i * 2] *= g;

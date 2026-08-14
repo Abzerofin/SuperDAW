@@ -406,6 +406,7 @@ Napi::Value CreateNode(const Napi::CallbackInfo& info) {
       kind == "stereoPanner" ? sdengine::NodeKind::Panner
       : kind == "biquad"     ? sdengine::NodeKind::Biquad
       : kind == "delay"      ? sdengine::NodeKind::Delay
+      : kind == "compressor" ? sdengine::NodeKind::Compressor
                              : sdengine::NodeKind::Gain;
   EngineOf(env).CreateNode(id, nodeKind, biquadType, maxDelay);
   return env.Undefined();

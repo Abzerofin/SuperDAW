@@ -281,7 +281,9 @@ export class WebAudioBackend implements IAudioBackend {
           ? ctx.createStereoPanner()
           : kind === 'delay'
             ? ctx.createDelay(typeof opts?.maxDelay === 'number' ? opts.maxDelay : 1)
-            : ctx.createBiquadFilter()
+            : kind === 'compressor'
+              ? ctx.createDynamicsCompressor()
+              : ctx.createBiquadFilter()
     const id = this.nextId++
     this.nodes.set(id, node)
     if (opts) this.configureNode(id, opts)
@@ -346,6 +348,12 @@ export class WebAudioBackend implements IAudioBackend {
       else if (param === 'detune') target = node.detune
     } else if (node instanceof DelayNode) {
       if (param === 'delayTime') target = node.delayTime
+    } else if (node instanceof DynamicsCompressorNode) {
+      if (param === 'threshold') target = node.threshold
+      else if (param === 'knee') target = node.knee
+      else if (param === 'ratio') target = node.ratio
+      else if (param === 'attack') target = node.attack
+      else if (param === 'release') target = node.release
     }
     if (target) applyParamEvents(target, events)
   }
