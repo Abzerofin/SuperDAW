@@ -330,7 +330,7 @@ function AudioPane(): React.JSX.Element {
   // here is safe (it starts suspended until the first transport gesture).
   const [info, setInfo] = useState(audioEngine.contextInfo())
   useEffect(() => {
-    audioEngine.ensureContext()
+    void audioEngine.ensureStarted()
     setInfo(audioEngine.contextInfo())
     void audioDevices.refresh(false)
     // Web MIDI opens lazily; the settings pane is one of the surfaces
@@ -351,8 +351,8 @@ function AudioPane(): React.JSX.Element {
             value={preferences.audioSystem}
             onChange={(e) => preferences.set('audioSystem', e.target.value as AudioSystemChoice)}
           >
-            <option value="web">Web Audio — full features (recommended)</option>
-            <option value="native">Native (WASAPI) — lowest playback latency, experimental</option>
+            <option value="web">Web Audio — the default (recommended)</option>
+            <option value="native">Native (WASAPI) — lowest latency, experimental</option>
           </select>
           <p className="settings-dim">
             {nativeAudioActive()
@@ -360,10 +360,11 @@ function AudioPane(): React.JSX.Element {
               : preferences.audioSystem === 'native'
                 ? 'Takes effect the next time SuperDAW starts. '
                 : ''}
-            The native backend plays clips, automation and the mixer through a dedicated audio
-            process for lower latency. Builtin effects, instruments, recording and monitoring
-            still run on Web Audio features and are unavailable under it for now; any failure
-            falls back to Web Audio automatically.
+            The native backend runs playback, effects, instruments, recording and input
+            monitoring through a dedicated audio process, with input and output in one
+            callback — so monitoring is a fraction of the round trip Web Audio can manage.
+            Bounces and exports stay on Web Audio either way. Any failure falls back to Web
+            Audio automatically.
           </p>
         </div>
       )}

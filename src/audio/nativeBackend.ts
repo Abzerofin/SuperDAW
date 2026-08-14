@@ -11,9 +11,10 @@
  * ended voice ids, and health counters.
  *
  * `webAudio` is null — the escapes documented on the seam simply switch
- * off: builtin inserts bypass, instrument voices and monitoring stay
- * silent, analysis panes go dark. That is the honest experimental v1
- * surface; the phase-2 DSP ports close it.
+ * off. Phase 2's DSP ports closed the effect/instrument ones and phase 3
+ * closed input (openInput below, over the duplex stream); what remains
+ * off is the UI-facing AnalyserNode surface, so the plugin spectrum and
+ * wire-scope panes go dark under this backend.
  *
  * Construction contract: the wiring layer (renderer/state/nativeAudio)
  * sends 'start' and waits for 'started' BEFORE handing this backend to
@@ -25,6 +26,8 @@ import type {
   BackendLatencies,
   BackendNodeId,
   DeviceInfo,
+  InputHandle,
+  InputOpenConfig,
   NodeKind,
   NodeOptions,
   ParamEvent,
@@ -36,6 +39,11 @@ import type {
 } from './backendTypes'
 import type { HostCommand, HostEvent, HostStreamInfo, PortLike } from './hostProtocol'
 
+/** How long to wait for the host's `inputOpened` before giving up. Opening
+ *  may reopen the device in duplex mode, so it is not instant — but a host
+ *  that never answers must fail the gesture, not hang it forever. */
+const OPEN_INPUT_TIMEOUT_MS = 5000
+
 /**
  * Satisfies IAudioBackend STRUCTURALLY rather than by an `implements`
  * clause: naming the interface would drag backend.ts's Web Audio types
@@ -46,9 +54,12 @@ import type { HostCommand, HostEvent, HostStreamInfo, PortLike } from './hostPro
 export class NativeAudioBackend {
   readonly webAudio = null
 
-  private nextId = 1
+  /** 0 is the output and 1 the master fader, both pre-created by the
+   *  native engine — caller-minted ids start after them. */
+  private nextId = 2
   private info: HostStreamInfo | null = null
   private latencySec = 0
+  private inputLatencySec: number | null = null
   private xrunCount = 0
 
   /** Clock base: stream time at `baseWallMs`, re-based per frame. */
@@ -61,6 +72,17 @@ export class NativeAudioBackend {
   private endedListeners = new Set<(id: VoiceId) => void>()
   private deviceListeners = new Set<() => void>()
   private devices: DeviceInfo[] = []
+  /** Pending openInput round-trips, by node id. */
+  private inputOpens = new Map<
+    BackendNodeId,
+    (result: { ok: boolean; channelCount: number; message?: string }) => void
+  >()
+  private captureListeners = new Map<
+    BackendNodeId,
+    (chunk: Float32Array[], firstFrameTime: number) => void
+  >()
+  /** Pending capture flushes, by node id (see the seam's unsubscribe). */
+  private captureFlushes = new Map<BackendNodeId, () => void>()
 
   constructor(private port: PortLike) {
     port.onMessage((data) => this.onEvent(data as HostEvent))
@@ -87,10 +109,31 @@ export class NativeAudioBackend {
       for (const listener of this.deviceListeners) listener()
       return
     }
+    if (event.t === 'inputOpened') {
+      const settle = this.inputOpens.get(event.node)
+      this.inputOpens.delete(event.node)
+      settle?.(event)
+      return
+    }
+    if (event.t === 'capture') {
+      for (const chunk of event.chunks) {
+        this.captureListeners.get(chunk.node)?.(chunk.channels, chunk.startSec)
+      }
+      return
+    }
+    if (event.t === 'inputFlushed') {
+      // The host posted its final batch before this, and the port keeps
+      // order — so by now the listener has seen everything.
+      const settle = this.captureFlushes.get(event.node)
+      this.captureFlushes.delete(event.node)
+      settle?.()
+      return
+    }
     if (event.t === 'frame') {
       this.baseStream = event.now
       this.baseWallMs = performance.now()
       this.latencySec = event.latencySec
+      this.inputLatencySec = event.inputLatencySec > 0 ? event.inputLatencySec : null
       this.xrunCount = event.xruns
       for (const [tapId, data] of Object.entries(event.taps)) {
         this.tapSnapshots.set(Number(tapId), data)
@@ -116,7 +159,9 @@ export class NativeAudioBackend {
   }
 
   latencies(): BackendLatencies {
-    return { outputSec: this.latencySec, inputSec: null }
+    // inputSec stays null until the stream is actually duplex — the
+    // capture buffer depth is meaningless while there is no capture side.
+    return { outputSec: this.latencySec, inputSec: this.inputLatencySec }
   }
 
   async setOutputDevice(deviceId: string | null): Promise<boolean> {
@@ -170,6 +215,10 @@ export class NativeAudioBackend {
   }
 
   masterNode(): BackendNodeId {
+    return 1
+  }
+
+  outputNode(): BackendNodeId {
     return 0
   }
 
@@ -246,5 +295,58 @@ export class NativeAudioBackend {
     this.tapFrames.delete(id)
     this.tapSnapshots.delete(id)
     this.send({ t: 'disposeTap', id })
+  }
+
+  async openInput(config: InputOpenConfig): Promise<InputHandle> {
+    const node = this.nextId++
+    const opened = new Promise<{ ok: boolean; channelCount: number; message?: string }>(
+      (resolve) => {
+        this.inputOpens.set(node, resolve)
+        setTimeout(() => {
+          if (!this.inputOpens.delete(node)) return
+          resolve({ ok: false, channelCount: 0, message: 'the audio process did not answer' })
+        }, OPEN_INPUT_TIMEOUT_MS)
+      }
+    )
+    this.send({
+      t: 'openInput',
+      node,
+      mode: config.mode,
+      channel: config.channel,
+      deviceId: config.deviceId ?? null
+    })
+    const result = await opened
+    if (!result.ok) {
+      this.send({ t: 'closeInput', node })
+      throw new Error(result.message ?? 'no audio input is available')
+    }
+    return {
+      node,
+      channelCount: result.channelCount,
+      sampleRate: this.info?.sampleRate ?? 0,
+      capture: (listener) => {
+        this.captureListeners.set(node, listener)
+        this.send({ t: 'setInputCapture', node, enabled: true })
+        return async () => {
+          if (!this.captureListeners.has(node)) return
+          const flushed = new Promise<void>((resolve) => {
+            this.captureFlushes.set(node, resolve)
+            // A host that stops answering must not hang a Stop button.
+            setTimeout(() => {
+              if (this.captureFlushes.delete(node)) resolve()
+            }, OPEN_INPUT_TIMEOUT_MS)
+          })
+          this.send({ t: 'setInputCapture', node, enabled: false })
+          await flushed
+          this.captureListeners.delete(node)
+        }
+      },
+      dispose: () => {
+        this.captureListeners.delete(node)
+        this.captureFlushes.get(node)?.()
+        this.captureFlushes.delete(node)
+        this.send({ t: 'closeInput', node })
+      }
+    }
   }
 }

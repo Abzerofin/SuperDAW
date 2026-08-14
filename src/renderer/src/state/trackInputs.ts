@@ -1,12 +1,7 @@
 import { useSyncExternalStore } from 'react'
 import type { TrackId } from '@core/model/types'
-import {
-  DEFAULT_INPUT_CHANNELS,
-  buildInputTap,
-  streamChannelCount,
-  type InputChannelConfig,
-  type InputTap
-} from '@audio/input'
+import { DEFAULT_INPUT_CHANNELS, type InputChannelConfig } from '@audio/input'
+import type { InputHandle } from '@audio/backendTypes'
 import { audioEngine } from './audioInstance'
 import { audioDevices } from './audioDevices'
 import { appStorageGet, appStorageSet } from './appStorage'
@@ -69,17 +64,31 @@ function sanitizeConfig(config: Partial<TrackInputConfig>): TrackInputConfig {
 
 const STORAGE_KEY = 'trackInputs'
 
-/** Streams are shared per device and reference-counted across tracks. */
-interface PooledStream {
-  stream: MediaStream
-  refs: number
+/**
+ * Why an input would not open, in the user's terms. A denied capture
+ * permission arrives as a DOMException from the Web Audio backend; the
+ * native backend reports its own reason (no capture device, or an audio
+ * process that stopped answering).
+ */
+export function describeInputError(error: unknown): string {
+  if (error instanceof DOMException && error.name === 'NotAllowedError') {
+    return 'Microphone access was denied'
+  }
+  return `Could not open the input: ${error instanceof Error ? error.message : String(error)}`
 }
 
 class TrackInputStore {
   private configs = new Map<TrackId, TrackInputConfig>()
-  private taps = new Map<TrackId, { tap: InputTap; deviceKey: string }>()
-  private pool = new Map<string, PooledStream>()
-  private pending = new Map<string, Promise<MediaStream>>()
+  /** Monitoring inputs, by track — recording opens its own (see below). */
+  private monitors = new Map<TrackId, InputHandle>()
+  /**
+   * Channels each device reported the last time an input opened on it, so
+   * the panel's channel list survives between opens. Device sharing and
+   * reference counting live in the backend now (§7: `openInput` replaced
+   * the getUserMedia path wholesale), which is what lets the native
+   * duplex stream serve every track from one capture callback.
+   */
+  private channelCounts = new Map<string, number>()
   private loaded = false
   lastError: string | null = null
 
@@ -94,19 +103,18 @@ class TrackInputStore {
     return this.configs.get(trackId) ?? DEFAULT_CONFIG
   }
 
-  /** Channels the track's device actually offers (null until a stream opens). */
+  /** Channels the track's device actually offers (null until one opens). */
   channelCountOf(trackId: TrackId): number | null {
-    const entry = this.taps.get(trackId)
-    return entry ? entry.tap.channelCount : null
+    return this.monitors.get(trackId)?.channelCount ?? null
   }
 
   isMonitoring(trackId: TrackId): boolean {
     return this.configOf(trackId).monitor
   }
 
-  /** Any live input tap at all — drives meter liveness while stopped. */
+  /** Any live input at all — drives meter liveness while stopped. */
   get anyMonitoring(): boolean {
-    return this.taps.size > 0
+    return this.monitors.size > 0
   }
 
   private async load(): Promise<void> {
@@ -123,7 +131,7 @@ class TrackInputStore {
   /** Update a track's input settings; a live monitor re-taps immediately. */
   async setConfig(trackId: TrackId, patch: Partial<TrackInputConfig>): Promise<void> {
     const next = { ...this.configOf(trackId), ...patch }
-    const wasMonitoring = this.taps.has(trackId)
+    const wasMonitoring = this.monitors.has(trackId)
     this.configs.set(trackId, next)
     this.persist()
     this.emit()
@@ -142,7 +150,7 @@ class TrackInputStore {
 
   /** Stop monitoring every track (used when tearing down / closing a project). */
   async stopAllMonitors(): Promise<void> {
-    for (const trackId of [...this.taps.keys()]) {
+    for (const trackId of [...this.monitors.keys()]) {
       await this.stopMonitor(trackId)
       this.configs.set(trackId, { ...this.configOf(trackId), monitor: false })
     }
@@ -152,91 +160,46 @@ class TrackInputStore {
   private async startMonitor(trackId: TrackId): Promise<void> {
     const config = this.configOf(trackId)
     try {
-      const { stream, key } = await this.acquire(config.deviceId)
-      const ctx = audioEngine.ensureContext()
-      if (ctx.state === 'suspended') await ctx.resume()
-      const tap = buildInputTap(ctx, stream, config.channels)
-      audioEngine.setMonitorSource(trackId, tap.output)
-      this.taps.set(trackId, { tap, deviceKey: key })
+      const handle = await this.openFor(config)
+      // The ENGINE connects handle.node into the chain — it owns the
+      // connection, this store owns the handle (see setMonitorInput).
+      audioEngine.setMonitorInput(trackId, handle)
+      this.monitors.set(trackId, handle)
       this.lastError = null
     } catch (error) {
       this.configs.set(trackId, { ...config, monitor: false })
-      this.fail(
-        error instanceof DOMException && error.name === 'NotAllowedError'
-          ? 'Microphone access was denied — monitoring is off'
-          : `Could not open the input: ${error instanceof Error ? error.message : String(error)}`
-      )
+      this.fail(describeInputError(error))
     }
     this.emit()
   }
 
   private async stopMonitor(trackId: TrackId): Promise<void> {
-    const entry = this.taps.get(trackId)
-    if (!entry) return
-    audioEngine.setMonitorSource(trackId, null)
-    entry.tap.dispose()
-    this.taps.delete(trackId)
-    this.release(entry.deviceKey)
+    const handle = this.monitors.get(trackId)
+    if (!handle) return
+    audioEngine.setMonitorInput(trackId, null)
+    handle.dispose()
+    this.monitors.delete(trackId)
   }
 
-  // ---------- Stream pool (shared per device, reference-counted) ----------
-
-  /** Open (or reuse) the stream for a track's device. Caller must release. */
-  async acquire(deviceId: string | null): Promise<{ stream: MediaStream; key: string }> {
-    // null follows the global setting, so resolve it to a concrete key.
-    const effective = deviceId ?? audioDevices.inputDeviceId
-    const key = effective ?? 'default'
-    const existing = this.pool.get(key)
-    if (existing) {
-      existing.refs++
-      return { stream: existing.stream, key }
-    }
-    // Concurrent acquires of the same device share one getUserMedia call.
-    let inflight = this.pending.get(key)
-    if (!inflight) {
-      inflight = navigator.mediaDevices.getUserMedia({
-        audio: {
-          echoCancellation: false,
-          noiseSuppression: false,
-          autoGainControl: false,
-          // Ask for a stereo-or-wider capture so multi-input interfaces
-          // expose their channels; mono devices simply report 1.
-          channelCount: { ideal: 2 },
-          ...(effective ? { deviceId: { ideal: effective } } : {})
-        }
-      })
-      this.pending.set(key, inflight)
-    }
-    try {
-      const stream = await inflight
-      const pooled = this.pool.get(key)
-      if (pooled) {
-        pooled.refs++
-        return { stream: pooled.stream, key }
-      }
-      this.pool.set(key, { stream, refs: 1 })
-      return { stream, key }
-    } finally {
-      this.pending.delete(key)
-    }
+  /**
+   * Open the live input a config describes. `deviceId: null` follows the
+   * global Settings ▸ Audio selection — resolved HERE, because the backend
+   * seam deliberately knows nothing about app state.
+   */
+  async openFor(config: TrackInputConfig): Promise<InputHandle> {
+    const deviceId = config.deviceId ?? audioDevices.inputDeviceId
+    const handle = await audioEngine.openInput({ ...config.channels, deviceId })
+    this.channelCounts.set(deviceId ?? 'default', handle.channelCount)
+    this.emit()
+    return handle
   }
 
-  release(key: string): void {
-    const pooled = this.pool.get(key)
-    if (!pooled) return
-    pooled.refs--
-    if (pooled.refs > 0) return
-    pooled.stream.getTracks().forEach((t) => t.stop())
-    this.pool.delete(key)
-  }
-
-  /** Channels the device behind a track currently reports (for the UI). */
+  /** Channels the device behind a track last reported (for the UI). */
   channelsAvailable(trackId: TrackId): number | null {
-    const entry = this.taps.get(trackId)
-    if (entry) return entry.tap.channelCount
+    const monitoring = this.monitors.get(trackId)
+    if (monitoring) return monitoring.channelCount
     const key = this.configOf(trackId).deviceId ?? audioDevices.inputDeviceId ?? 'default'
-    const pooled = this.pool.get(key)
-    return pooled ? streamChannelCount(pooled.stream) : null
+    return this.channelCounts.get(key) ?? null
   }
 
   private persist(): void {

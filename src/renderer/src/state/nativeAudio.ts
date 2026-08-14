@@ -2,7 +2,9 @@ import { NativeAudioBackend } from '@audio/nativeBackend'
 import type { HostEvent, PortLike } from '@audio/hostProtocol'
 import { audioEngine } from './audioInstance'
 import { preferences } from './preferences'
+import { recording } from './recording'
 import { statusNotice } from './statusNotice'
+import { trackInputs } from './trackInputs'
 
 /**
  * Native-backend lifecycle (Settings ▸ Audio ▸ Audio system, experimental;
@@ -81,8 +83,8 @@ export function initNativeAudio(): void {
       audioEngine.setBackendFactory(() => backend)
       statusNotice.show(
         `Native audio active (WASAPI${data.info.exclusive ? ' exclusive' : ''}, ` +
-          `${data.info.sampleRate} Hz, ${data.info.periodFrames}-frame periods). Experimental: ` +
-          'builtin effects, instruments, recording and monitoring stay on Web Audio features.'
+          `${data.info.sampleRate} Hz, ${data.info.periodFrames}-frame periods). ` +
+          'Experimental: bounces and exports still render through Web Audio.'
       )
     }
     raw.addEventListener('message', decide)
@@ -96,6 +98,12 @@ export function initNativeAudio(): void {
     active = null
     // Backend gone: rebuild the engine's world on Web Audio at next use.
     audioEngine.resetBackend(null)
+    // Every live input belonged to the dead process. End the take (its
+    // audio so far is real and gets committed) and drop the monitors,
+    // rather than leaving the UI claiming to monitor silence — the user
+    // re-arms deliberately, which is the same rule as at launch.
+    if (recording.recording || recording.countingIn) recording.stop()
+    void trackInputs.stopAllMonitors()
     statusNotice.show('The native audio process stopped — switched back to Web Audio.')
   })
 

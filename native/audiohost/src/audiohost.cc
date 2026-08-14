@@ -58,6 +58,27 @@ struct HostState {
   uint32_t channels = 0;
   uint32_t periodFrames = 0;
   uint32_t periodCount = 0;
+  /**
+   * Capture side of the duplex stream (phase 3). 0 channels = playback
+   * only, which is what the stream opens as until the first input is
+   * asked for — holding the microphone open for a whole session (and
+   * lighting the OS's in-use indicator) to serve a track that may never
+   * arm would be the wrong default.
+   */
+  uint32_t inputChannels = 0;
+  uint32_t inputPeriodFrames = 0;
+  uint32_t inputPeriodCount = 0;
+  ma_device_id inputDeviceId{};
+  bool haveInputDeviceId = false;
+  bool duplex = false;
+  /**
+   * Stream time already elapsed under PREVIOUS device handles. WASAPI
+   * cannot re-point a live stream, so switching output — or upgrading to
+   * duplex when an input opens — reopens it and resets the frame counter;
+   * the clock the transport and every scheduled voice run on must not
+   * jump backwards when that happens.
+   */
+  double timeBase = 0.0;
 };
 
 HostState* g_host = nullptr;
@@ -69,11 +90,16 @@ HostState* g_host = nullptr;
  * The stage-1 test tone remains as an additive debug source. Frame-count
  * irregularity is tracked as a health signal, not treated as an error.
  */
-void DataCallback(ma_device* device, void* output, const void* /*input*/, ma_uint32 frameCount) {
+void DataCallback(ma_device* device, void* output, const void* input, ma_uint32 frameCount) {
   auto* host = static_cast<HostState*>(device->pUserData);
   auto* out = static_cast<float*>(output);
   const uint32_t channels = host->channels;
   const double sampleRate = static_cast<double>(host->sampleRate);
+  // Duplex: the capture frames for THIS callback arrive alongside the
+  // output buffer, so monitoring is pure in-callback DSP — no second
+  // stream, no capture stack, no IPC (§7).
+  const auto* in = static_cast<const float*>(input);
+  const uint32_t inChannels = host->inputChannels;
 
   std::memset(out, 0, sizeof(float) * frameCount * channels);
 
@@ -82,7 +108,11 @@ void DataCallback(ma_device* device, void* output, const void* /*input*/, ma_uin
   while (offset < frameCount) {
     const ma_uint32 n =
         std::min<ma_uint32>(sdengine::kBlockFrames, frameCount - offset);
-    const double blockTime = static_cast<double>(framesDone + offset) / sampleRate;
+    const double blockTime =
+        host->timeBase + static_cast<double>(framesDone + offset) / sampleRate;
+    host->engine.SetInputBlock(
+        in != nullptr && inChannels > 0 ? in + static_cast<size_t>(offset) * inChannels : nullptr,
+        inChannels, n);
     host->engine.RenderBlock(blockTime, n, sampleRate, host->engineBlock);
     for (ma_uint32 i = 0; i < n; i++) {
       for (uint32_t ch = 0; ch < channels; ch++) {
@@ -216,6 +246,9 @@ Napi::Value Start(const Napi::CallbackInfo& info) {
   uint32_t requestedRate = 0;
   uint32_t requestedFrames = 0;
   bool exclusive = false;
+  bool wantInput = false;
+  ma_device_id inputDeviceId{};
+  bool haveInputDeviceId = false;
   if (info.Length() > 0 && info[0].IsObject()) {
     Napi::Object opts = info[0].As<Napi::Object>();
     if (opts.Has("deviceId") && opts.Get("deviceId").IsString()) {
@@ -230,34 +263,68 @@ Napi::Value Start(const Napi::CallbackInfo& info) {
     if (opts.Has("exclusive") && opts.Get("exclusive").IsBoolean()) {
       exclusive = opts.Get("exclusive").As<Napi::Boolean>();
     }
+    if (opts.Has("input") && opts.Get("input").IsBoolean()) {
+      wantInput = opts.Get("input").As<Napi::Boolean>();
+    }
+    if (opts.Has("inputDeviceId") && opts.Get("inputDeviceId").IsString()) {
+      haveInputDeviceId =
+          HexToDeviceId(opts.Get("inputDeviceId").As<Napi::String>(), &inputDeviceId);
+    }
   }
 
   if (host->deviceReady) {
     ma_device_uninit(&host->device);
     host->deviceReady = false;
   }
+  // Carry the elapsed stream time across the reopen (see HostState.timeBase).
+  if (host->sampleRate > 0) {
+    host->timeBase +=
+        static_cast<double>(host->framesRendered.load()) / static_cast<double>(host->sampleRate);
+  }
 
-  ma_device_config config = ma_device_config_init(ma_device_type_playback);
-  config.playback.format = ma_format_f32;
-  config.playback.channels = 2;
-  if (haveDeviceId) config.playback.pDeviceID = &deviceId;
-  if (requestedRate > 0) config.sampleRate = requestedRate;
-  if (requestedFrames > 0) config.periodSizeInFrames = requestedFrames;
-  // The design's default: WASAPI shared with IAudioClient3 low-latency
-  // periods. Exclusive mode is the opt-in "lowest latency" toggle.
-  config.performanceProfile = ma_performance_profile_low_latency;
-  config.wasapi.usage = ma_wasapi_usage_pro_audio;
-  if (exclusive) config.playback.shareMode = ma_share_mode_exclusive;
-  config.dataCallback = DataCallback;
-  config.pUserData = host;
+  auto buildConfig = [&](bool withInput) {
+    ma_device_config config = ma_device_config_init(withInput ? ma_device_type_duplex
+                                                              : ma_device_type_playback);
+    config.playback.format = ma_format_f32;
+    config.playback.channels = 2;
+    if (haveDeviceId) config.playback.pDeviceID = &deviceId;
+    if (withInput) {
+      config.capture.format = ma_format_f32;
+      // 0 = whatever the interface natively offers, so a multi-input box
+      // presents all of its channels for per-track selection.
+      config.capture.channels = 0;
+      if (haveInputDeviceId) config.capture.pDeviceID = &inputDeviceId;
+      if (exclusive) config.capture.shareMode = ma_share_mode_exclusive;
+    }
+    if (requestedRate > 0) config.sampleRate = requestedRate;
+    if (requestedFrames > 0) config.periodSizeInFrames = requestedFrames;
+    // The design's default: WASAPI shared with IAudioClient3 low-latency
+    // periods. Exclusive mode is the opt-in "lowest latency" toggle.
+    config.performanceProfile = ma_performance_profile_low_latency;
+    config.wasapi.usage = ma_wasapi_usage_pro_audio;
+    if (exclusive) config.playback.shareMode = ma_share_mode_exclusive;
+    config.dataCallback = DataCallback;
+    config.pUserData = host;
+    return config;
+  };
 
+  bool duplex = wantInput;
+  ma_device_config config = buildConfig(duplex);
   ma_result result = ma_device_init(&host->context, &config, &host->device);
   if (result != MA_SUCCESS && exclusive) {
     // Exclusive negotiation fails on plenty of drivers — fall back to
     // shared rather than failing the start (the caller sees which via
     // the returned `exclusive` flag).
     exclusive = false;
-    config.playback.shareMode = ma_share_mode_shared;
+    config = buildConfig(duplex);
+    result = ma_device_init(&host->context, &config, &host->device);
+  }
+  if (result != MA_SUCCESS && duplex) {
+    // No usable capture device (or the driver refuses duplex): keep
+    // PLAYBACK alive rather than taking the whole stream down. The caller
+    // sees inputChannels === 0 and reports that input is unavailable.
+    duplex = false;
+    config = buildConfig(false);
     result = ma_device_init(&host->context, &config, &host->device);
   }
   if (result != MA_SUCCESS) {
@@ -269,6 +336,12 @@ Napi::Value Start(const Napi::CallbackInfo& info) {
   host->channels = host->device.playback.channels;
   host->periodFrames = host->device.playback.internalPeriodSizeInFrames;
   host->periodCount = host->device.playback.internalPeriods;
+  host->duplex = duplex;
+  host->inputChannels = duplex ? host->device.capture.channels : 0;
+  host->inputPeriodFrames = duplex ? host->device.capture.internalPeriodSizeInFrames : 0;
+  host->inputPeriodCount = duplex ? host->device.capture.internalPeriods : 0;
+  host->haveInputDeviceId = haveInputDeviceId;
+  if (haveInputDeviceId) host->inputDeviceId = inputDeviceId;
   host->framesRendered.store(0);
   host->callbacks.store(0);
   host->xruns.store(0);
@@ -288,6 +361,7 @@ Napi::Value Start(const Napi::CallbackInfo& info) {
   out.Set("periodFrames", host->periodFrames);
   out.Set("periodCount", host->periodCount);
   out.Set("exclusive", exclusive);
+  out.Set("inputChannels", host->inputChannels);
   return out;
 }
 
@@ -300,12 +374,14 @@ Napi::Value Stop(const Napi::CallbackInfo& info) {
   return env.Undefined();
 }
 
-/** now() → stream time in seconds (rendered frames / sample rate). */
+/** now() → stream time in seconds, monotonic across device reopens. */
 Napi::Value Now(const Napi::CallbackInfo& info) {
   Napi::Env env = info.Env();
-  if (g_host == nullptr || g_host->sampleRate == 0) return Napi::Number::New(env, 0);
+  if (g_host == nullptr) return Napi::Number::New(env, 0);
+  if (g_host->sampleRate == 0) return Napi::Number::New(env, g_host->timeBase);
   const double frames = static_cast<double>(g_host->framesRendered.load(std::memory_order_relaxed));
-  return Napi::Number::New(env, frames / static_cast<double>(g_host->sampleRate));
+  return Napi::Number::New(env,
+                           g_host->timeBase + frames / static_cast<double>(g_host->sampleRate));
 }
 
 /**
@@ -318,6 +394,28 @@ Napi::Value LatencySec(const Napi::CallbackInfo& info) {
   if (g_host == nullptr || g_host->sampleRate == 0) return Napi::Number::New(env, 0);
   const double frames = static_cast<double>(g_host->periodFrames) * g_host->periodCount;
   return Napi::Number::New(env, frames / static_cast<double>(g_host->sampleRate));
+}
+
+/**
+ * inputLatencySec() → the capture buffer depth (period × count / rate),
+ * i.e. how far behind the stream clock a captured frame arrives. 0 when
+ * the stream is playback-only. The loopback calibration measures the true
+ * end-to-end figure on top of this, exactly as with the output side.
+ */
+Napi::Value InputLatencySec(const Napi::CallbackInfo& info) {
+  Napi::Env env = info.Env();
+  if (g_host == nullptr || g_host->sampleRate == 0 || !g_host->duplex) {
+    return Napi::Number::New(env, 0);
+  }
+  const double frames =
+      static_cast<double>(g_host->inputPeriodFrames) * g_host->inputPeriodCount;
+  return Napi::Number::New(env, frames / static_cast<double>(g_host->sampleRate));
+}
+
+/** inputChannels() → channels the open capture side offers (0 = none). */
+Napi::Value InputChannels(const Napi::CallbackInfo& info) {
+  Napi::Env env = info.Env();
+  return Napi::Number::New(env, g_host == nullptr ? 0 : g_host->inputChannels);
 }
 
 Napi::Value Stats(const Napi::CallbackInfo& info) {
@@ -389,21 +487,30 @@ sdengine::ParamEvent UnpackEvent(const Napi::Object& raw) {
   return event;
 }
 
-/** createNode(id, kind, opts?) — ids are caller-minted (≥ 1); opts.type
- *  configures a biquad's filter type. */
+/** createNode(id, kind, opts?) — ids are caller-minted (≥ 2; 0 and 1 are
+ *  the output and the master fader). opts.type configures a biquad's
+ *  filter type or an input's 'mono'/'stereo' mode, opts.channel an
+ *  input's first hardware channel. */
 Napi::Value CreateNode(const Napi::CallbackInfo& info) {
   Napi::Env env = info.Env();
   const uint32_t id = info[0].As<Napi::Number>().Uint32Value();
   const std::string kind = info[1].As<Napi::String>();
-  std::string biquadType;
+  std::string typeName;
   double maxDelay = 1;
+  uint32_t channel = 0;
   if (info.Length() > 2 && info[2].IsObject()) {
     auto opts = info[2].As<Napi::Object>();
     if (opts.Has("type") && opts.Get("type").IsString()) {
-      biquadType = opts.Get("type").As<Napi::String>();
+      typeName = opts.Get("type").As<Napi::String>();
+    }
+    if (opts.Has("mode") && opts.Get("mode").IsString()) {
+      typeName = opts.Get("mode").As<Napi::String>();
     }
     if (opts.Has("maxDelay") && opts.Get("maxDelay").IsNumber()) {
       maxDelay = opts.Get("maxDelay").As<Napi::Number>().DoubleValue();
+    }
+    if (opts.Has("channel") && opts.Get("channel").IsNumber()) {
+      channel = opts.Get("channel").As<Napi::Number>().Uint32Value();
     }
   }
   const sdengine::NodeKind nodeKind =
@@ -413,8 +520,9 @@ Napi::Value CreateNode(const Napi::CallbackInfo& info) {
       : kind == "compressor" ? sdengine::NodeKind::Compressor
       : kind == "convolver"  ? sdengine::NodeKind::Convolver
       : kind == "oscillator" ? sdengine::NodeKind::Oscillator
+      : kind == "input"      ? sdengine::NodeKind::Input
                              : sdengine::NodeKind::Gain;
-  EngineOf(env).CreateNode(id, nodeKind, biquadType, maxDelay);
+  EngineOf(env).CreateNode(id, nodeKind, typeName, maxDelay, channel);
   return env.Undefined();
 }
 
@@ -437,8 +545,54 @@ Napi::Value ConfigureNode(const Napi::CallbackInfo& info) {
                               : 0.0;
       EngineOf(env).SetConvolverBuffer(id, opts.Get("buffer").As<Napi::String>(), rate);
     }
+    if (opts.Has("mode") && opts.Get("mode").IsString()) {
+      const uint32_t channel = opts.Has("channel") && opts.Get("channel").IsNumber()
+                                   ? opts.Get("channel").As<Napi::Number>().Uint32Value()
+                                   : 0;
+      EngineOf(env).ConfigureInput(id, opts.Get("mode").As<Napi::String>(), channel);
+    }
   }
   return env.Undefined();
+}
+
+/**
+ * setInputCapture(nodeId, enabled, capacityFrames) — start/stop recording
+ * an input node. The ring is sized for capacityFrames (the host asks for
+ * seconds' worth) so a JS-side drain stall costs latency, not audio.
+ */
+Napi::Value SetInputCapture(const Napi::CallbackInfo& info) {
+  Napi::Env env = info.Env();
+  const uint32_t id = info[0].As<Napi::Number>().Uint32Value();
+  const bool enabled = info[1].As<Napi::Boolean>();
+  const uint32_t capacity = info.Length() > 2 && info[2].IsNumber()
+                                ? info[2].As<Napi::Number>().Uint32Value()
+                                : 48000;
+  EngineOf(env).SetInputCapture(id, enabled, capacity);
+  return env.Undefined();
+}
+
+/** drainCapture() → [{node, startSec, channels: [Float32Array × 2]}] */
+Napi::Value DrainCapture(const Napi::CallbackInfo& info) {
+  Napi::Env env = info.Env();
+  const auto chunks = EngineOf(env).DrainCapture();
+  Napi::Array out = Napi::Array::New(env, chunks.size());
+  for (size_t i = 0; i < chunks.size(); i++) {
+    const auto& chunk = chunks[i];
+    Napi::Object entry = Napi::Object::New(env);
+    entry.Set("node", chunk.node);
+    entry.Set("startSec", chunk.startSec);
+    Napi::Array channels = Napi::Array::New(env, 2);
+    auto copy = [&](const std::vector<float>& src) {
+      auto array = Napi::Float32Array::New(env, src.size());
+      std::memcpy(array.Data(), src.data(), src.size() * sizeof(float));
+      return array;
+    };
+    channels.Set(0u, copy(chunk.left));
+    channels.Set(1u, copy(chunk.right));
+    entry.Set("channels", channels);
+    out.Set(static_cast<uint32_t>(i), entry);
+  }
+  return out;
 }
 
 Napi::Value ConnectNodes(const Napi::CallbackInfo& info) {
@@ -597,10 +751,13 @@ Napi::Value DrainEnded(const Napi::CallbackInfo& info) {
 }
 
 /**
- * renderOffline(startTime, frames, sampleRate) → Float32Array (stereo
- * interleaved). The verification hook: the identical engine renders on
- * the JS thread, so Node tests (and the parity harness) can diff its
- * output numerically. Only valid while the device is stopped.
+ * renderOffline(startTime, frames, sampleRate, input?, inputChannels?) →
+ * Float32Array (stereo interleaved). The verification hook: the identical
+ * engine renders on the JS thread, so Node tests (and the parity harness)
+ * can diff its output numerically. `input` stands where the duplex
+ * callback's capture side would be — interleaved `frames × inputChannels`
+ * — so the input path is testable without a microphone. Only valid while
+ * the device is stopped.
  */
 Napi::Value RenderOffline(const Napi::CallbackInfo& info) {
   Napi::Env env = info.Env();
@@ -612,8 +769,22 @@ Napi::Value RenderOffline(const Napi::CallbackInfo& info) {
   const double startTime = info[0].As<Napi::Number>().DoubleValue();
   const uint32_t frames = info[1].As<Napi::Number>().Uint32Value();
   const double sampleRate = info[2].As<Napi::Number>().DoubleValue();
+  const float* input = nullptr;
+  uint32_t inputChannels = 0;
+  if (info.Length() > 3 && info[3].IsTypedArray()) {
+    auto array = info[3].As<Napi::Float32Array>();
+    inputChannels = info.Length() > 4 && info[4].IsNumber()
+                        ? info[4].As<Napi::Number>().Uint32Value()
+                        : 1;
+    if (inputChannels > 0 &&
+        array.ElementLength() >= static_cast<size_t>(frames) * inputChannels) {
+      input = array.Data();
+    } else {
+      inputChannels = 0;
+    }
+  }
   auto out = Napi::Float32Array::New(env, static_cast<size_t>(frames) * 2);
-  EngineOf(env).RenderOffline(startTime, frames, sampleRate, out.Data());
+  EngineOf(env).RenderOffline(startTime, frames, sampleRate, out.Data(), input, inputChannels);
   return out;
 }
 
@@ -626,6 +797,8 @@ static Napi::Object InitModule(Napi::Env env, Napi::Object exports) {
   exports.Set("stop", Napi::Function::New(env, Stop));
   exports.Set("now", Napi::Function::New(env, Now));
   exports.Set("latencySec", Napi::Function::New(env, LatencySec));
+  exports.Set("inputLatencySec", Napi::Function::New(env, InputLatencySec));
+  exports.Set("inputChannels", Napi::Function::New(env, InputChannels));
   exports.Set("stats", Napi::Function::New(env, Stats));
   exports.Set("setTestTone", Napi::Function::New(env, SetTestTone));
   exports.Set("createNode", Napi::Function::New(env, CreateNode));
@@ -645,6 +818,8 @@ static Napi::Object InitModule(Napi::Env env, Napi::Object exports) {
   exports.Set("createTap", Napi::Function::New(env, CreateTap));
   exports.Set("readTap", Napi::Function::New(env, ReadTap));
   exports.Set("disposeTap", Napi::Function::New(env, DisposeTap));
+  exports.Set("setInputCapture", Napi::Function::New(env, SetInputCapture));
+  exports.Set("drainCapture", Napi::Function::New(env, DrainCapture));
   exports.Set("drainEnded", Napi::Function::New(env, DrainEnded));
   exports.Set("renderOffline", Napi::Function::New(env, RenderOffline));
   return exports;

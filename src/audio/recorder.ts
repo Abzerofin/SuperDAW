@@ -1,116 +1,97 @@
 /**
- * Raw PCM capture from any AudioNode via an AudioWorklet. Chunks stream to
- * the main thread and accumulate; stop() concatenates per channel.
+ * Raw PCM capture: chunks stream in from an input handle and accumulate;
+ * stop() concatenates per channel.
  *
- * The caller supplies the input node — normally a channel-selection tap
- * (audio/input.ts) — so a recorder captures exactly the channels the track
- * is set to, and the same tap can feed monitoring. Recording itself never
+ * How the chunks are PRODUCED is the backend's business (a capture
+ * AudioWorklet on Web Audio, the duplex stream's own callback natively) —
+ * this side only ever sees `Float32Array[]` plus the stream time of each
+ * batch's first frame, which is what places a take sample-accurately
+ * instead of guessing when capture actually spun up.
+ *
+ * The handle is normally a channel-selection tap (audio/input.ts
+ * semantics), so a recorder captures exactly the channels the track is set
+ * to and the same selection can feed monitoring. Recording itself never
  * routes to the speakers; monitoring is a separate, explicit connection.
  */
 
-const WORKLET_SOURCE = `
-class SuperdawCapture extends AudioWorkletProcessor {
-  constructor() {
-    super()
-    this.announced = false
-  }
-  process(inputs) {
-    const input = inputs[0]
-    if (input.length > 0) {
-      // The context time of the first captured sample, announced once —
-      // this is what lets a take be placed sample-accurately instead of
-      // guessing when the worklet actually spun up.
-      if (!this.announced) {
-        this.announced = true
-        this.port.postMessage({ startSec: currentTime })
-      }
-      this.port.postMessage(input.map((channel) => channel.slice(0)))
-    }
-    return true
-  }
-}
-registerProcessor('superdaw-capture', SuperdawCapture)
-`
-
-let workletReady: Promise<void> | null = null
-
-function ensureWorklet(ctx: AudioContext): Promise<void> {
-  if (!workletReady) {
-    const url = URL.createObjectURL(new Blob([WORKLET_SOURCE], { type: 'text/javascript' }))
-    workletReady = ctx.audioWorklet.addModule(url).finally(() => URL.revokeObjectURL(url))
-  }
-  return workletReady
-}
+import type { InputHandle } from './backendTypes'
 
 export interface Recording {
   readonly channels: Float32Array[]
   readonly sampleRate: number
   readonly seconds: number
-  /** AudioContext time of the first captured sample; null if none arrived. */
+  /** Stream time of the first captured sample; null if none arrived. */
   readonly startSec: number | null
+  /** Frames of silence padded in for capture the backend could not keep
+   *  up with — 0 on a healthy take. */
+  readonly droppedFrames: number
 }
 
 export class Recorder {
   private chunks: Float32Array[][] = [] // [chunkIndex][channel]
   private startSec: number | null = null
-  private input: AudioNode | null = null
-  private capture: AudioWorkletNode | null = null
-  private sink: GainNode | null = null
-  private ctx: AudioContext | null = null
+  /** Stream time the next chunk is expected to start at. */
+  private nextSec: number | null = null
+  private droppedFrames = 0
+  private sampleRate = 0
+  private unsubscribe: (() => Promise<void>) | null = null
 
   get isCapturing(): boolean {
-    return this.capture !== null
+    return this.unsubscribe !== null
   }
 
-  /** `input` is the node to capture (a channel-selection tap, or any node). */
-  async start(ctx: AudioContext, input: AudioNode): Promise<void> {
-    if (this.capture) throw new Error('Already recording')
-    await ensureWorklet(ctx)
-    this.ctx = ctx
+  /** `input` is the live input to capture (a channel selection, normally). */
+  start(input: InputHandle): void {
+    if (this.unsubscribe) throw new Error('Already recording')
     this.chunks = []
     this.startSec = null
-    this.input = input
-    this.capture = new AudioWorkletNode(ctx, 'superdaw-capture', {
-      numberOfInputs: 1,
-      numberOfOutputs: 1
-    })
-    this.capture.port.onmessage = (
-      event: MessageEvent<Float32Array[] | { startSec: number }>
-    ) => {
-      if (Array.isArray(event.data)) this.chunks.push(event.data)
-      else if (typeof event.data?.startSec === 'number') this.startSec = event.data.startSec
-    }
-    // A silent sink keeps the worklet pulled by the graph without being audible.
-    this.sink = ctx.createGain()
-    this.sink.gain.value = 0
-    this.input.connect(this.capture)
-    this.capture.connect(this.sink)
-    this.sink.connect(ctx.destination)
+    this.nextSec = null
+    this.droppedFrames = 0
+    this.sampleRate = input.sampleRate
+    this.unsubscribe = input.capture((chunk, firstFrameTime) => this.push(chunk, firstFrameTime))
   }
 
-  stop(): Recording | null {
-    const ctx = this.ctx
-    if (!this.capture || !ctx) return null
-    this.capture.port.onmessage = null
-    // Only our own edge is cut: the input node belongs to the caller (it may
-    // still be feeding a monitor path).
-    try {
-      this.input?.disconnect(this.capture)
-    } catch {
-      // already disconnected — fine
+  private push(chunk: Float32Array[], firstFrameTime: number): void {
+    const frames = chunk[0]?.length ?? 0
+    if (frames === 0) return
+    if (this.startSec === null) {
+      this.startSec = firstFrameTime
+    } else if (this.nextSec !== null && this.sampleRate > 0) {
+      // A chunk arriving later than the last one ended means the backend
+      // dropped capture it could not hand over in time. Pad the hole with
+      // silence rather than splicing: a take with an audible gap is
+      // obvious, a take whose second half runs early is not.
+      const missing = Math.round((firstFrameTime - this.nextSec) * this.sampleRate)
+      if (missing > 0) {
+        this.chunks.push(chunk.map(() => new Float32Array(missing)))
+        this.droppedFrames += missing
+      }
     }
-    this.capture.disconnect()
-    this.sink?.disconnect()
-    this.input = null
-    this.capture = null
-    this.sink = null
-    this.ctx = null
+    this.chunks.push(chunk)
+    if (this.sampleRate > 0) this.nextSec = firstFrameTime + frames / this.sampleRate
+  }
+
+  /**
+   * End the take. Awaits the backend's flush, so audio captured before
+   * Stop but still in flight lands in the take instead of being clipped
+   * off it — batching means there is ALWAYS some.
+   */
+  async stop(): Promise<Recording | null> {
+    // Only our own subscription is cut: the input belongs to the caller
+    // (it may still be feeding a monitor path).
+    const unsubscribe = this.unsubscribe
+    this.unsubscribe = null
+    await unsubscribe?.()
 
     const chunks = this.chunks
     const startSec = this.startSec
+    const sampleRate = this.sampleRate
+    const droppedFrames = this.droppedFrames
     this.chunks = []
     this.startSec = null
-    if (chunks.length === 0) return null
+    this.nextSec = null
+    this.droppedFrames = 0
+    if (chunks.length === 0 || sampleRate <= 0) return null
 
     const channelCount = Math.max(...chunks.map((c) => c.length))
     const frames = chunks.reduce((sum, c) => sum + (c[0]?.length ?? 0), 0)
@@ -125,6 +106,6 @@ export class Recorder {
       }
       channels.push(merged)
     }
-    return { channels, sampleRate: ctx.sampleRate, seconds: frames / ctx.sampleRate, startSec }
+    return { channels, sampleRate, seconds: frames / sampleRate, startSec, droppedFrames }
   }
 }

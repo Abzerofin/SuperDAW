@@ -37,6 +37,8 @@ export type NodeKind =
   | 'compressor'
   | 'convolver'
   | 'oscillator'
+  /** Channel-select over the live capture stream (§7) — see openInput. */
+  | 'input'
 
 export type NodeOptions = Record<string, number | string>
 
@@ -71,6 +73,52 @@ export interface BackendLatencies {
   outputSec: number
   /** null = unknown (the Web Audio backend cannot measure its input path). */
   inputSec: number | null
+}
+
+/**
+ * What to open on the capture side (§3's `openInput` config, plus the
+ * device the caller resolved). Channel semantics are audio/input.ts's:
+ * mono duplicates one channel to both sides, stereo takes a pair.
+ */
+export interface InputOpenConfig {
+  readonly mode: 'mono' | 'stereo'
+  /** 0-based index of the first hardware channel to take. */
+  readonly channel: number
+  /**
+   * null = the backend's own default. Callers resolve "follow the global
+   * setting" themselves — the seam never reads app state.
+   */
+  readonly deviceId?: string | null
+}
+
+/**
+ * A live input: a node to connect (monitoring) and a capture subscription
+ * (recording), off the SAME channel selection — so what a performer hears
+ * is exactly what lands in the take.
+ */
+export interface InputHandle {
+  /** Connectable into a track chain; the ENGINE owns that connection. */
+  readonly node: BackendNodeId
+  /** Channels the opened device offers (what the UI can choose from). */
+  readonly channelCount: number
+  /** Rate the chunks arrive at — the take's sample rate. */
+  readonly sampleRate: number
+  /**
+   * Subscribe to capture. Chunks arrive off the audio thread at UI
+   * cadence, each carrying the stream time of its FIRST frame — the
+   * `Recording.startSec` currency (audio/recorder.ts). A second
+   * subscription replaces the first.
+   *
+   * The returned unsubscribe RESOLVES once everything captured before it
+   * was called has been delivered. Batching means audio is always in
+   * flight — the native path hands over ~100 ms at a time — so hanging up
+   * the instant Stop is pressed would clip the tail off every take.
+   */
+  capture(
+    listener: (chunk: Float32Array[], firstFrameTime: number) => void
+  ): () => Promise<void>
+  /** Release the node, the capture and any device the handle opened. */
+  dispose(): void
 }
 
 export interface PlaySpec {

@@ -1,16 +1,19 @@
 /**
  * Loopback latency calibration — the runtime half. Plays the reference
- * sweep at a known context time and locates it in the captured input
- * (math in calibration.ts). Measures the ACTUAL current path — Web Audio
- * scheduling → DAC → cable/air → ADC → getUserMedia → capture worklet —
- * which is exactly the path recorded takes travel, so the result is
- * precisely the compensation recording placement needs.
+ * sweep at a known stream time and locates it in the captured input (math
+ * in calibration.ts). Measures the ACTUAL current path — scheduling → DAC
+ * → cable/air → ADC → capture — which is exactly the path recorded takes
+ * travel, so the result is precisely the compensation recording placement
+ * needs.
  *
- * The capture reuses the recording worklet (Recorder), whose announced
- * `startSec` — the context time of the first captured sample — is what
- * anchors the correlation peak back onto the context clock.
+ * It runs entirely on the backend seam, so the SAME code measures the Web
+ * Audio path and the native duplex one; the native run simply reports a
+ * much smaller round trip (§7). The capture reuses the recorder, whose
+ * announced `startSec` — the stream time of the first captured sample —
+ * anchors the correlation peak back onto the clock.
  */
 
+import type { IAudioBackend, InputHandle } from './backend'
 import { Recorder } from './recorder'
 import { CHIRP_SECONDS, MAX_LAG_SEC, findChirp, generateChirp } from './calibration'
 
@@ -22,7 +25,7 @@ const TAIL_SEC = 0.15
 const STIMULUS_GAIN = 0.5
 
 export interface LoopbackMeasurement {
-  /** Scheduled play time → capture arrival, on the context clock. */
+  /** Scheduled play time → capture arrival, on the stream clock. */
   readonly roundTripSec: number
   /** Peak-to-sidelobe ratio of the detection (gate before trusting). */
   readonly confidence: number
@@ -32,57 +35,73 @@ function wait(seconds: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, seconds * 1000))
 }
 
+let sweepCounter = 0
+
 /**
- * One pass: play the sweep, capture `input`, correlate. The input node is
- * the caller's (normally a MediaStreamAudioSourceNode over the recording
- * device); every channel is searched and the clearest detection wins, so
- * a loopback cable plugged into ANY input of an interface is found.
+ * One pass: play the sweep, capture every supplied input, correlate.
+ * Callers hand in one handle per channel pair they want searched, and the
+ * clearest detection across all of them wins — so a loopback cable
+ * plugged into ANY input of an interface is found.
  *
- * `sink` is where the stimulus plays — the context destination in real
- * use. It exists as a seam (the midiInputs.inject precedent) so the whole
- * loop is testable without hardware: wire sink → DelayNode → input and the
- * measurement must report the delay.
+ * `sink` is where the stimulus plays; it defaults to the backend's OUTPUT
+ * node rather than the master gain, so the master fader's position cannot
+ * decide whether calibration hears itself. It stays a parameter as a test
+ * seam (the midiInputs.inject precedent): wire sink → delay → input and
+ * the measurement must report the delay.
  */
 export async function measureLoopbackOnce(
-  ctx: AudioContext,
-  input: AudioNode,
-  sink: AudioNode = ctx.destination
+  backend: IAudioBackend,
+  inputs: readonly InputHandle[],
+  sink: number = backend.outputNode()
 ): Promise<LoopbackMeasurement> {
-  const reference = generateChirp(ctx.sampleRate)
-  const recorder = new Recorder()
-  await recorder.start(ctx, input)
+  const handles = inputs
+  if (handles.length === 0) throw new Error('No audio input is open')
+  const sampleRate = handles[0].sampleRate
+  if (!(sampleRate > 0)) throw new Error('The input reported no sample rate')
 
-  const startAt = ctx.currentTime + PRE_ROLL_SEC
-  const buffer = ctx.createBuffer(1, reference.length, ctx.sampleRate)
-  buffer.copyToChannel(reference as Float32Array<ArrayBuffer>, 0)
-  const source = ctx.createBufferSource()
-  source.buffer = buffer
-  const gain = ctx.createGain()
-  gain.gain.value = STIMULUS_GAIN
-  source.connect(gain)
-  // Straight to the sink (the destination in real use): the master fader's
-  // level must not decide whether calibration hears itself.
-  gain.connect(sink)
-  source.start(startAt)
+  const reference = generateChirp(sampleRate)
+  const recorders = handles.map((handle) => {
+    const recorder = new Recorder()
+    recorder.start(handle)
+    return recorder
+  })
+
+  // Registered at the STREAM rate so the voice plays it 1:1 — the sweep's
+  // own timebase is what the lag is measured in.
+  const bufferId = `superdaw-calibration-${++sweepCounter}`
+  backend.registerBuffer(bufferId, [reference], sampleRate)
+  const gain = backend.createNode('gain')
+  backend.scheduleParam(gain, 'gain', [{ kind: 'setValue', value: STIMULUS_GAIN, time: 0 }])
+  backend.connect(gain, sink)
+
+  const startAt = backend.now() + PRE_ROLL_SEC
+  const voice = backend.play({ bufferId, when: startAt, destination: gain })
   try {
     await wait(PRE_ROLL_SEC + CHIRP_SECONDS + MAX_LAG_SEC + TAIL_SEC)
   } finally {
-    source.disconnect()
-    gain.disconnect()
+    if (voice !== null) backend.stopVoice(voice)
+    backend.disconnect(gain)
+    backend.disposeNode(gain)
+    backend.releaseBuffer(bufferId)
   }
 
-  const take = recorder.stop()
-  if (!take || take.startSec === null) {
-    throw new Error('No audio arrived from the input device')
+  const takes = await Promise.all(recorders.map((recorder) => recorder.stop()))
+  const anchored = takes.filter((take) => take !== null && take.startSec !== null)
+  if (anchored.length === 0) throw new Error('No audio arrived from the input device')
+
+  let best: { arrivalSec: number; confidence: number } | null = null
+  for (const take of anchored) {
+    for (const channel of take!.channels) {
+      const match = findChirp(channel, reference, take!.sampleRate)
+      if (!match) continue
+      if (best === null || match.confidence > best.confidence) {
+        best = {
+          arrivalSec: take!.startSec! + match.lagSamples / take!.sampleRate,
+          confidence: match.confidence
+        }
+      }
+    }
   }
-  let best: { lagSamples: number; confidence: number } | null = null
-  for (const channel of take.channels) {
-    const match = findChirp(channel, reference, take.sampleRate)
-    if (match && (best === null || match.confidence > best.confidence)) best = match
-  }
-  if (!best) {
-    throw new Error('The captured audio was shorter than the test tone')
-  }
-  const arrivalSec = take.startSec + best.lagSamples / take.sampleRate
-  return { roundTripSec: arrivalSec - startAt, confidence: best.confidence }
+  if (!best) throw new Error('The captured audio was shorter than the test tone')
+  return { roundTripSec: best.arrivalSec - startAt, confidence: best.confidence }
 }

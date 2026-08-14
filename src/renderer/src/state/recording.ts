@@ -4,14 +4,14 @@ import { isNoteTrackKind } from '@core/model/types'
 import { newId } from '@core/model/ids'
 import { buildMidiTakeOp, type MidiTake } from '@core/ops/midiTake'
 import { Recorder } from '@audio/recorder'
-import { buildInputTap, type InputTap } from '@audio/input'
+import type { InputHandle } from '@audio/backendTypes'
 import { encodeWavPcm16Async } from '@audio/wav'
 import { ticksPerSecond } from '@audio/scheduling'
 import { applyMidiCaptureEvent, midiEventSec, type MidiNoteSink } from '@audio/midiCapture'
 import { projectStore } from './projectStore'
 import { transport } from './transport'
 import { audioEngine, assetStore } from './audioInstance'
-import { trackInputs } from './trackInputs'
+import { describeInputError, trackInputs } from './trackInputs'
 import { midiInputs } from './midiInputs'
 import { preferences } from './preferences'
 import { latencyCalibration } from './latencyCalibration'
@@ -22,10 +22,10 @@ import { latencyCalibration } from './latencyCalibration'
  *
  * Each armed AUDIO track records its OWN input (device + channel selection
  * from trackInputs), so a multi-track take yields one asset per track
- * rather than the same audio duplicated everywhere. Streams are shared and
- * reference-counted per device by the input store. Armed MIDI tracks
- * capture note events instead (routed here by state/midiInputs) — no
- * stream, no asset, just notes.
+ * rather than the same audio duplicated everywhere. Devices are shared
+ * across those inputs by the backend, not here. Armed MIDI tracks capture
+ * note events instead (routed here by state/midiInputs) — no input, no
+ * asset, just notes.
  *
  * On stop, every audio take becomes a normal asset + bay entry + clip, and
  * every MIDI take ONE clip/create with its notes (ONE clip/createMany when
@@ -37,8 +37,7 @@ import { latencyCalibration } from './latencyCalibration'
 interface TrackCapture {
   trackId: TrackId
   recorder: Recorder
-  tap: InputTap
-  deviceKey: string
+  input: InputHandle
 }
 
 /** One armed MIDI track's growing take (note math in audio/midiCapture). */
@@ -83,7 +82,7 @@ class RecordingStore {
           this.countInTimer = null
         }
         this.countingIn = false
-        void this.beginRoll(audioEngine.ensureContext())
+        this.beginRoll()
       }
     })
   }
@@ -105,8 +104,9 @@ class RecordingStore {
     this.emit()
   }
 
-  /** Start capture. `streamOverride` lets tests inject a synthetic stream. */
-  async start(streamOverride?: MediaStream): Promise<void> {
+  /** Start capture. `inputOverride` lets a test inject a synthetic input
+   *  (one handle, so one armed track — real runs open one per track). */
+  async start(inputOverride?: InputHandle): Promise<void> {
     // `starting` closes the window the awaits below leave open: a held or
     // double-pressed record key must not interleave a second run (which
     // would tear down the shared captures or duplicate every take).
@@ -127,27 +127,20 @@ class RecordingStore {
     }
     this.starting = true
     try {
-      const ctx = audioEngine.ensureContext()
-      if (ctx.state === 'suspended') await ctx.resume()
+      await audioEngine.ensureStarted()
 
-      // MIDI needs no stream, only open access — up front so the browser's
+      // MIDI needs no input, only open access — up front so the browser's
       // permission prompt (plain Chrome) happens before the count-in, like
-      // getUserMedia below. Denied/unsupported still records via inject().
+      // the capture permission below. Denied/unsupported still records via
+      // inject().
       if (armed.length > audioArmed.length) await midiInputs.ensure()
 
-      // Acquire inputs up front (permission prompts happen here), but hold
+      // Open inputs up front (permission prompts happen here), but hold
       // capture until the roll so a count-in never ends up in the take.
       for (const trackId of audioArmed) {
-        const config = trackInputs.configOf(trackId)
-        let stream = streamOverride
-        let deviceKey = ''
-        if (!stream) {
-          const acquired = await trackInputs.acquire(config.deviceId)
-          stream = acquired.stream
-          deviceKey = acquired.key
-        }
-        const tap = buildInputTap(ctx, stream, config.channels)
-        this.captures.push({ trackId, recorder: new Recorder(), tap, deviceKey })
+        const input =
+          inputOverride ?? (await trackInputs.openFor(trackInputs.configOf(trackId)))
+        this.captures.push({ trackId, recorder: new Recorder(), input })
       }
 
       // Count in only from a standing start — punching in while the song
@@ -160,29 +153,25 @@ class RecordingStore {
         this.countInTimer = window.setTimeout(() => {
           this.countInTimer = null
           this.countingIn = false
-          void this.beginRoll(ctx)
+          this.beginRoll()
         }, seconds * 1000)
         this.emit()
       } else {
-        await this.beginRoll(ctx)
+        this.beginRoll()
       }
     } catch (error) {
       this.teardownCaptures()
-      this.fail(
-        error instanceof DOMException && error.name === 'NotAllowedError'
-          ? 'Microphone access was denied'
-          : `Could not start recording: ${error instanceof Error ? error.message : String(error)}`
-      )
+      this.fail(describeInputError(error))
     } finally {
       this.starting = false
     }
   }
 
   /** The count-in (if any) is over: capture and roll from here. */
-  private async beginRoll(ctx: AudioContext): Promise<void> {
+  private beginRoll(): void {
     try {
       for (const capture of this.captures) {
-        await capture.recorder.start(ctx, capture.tap.output)
+        capture.recorder.start(capture.input)
       }
       // Fresh MIDI note sinks for every armed MIDI track, and the clock
       // anchor pair that places their events on the timeline.
@@ -193,9 +182,10 @@ class RecordingStore {
           this.midiCaptures.set(trackId, { trackId, active: new Map(), closed: [] })
         }
       }
-      this.midiClockOffsetSec = ctx.currentTime - performance.now() / 1000
+      const now = audioEngine.now()
+      this.midiClockOffsetSec = now - performance.now() / 1000
       this.recordStartTicks = transport.positionTicks()
-      this.rollAnchorSec = ctx.currentTime
+      this.rollAnchorSec = now
       this.recording = true
       this.lastError = null
       if (!transport.isPlaying) transport.play()
@@ -248,12 +238,9 @@ class RecordingStore {
     )
   }
 
-  /** Release every capture rig (taps + pooled streams); keeps no takes. */
+  /** Release every capture rig; keeps no takes. */
   private teardownCaptures(): void {
-    for (const capture of this.captures) {
-      capture.tap.dispose()
-      if (capture.deviceKey) trackInputs.release(capture.deviceKey)
-    }
+    for (const capture of this.captures) capture.input.dispose()
     this.captures = []
     this.midiCaptures.clear()
   }
@@ -275,20 +262,19 @@ class RecordingStore {
     this.recording = false
     const captures = this.captures
     this.captures = []
+    // Inputs are NOT released here: each recorder's stop awaits the
+    // backend's flush, and closing the device first would take the tail
+    // of every take with it. finishTakes disposes them once they land.
     const takes = captures.map((capture) => ({ capture, take: capture.recorder.stop() }))
-    for (const { capture } of takes) {
-      capture.tap.dispose()
-      if (capture.deviceKey) trackInputs.release(capture.deviceKey)
-    }
     this.emit()
 
-    const ctx = audioEngine.ensureContext()
+    const stopSec = audioEngine.now()
     // MIDI takes are pure data — committed synchronously, right now.
-    this.finishMidiTakes(ctx, this.recordStartTicks, this.rollAnchorSec)
+    this.finishMidiTakes(stopSec, this.recordStartTicks, this.rollAnchorSec)
     // Audio takes finish asynchronously: the WAV encode is chunked so
     // hitting Stop after a long multitrack take never freezes the app at
     // the very moment the user is most anxious about whether it survived.
-    void this.finishTakes(takes, ctx, this.recordStartTicks, this.rollAnchorSec)
+    void this.finishTakes(takes, this.recordStartTicks, this.rollAnchorSec)
   }
 
   /**
@@ -301,11 +287,10 @@ class RecordingStore {
    * buffers → worklet), while Web MIDI timestamps are driver-stamped and
    * carry no such lag.
    */
-  private finishMidiTakes(ctx: AudioContext, anchorTicks: number, anchorSec: number): void {
+  private finishMidiTakes(stopSec: number, anchorTicks: number, anchorSec: number): void {
     const captures = [...this.midiCaptures.values()]
     this.midiCaptures.clear()
     if (captures.length === 0) return
-    const stopSec = ctx.currentTime
     const compensationSec = audioEngine.outputLatencySec()
     const tps = ticksPerSecond(projectStore.state.tempo)
     const toTicks = (sec: number): number =>
@@ -327,11 +312,17 @@ class RecordingStore {
   }
 
   private async finishTakes(
-    takes: Array<{ capture: TrackCapture; take: ReturnType<Recorder['stop']> }>,
-    ctx: AudioContext,
+    pending: Array<{ capture: TrackCapture; take: ReturnType<Recorder['stop']> }>,
     anchorTicks: number,
     anchorSec: number
   ): Promise<void> {
+    const takes = await Promise.all(
+      pending.map(async ({ capture, take }) => ({ capture, take: await take }))
+    )
+    // Every tail has landed — release the devices before the (chunked,
+    // potentially long) encode, not after.
+    for (const { capture } of takes) capture.input.dispose()
+
     // Latency compensation. The performer played along with audio they
     // heard an output-latency LATE, so everything they did sits late in
     // the take by that amount. The input path (mic → buffers → worklet) is
@@ -348,19 +339,12 @@ class RecordingStore {
       const track = projectStore.state.tracks[capture.trackId]
       if (!track || track.kind !== 'audio') continue
       // Place the take by where its FIRST SAMPLE actually sat on the audio
-      // clock (announced by the capture worklet), not by when start() was
-      // called — worklet spin-up would otherwise land every take late.
+      // clock (announced by the backend's capture), not by when start()
+      // was called — capture spin-up would otherwise land every take late.
       const skewSec = take.startSec !== null ? take.startSec - anchorSec : 0
       const startTicks = Math.max(0, Math.round(anchorTicks + (skewSec - compensationSec) * tps))
 
-      const buffer = ctx.createBuffer(
-        Math.max(1, take.channels.length),
-        take.channels[0].length,
-        take.sampleRate
-      )
-      take.channels.forEach((data, ch) =>
-        buffer.copyToChannel(data as Float32Array<ArrayBuffer>, ch)
-      )
+      const buffer = audioEngine.createBuffer(take.channels, take.sampleRate)
       const wav = await encodeWavPcm16Async(take.channels, take.sampleRate)
 
       const name = `Recording ${this.takeCounter++}.wav`

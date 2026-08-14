@@ -16,6 +16,8 @@ import {
   type BackendNodeId,
   type DeviceInfo,
   type IAudioBackend,
+  type InputHandle,
+  type InputOpenConfig,
   type ParamEvent,
   type TapId,
   type VoiceId
@@ -216,8 +218,13 @@ export class AudioEngine {
    *  (Infinity for open-ended passes) so loop iterations can be swept, and
    *  their track so scoped reschedules can tear them down. */
   private fadeNodes = new Map<BackendNodeId, { endSec: number; trackId: TrackId }>()
-  /** Live input monitors feeding track chains, by track. */
-  private monitors = new Map<TrackId, { node: AudioNode; id: BackendNodeId }>()
+  /**
+   * Live input monitors feeding track chains, by track. Only the backend
+   * NODE is held: the input handle itself belongs to whoever opened it
+   * (renderer/state/trackInputs), and the engine owns nothing but the
+   * connection — see setMonitorInput.
+   */
+  private monitors = new Map<TrackId, BackendNodeId>()
 
   /**
    * Live (MIDI-played) synth voices, held-keys only, keyed by pitch.
@@ -468,16 +475,63 @@ export class AudioEngine {
   }
 
   /**
-   * The live AudioContext, for the renderer subsystems still on the Web
-   * Audio path by design: recording capture, input monitoring taps and
-   * latency calibration (they move behind the backend with phase 3's
-   * native duplex input). Browser builds always run the Web Audio backend,
-   * so this never throws in practice.
+   * Start the backend and, on Web Audio, wait out the autoplay policy —
+   * a suspended context delivers neither audio nor a running clock, and
+   * every caller here is acting on a user gesture. No-op natively.
    */
-  ensureContext(): AudioContext {
+  async ensureStarted(): Promise<void> {
     const backend = this.ensureBackend()
-    if (!backend.webAudio) throw new Error('No Web Audio context on this backend')
-    return backend.webAudio.ctx
+    const ctx = backend.webAudio?.ctx
+    if (ctx && ctx.state === 'suspended') await ctx.resume()
+  }
+
+  /** Stream time in seconds — the clock takes and MIDI timestamps anchor to. */
+  now(): number {
+    return this.ensureBackend().now()
+  }
+
+  /** The live stream's sample rate. */
+  sampleRate(): number {
+    return this.ensureBackend().start().sampleRate
+  }
+
+  /**
+   * The rate assets are DECODED at, which offline renders follow so
+   * buffers are read 1:1 (§6's decode-once invariant). Equals the stream
+   * rate under Web Audio; under the native backend decoding runs on a
+   * standalone context whose rate is the system default, and the invariant
+   * that matters — decode rate == render rate — is what this reports.
+   */
+  decodeSampleRate(): number {
+    const backend = this.ensureBackend()
+    if (backend.webAudio) return backend.webAudio.ctx.sampleRate
+    return this.ensureDecodeCtx().sampleRate
+  }
+
+  /**
+   * Wrap raw PCM as an AudioBuffer for the asset store. Assets stay
+   * AudioBuffers in the renderer whatever the backend is (§3: the native
+   * side receives decoded planar floats), so this shares decode()'s door.
+   */
+  createBuffer(channels: readonly Float32Array[], sampleRate: number): AudioBuffer {
+    const backend = this.ensureBackend()
+    const ctx = backend.webAudio?.ctx ?? this.ensureDecodeCtx()
+    const buffer = ctx.createBuffer(
+      Math.max(1, channels.length),
+      Math.max(1, channels[0]?.length ?? 1),
+      sampleRate
+    )
+    channels.forEach((data, ch) => buffer.copyToChannel(data as Float32Array<ArrayBuffer>, ch))
+    return buffer
+  }
+
+  /**
+   * The live backend — for the loopback calibration runner, the one caller
+   * that drives the backend directly (it plays a stimulus post-fader and
+   * correlates what comes back).
+   */
+  activeBackend(): IAudioBackend {
+    return this.ensureBackend()
   }
 
   // ---------- Output device ----------
@@ -520,6 +574,16 @@ export class AudioEngine {
     return this.backend?.latencies().outputSec ?? 0
   }
 
+  /**
+   * Seconds a captured frame lags the stream clock, where the backend can
+   * say — null under Web Audio, whose capture stack reports nothing. It is
+   * a floor, not the whole story: the loopback measurement (§7) covers the
+   * converters and the cable on top of it.
+   */
+  inputLatencySec(): number | null {
+    return this.backend?.latencies().inputSec ?? null
+  }
+
   /** Devices the ACTIVE backend can open (§6) — the store reads this. */
   async enumerateDevices(): Promise<DeviceInfo[]> {
     return this.ensureBackend().enumerateDevices()
@@ -554,24 +618,39 @@ export class AudioEngine {
   /**
    * Route live input into a track so the performer hears themselves —
    * through the track's own inserts, fader and pan, exactly like playback.
-   * Pass null to stop monitoring. The engine owns the connection so a
-   * deleted track can never leave a monitor dangling.
+   * Pass null to stop monitoring.
+   *
+   * Takes an INPUT HANDLE, not a node: a live `AudioNode` is the one
+   * signature that cannot survive the process split (§3), so the caller
+   * opens the input through the backend and hands the handle over. The
+   * engine still connects `handle.node` itself — it owns the connection,
+   * so a deleted track can never leave a monitor dangling — while the
+   * handle's lifetime stays with whoever opened it.
    */
-  setMonitorSource(trackId: TrackId, node: AudioNode | null): void {
-    // The monitor node is a live getUserMedia tap — Web Audio by design
-    // until phase 3's native duplex input replaces the capture path.
+  setMonitorInput(trackId: TrackId, input: InputHandle | null): void {
     const backend = this.ensureBackend()
     const previous = this.monitors.get(trackId)
-    if (previous) {
-      backend.disconnect(previous.id, this.chain(trackId).input)
-      backend.disposeNode(previous.id)
+    if (previous !== undefined) {
+      backend.disconnect(previous, this.chain(trackId).input)
       this.monitors.delete(trackId)
     }
-    if (node && backend.webAudio) {
-      const id = backend.webAudio.adoptNode(node)
-      backend.connect(id, this.chain(trackId).input)
-      this.monitors.set(trackId, { node, id })
+    if (input) {
+      backend.connect(input.node, this.chain(trackId).input)
+      this.monitors.set(trackId, input.node)
     }
+  }
+
+  /**
+   * Open a live input on the active backend (§7). Web Audio opens a
+   * getUserMedia capture and taps the chosen channels; the native backend
+   * upgrades its stream to duplex and selects channels in the callback.
+   * Either way the caller gets a node to monitor with and a capture
+   * subscription to record from — the same selection feeding both.
+   */
+  async openInput(config: InputOpenConfig): Promise<InputHandle> {
+    const backend = this.ensureBackend()
+    await this.ensureStarted()
+    return backend.openInput(config)
   }
 
   isMonitoring(trackId: TrackId): boolean {
@@ -910,6 +989,11 @@ export class AudioEngine {
   /** Decode-only context for non-Web-Audio backends (never routed). */
   private decodeCtx: AudioContext | null = null
 
+  private ensureDecodeCtx(): AudioContext {
+    if (!this.decodeCtx) this.decodeCtx = new AudioContext()
+    return this.decodeCtx
+  }
+
   async decode(data: ArrayBuffer): Promise<AudioBuffer> {
     // Decode stays renderer-side Web Audio by design (§3: the native
     // backend receives decoded planar floats, never encoded bytes). Under
@@ -917,8 +1001,7 @@ export class AudioEngine {
     // no output and never joins any graph.
     const backend = this.ensureBackend()
     if (backend.webAudio) return backend.webAudio.ctx.decodeAudioData(data)
-    if (!this.decodeCtx) this.decodeCtx = new AudioContext()
-    return this.decodeCtx.decodeAudioData(data)
+    return this.ensureDecodeCtx().decodeAudioData(data)
   }
 
   /** Autoplay policy: nudge a suspended Web Audio context (no-op natively). */
@@ -2567,9 +2650,10 @@ export class AudioEngine {
       if (!track) {
         this.liveAllNotesOff(trackId)
         const monitor = this.monitors.get(trackId)
-        if (monitor) {
-          backend.disconnect(monitor.id)
-          backend.disposeNode(monitor.id)
+        if (monitor !== undefined) {
+          // Only the edge is ours — the handle (and its device) belong to
+          // whoever opened the input.
+          backend.disconnect(monitor, chain.input)
           this.monitors.delete(trackId)
         }
         backend.disposeNode(chain.input)

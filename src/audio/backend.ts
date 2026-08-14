@@ -21,14 +21,13 @@
  *   unspecified — the native backend may batch it with the meter tick.
  * - `NodeKind` is only what the engine itself instantiates today. The DSP
  *   primitives ('biquad', 'delay', …) arrive with the phase-2 ports.
- * - `webAudio` is the documented phase-0/1 escape hatch: non-null ONLY on
- *   this Web Audio implementation, used by the engine for exactly the
- *   pieces the doc schedules for later phases — builtin effect builders
- *   and instrument voices (phase 2 DSP ports), monitor input nodes
- *   (phase 3 duplex input), decode, and zero-copy adoption of already
- *   decoded AudioBuffers (a renderer-side memory concern the native
- *   backend replaces with its own PCM registry). Every use site is a
- *   grep-able `webAudio` reference — the phase-2/3 work list.
+ * - `webAudio` is the documented escape hatch: non-null ONLY on this Web
+ *   Audio implementation. Phase 2 closed the effect/instrument uses and
+ *   phase 3 closed input (openInput, below); what is left is decode,
+ *   zero-copy adoption of already decoded AudioBuffers (a renderer-side
+ *   memory concern the native backend replaces with its own PCM
+ *   registry), the UI-facing AnalyserNode surface, and the autoplay
+ *   nudge. Every use site is a grep-able `webAudio` reference.
  */
 
 // The serializable currency lives in backendTypes.ts (DOM-free, shared
@@ -38,6 +37,8 @@ import type {
   BackendLatencies,
   BackendNodeId,
   DeviceInfo,
+  InputHandle,
+  InputOpenConfig,
   NodeKind,
   NodeOptions,
   ParamEvent,
@@ -47,11 +48,14 @@ import type {
   TapId,
   VoiceId
 } from './backendTypes'
+import { buildInputTap } from './input'
 
 export type {
   BackendLatencies,
   BackendNodeId,
   DeviceInfo,
+  InputHandle,
+  InputOpenConfig,
   NodeKind,
   NodeOptions,
   ParamEvent,
@@ -98,6 +102,13 @@ export interface IAudioBackend {
   disposeNode(id: BackendNodeId): void
   /** The node every track chain ultimately feeds (master gain). */
   masterNode(): BackendNodeId
+  /**
+   * The final output, POST master fader. Only the loopback calibration
+   * uses it: its stimulus must reach the speakers whatever the master is
+   * set to, or a pulled-down fader would decide whether the measurement
+   * hears itself.
+   */
+  outputNode(): BackendNodeId
   /** Append param events in order — AudioParam semantics (see above);
    *  names resolve per node kind, unknown names are ignored. */
   scheduleParam(node: BackendNodeId, param: ParamName, events: readonly ParamEvent[]): void
@@ -130,6 +141,15 @@ export interface IAudioBackend {
   /** Latest window into `out`; false = no data yet. */
   readTap(id: TapId, out: Float32Array): boolean
   disposeTap(id: TapId): void
+
+  // ---- input (§7) ----
+  /**
+   * Open a channel selection over the live capture stream. The handle
+   * carries a node (connect it for monitoring) and a capture subscription
+   * (recording) — one selection feeding both, so the take is what the
+   * performer heard. Rejects when no input is available.
+   */
+  openInput(config: InputOpenConfig): Promise<InputHandle>
 
   /** Phase-0 escape hatch — see module comment. Null on non-Web-Audio backends. */
   readonly webAudio: WebAudioEscapes | null
@@ -198,6 +218,45 @@ interface WebVoice {
 }
 
 /**
+ * Raw PCM capture off any node, one message per render quantum carrying
+ * the context time of its first sample. That timestamp is what lets a
+ * take be placed sample-accurately instead of guessing when the worklet
+ * actually spun up.
+ */
+const CAPTURE_WORKLET_SOURCE = `
+class SuperdawCapture extends AudioWorkletProcessor {
+  process(inputs) {
+    const input = inputs[0]
+    if (input.length > 0) {
+      this.port.postMessage({ t: currentTime, c: input.map((channel) => channel.slice(0)) })
+    }
+    return true
+  }
+}
+registerProcessor('superdaw-capture', SuperdawCapture)
+`
+
+let captureWorkletReady: Promise<void> | null = null
+
+function ensureCaptureWorklet(ctx: AudioContext): Promise<void> {
+  if (!captureWorkletReady) {
+    const url = URL.createObjectURL(
+      new Blob([CAPTURE_WORKLET_SOURCE], { type: 'text/javascript' })
+    )
+    captureWorkletReady = ctx.audioWorklet
+      .addModule(url)
+      .finally(() => URL.revokeObjectURL(url))
+  }
+  return captureWorkletReady
+}
+
+/** Capture streams are shared per device and reference-counted. */
+interface PooledStream {
+  stream: MediaStream
+  refs: number
+}
+
+/**
  * The Web Audio implementation: today's engine graph behind the seam.
  * Owns the AudioContext (including the latency-hint request and the
  * test-only context factory the parity harness injects).
@@ -206,6 +265,7 @@ export class WebAudioBackend implements IAudioBackend {
   private ctx: AudioContext | null = null
   private master: GainNode | null = null
   private masterId: BackendNodeId | null = null
+  private destinationId: BackendNodeId | null = null
 
   private nodes = new Map<BackendNodeId, AudioNode>()
   private buffers = new Map<string, AudioBuffer>()
@@ -271,6 +331,8 @@ export class WebAudioBackend implements IAudioBackend {
     this.master.connect(this.ctx.destination)
     this.masterId = this.nextId++
     this.nodes.set(this.masterId, this.master)
+    this.destinationId = this.nextId++
+    this.nodes.set(this.destinationId, this.ctx.destination)
     return this.ctx
   }
 
@@ -439,6 +501,11 @@ export class WebAudioBackend implements IAudioBackend {
     return this.masterId!
   }
 
+  outputNode(): BackendNodeId {
+    this.ensureCtx()
+    return this.destinationId!
+  }
+
   scheduleParam(id: BackendNodeId, param: ParamName, events: readonly ParamEvent[]): void {
     const node = this.node(id)
     // Per-kind name resolution; unknown names are ignored (the reducer's
@@ -570,4 +637,138 @@ export class WebAudioBackend implements IAudioBackend {
     this.taps.delete(id)
   }
 
+  // ---------- input (§7 — the Web Audio half of the duplex story) ----------
+
+  private streamPool = new Map<string, PooledStream>()
+  private streamPending = new Map<string, Promise<MediaStream>>()
+
+  /**
+   * Open (or reuse) the capture stream for a device. Shared and
+   * reference-counted: two armed tracks on one interface must ride ONE
+   * getUserMedia call, not fight over the device.
+   */
+  private async acquireStream(deviceId: string | null): Promise<{ stream: MediaStream; key: string }> {
+    const key = deviceId ?? 'default'
+    const existing = this.streamPool.get(key)
+    if (existing) {
+      existing.refs++
+      return { stream: existing.stream, key }
+    }
+    // Concurrent acquires of the same device share one getUserMedia call.
+    let inflight = this.streamPending.get(key)
+    if (!inflight) {
+      inflight = navigator.mediaDevices.getUserMedia({
+        audio: {
+          echoCancellation: false,
+          noiseSuppression: false,
+          autoGainControl: false,
+          // Ask for a stereo-or-wider capture so multi-input interfaces
+          // expose their channels; mono devices simply report 1.
+          channelCount: { ideal: 2 },
+          ...(deviceId ? { deviceId: { ideal: deviceId } } : {})
+        }
+      })
+      this.streamPending.set(key, inflight)
+    }
+    try {
+      const stream = await inflight
+      const pooled = this.streamPool.get(key)
+      if (pooled) {
+        pooled.refs++
+        return { stream: pooled.stream, key }
+      }
+      this.streamPool.set(key, { stream, refs: 1 })
+      return { stream, key }
+    } finally {
+      this.streamPending.delete(key)
+    }
+  }
+
+  private releaseStream(key: string): void {
+    const pooled = this.streamPool.get(key)
+    if (!pooled) return
+    pooled.refs--
+    if (pooled.refs > 0) return
+    pooled.stream.getTracks().forEach((track) => track.stop())
+    this.streamPool.delete(key)
+  }
+
+  async openInput(config: InputOpenConfig): Promise<InputHandle> {
+    const ctx = this.ensureCtx()
+    // Capture is a user gesture's consequence; a suspended context would
+    // deliver nothing and report no error.
+    if (ctx.state === 'suspended') await ctx.resume()
+    const { stream, key } = await this.acquireStream(config.deviceId ?? null)
+    let tap: ReturnType<typeof buildInputTap>
+    try {
+      // Loaded HERE so capture() itself stays synchronous, matching the
+      // native handle (whose ring is armed by one fire-and-forget message).
+      await ensureCaptureWorklet(ctx)
+      tap = buildInputTap(ctx, stream, config)
+    } catch (error) {
+      this.releaseStream(key)
+      throw error
+    }
+    const node = this.webAudio.adoptNode(tap.output)
+
+    let worklet: AudioWorkletNode | null = null
+    let sink: GainNode | null = null
+    const teardownCapture = (): void => {
+      if (!worklet) return
+      worklet.port.onmessage = null
+      try {
+        tap.output.disconnect(worklet)
+      } catch {
+        // already disconnected — fine
+      }
+      worklet.disconnect()
+      sink?.disconnect()
+      worklet = null
+      sink = null
+    }
+    /** Cut the input first, let the quantum already posted land, then
+     *  tear down — see InputHandle.capture's flush contract. */
+    const stopCapture = async (): Promise<void> => {
+      if (!worklet) return
+      try {
+        tap.output.disconnect(worklet)
+      } catch {
+        // already disconnected — fine
+      }
+      await new Promise((resolve) => setTimeout(resolve, 0))
+      teardownCapture()
+    }
+
+    return {
+      node,
+      channelCount: tap.channelCount,
+      sampleRate: ctx.sampleRate,
+      capture: (listener) => {
+        teardownCapture()
+        const capture = new AudioWorkletNode(ctx, 'superdaw-capture', {
+          numberOfInputs: 1,
+          numberOfOutputs: 1
+        })
+        capture.port.onmessage = (event: MessageEvent<{ t: number; c: Float32Array[] }>) => {
+          listener(event.data.c, event.data.t)
+        }
+        // A silent sink keeps the worklet pulled by the graph without
+        // being audible — monitoring is a separate, explicit connection.
+        const silent = ctx.createGain()
+        silent.gain.value = 0
+        tap.output.connect(capture)
+        capture.connect(silent)
+        silent.connect(ctx.destination)
+        worklet = capture
+        sink = silent
+        return stopCapture
+      },
+      dispose: () => {
+        teardownCapture()
+        this.disposeNode(node)
+        tap.dispose()
+        this.releaseStream(key)
+      }
+    }
+  }
 }

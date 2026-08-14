@@ -5,10 +5,12 @@ import { appStorageGet, appStorageSet } from './appStorage'
 /**
  * Audio device selection — app-level state, persisted via appStorage,
  * never part of a project. Output switches live through
- * AudioEngine.setOutputDevice (AudioContext.setSinkId — no restart);
- * input feeds the recorder's getUserMedia constraints as an `ideal`
- * deviceId, so the platform itself falls back to the closest compatible
- * device when the chosen one is unplugged.
+ * AudioEngine.setOutputDevice; the input selection is what a track's
+ * `deviceId: null` resolves to when an input opens (AudioEngine.openInput),
+ * and each backend applies it its own way — Web Audio as an `ideal`
+ * getUserMedia constraint, the native backend as the duplex stream's
+ * capture endpoint — so an unplugged device degrades to the closest
+ * compatible one rather than failing.
  *
  * On `devicechange`, a vanished selection reverts to the system default
  * and posts a single dismissible notice (status bar, never a popup).
@@ -119,11 +121,6 @@ class AudioDeviceStore {
       this.persist()
     }
     this.emit()
-  }
-
-  /** getUserMedia constraint for the recorder: `ideal` = graceful fallback. */
-  inputConstraint(): { deviceId: { ideal: string } } | Record<string, never> {
-    return this.inputDeviceId ? { deviceId: { ideal: this.inputDeviceId } } : {}
   }
 
   /**

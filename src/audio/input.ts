@@ -7,6 +7,9 @@
  * does that selection without copying audio, and the SAME tap shape feeds
  * both monitoring and recording, so what you hear is what gets captured.
  *
+ * These are the semantics the SEAM promises (backend.ts `openInput`): the
+ * Web Audio backend builds the tap below, and the native engine's `input`
+ * node reproduces the identical selection rule inside its duplex callback.
  * Which device/channels a track uses is per-machine, so it never enters the
  * project document (see renderer/state/trackInputs.ts).
  */
