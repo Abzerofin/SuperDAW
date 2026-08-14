@@ -594,6 +594,15 @@ struct Node {
    */
   float delayIn[kBlockFrames * 2] = {};
   bool rendered = false;
+  /**
+   * Whether anything STEREO reached this node this block. Web Audio's
+   * StereoPanner has two laws — a mono input is placed with
+   * (cos, sin), while a stereo one folds one side into the other — and
+   * picking the wrong one makes a hard-panned mono clip 2× too loud.
+   * Mono sources write the same sample to both channels here, so the
+   * distinction has to be carried explicitly.
+   */
+  bool sawStereo = false;
 };
 
 /** Normalized biquad coefficients (a0 divided through). */
@@ -987,6 +996,7 @@ class Engine {
         std::fill(node->delayIn, node->delayIn + frames * 2, 0.0f);
       }
       node->rendered = false;
+      node->sawStereo = false;
     }
 
     // Voices deposit into their destination node's input stage. A voice
@@ -1367,6 +1377,7 @@ class Engine {
       const size_t i0 = static_cast<size_t>(pos);
       const double frac = pos - static_cast<double>(i0);
       if (dest) {
+        if (channelCount >= 2) dest->sawStereo = true;
         // Delays keep input and output apart (see Node.delayIn).
         float* target = dest->kind == NodeKind::Delay ? dest->delayIn : dest->block;
         for (size_t ch = 0; ch < 2; ch++) {
@@ -1456,6 +1467,8 @@ class Engine {
       RenderNode(inputId, blockTime, frames, sampleRate);
       Node* input = Get(inputId);
       if (!input) continue;
+      // A panner always emits stereo; otherwise stereo-ness propagates.
+      if (input->sawStereo || input->kind == NodeKind::Panner) node->sawStereo = true;
       for (uint32_t i = 0; i < frames * 2; i++) node->block[i] += input->block[i];
     }
     const double frameDur = 1.0 / sampleRate;
@@ -1463,6 +1476,9 @@ class Engine {
       // Overlap-save: this block's input joins the previous block's as the
       // FFT's two halves; the circular-convolution result's SECOND half is
       // the true linear convolution (the first is the aliased part).
+      // The IR's channels are independent, so the output is stereo even
+      // from a mono input — which is the point of a stereo reverb.
+      node->sawStereo = true;
       ConvolverState* conv = node->conv.get();
       if (!conv || !conv->ready || conv->partitions == 0) {
         std::fill(node->block, node->block + frames * 2, 0.0f);
@@ -1560,15 +1576,25 @@ class Engine {
         node->block[i * 2 + 1] *= g;
       }
     } else if (node->kind == NodeKind::Panner) {
-      // The spec's equal-power stereo pan.
+      // The spec's equal-power pan, in BOTH of its forms: a mono input is
+      // simply placed between the speakers, while a stereo one folds the
+      // trailing side into the leading one. Using the stereo law on mono
+      // material would make a hard-panned clip twice as loud.
+      const bool stereo = node->sawStereo;
       for (uint32_t i = 0; i < frames; i++) {
         double p = node->p0.ValueAt(blockTime + i * frameDur) + ParamMod(*node, 0, i);
         p = p < -1 ? -1 : (p > 1 ? 1 : p);
+        const float L = node->block[i * 2];
+        const float R = node->block[i * 2 + 1];
+        if (!stereo) {
+          const double x = (p + 1) / 2;
+          node->block[i * 2] = static_cast<float>(L * std::cos(x * kPi / 2));
+          node->block[i * 2 + 1] = static_cast<float>(L * std::sin(x * kPi / 2));
+          continue;
+        }
         const double x = p <= 0 ? p + 1 : p;
         const float gl = static_cast<float>(std::cos(x * kPi / 2));
         const float gr = static_cast<float>(std::sin(x * kPi / 2));
-        const float L = node->block[i * 2];
-        const float R = node->block[i * 2 + 1];
         if (p <= 0) {
           node->block[i * 2] = L + R * gl;
           node->block[i * 2 + 1] = R * gr;
