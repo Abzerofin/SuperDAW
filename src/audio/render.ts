@@ -107,7 +107,7 @@ export interface ExternalPluginHost {
     instance: PluginInstance,
     channels: Float32Array[],
     sampleRate: number
-  ): Promise<Float32Array[] | null>
+  ): Promise<ExternalRender | null>
   /**
    * A PERSISTENT plugin for live playback, whose state carries across
    * calls so consecutive chunks continue each other's tails. Takes the
@@ -122,12 +122,26 @@ export interface ExternalPluginHost {
   ): Promise<ExternalInstance | null>
 }
 
+/**
+ * Processed audio plus what the plugin says it delayed it by. The latency
+ * matters as much as the audio: a look-ahead plugin's output starts
+ * `latencySamples` late, so a freeze that kept it would bake the track
+ * behind the grid — and behind what the live native path, which
+ * compensates it (src/audio/pdc.ts), plays.
+ */
+export interface ExternalRender {
+  channels: Float32Array[]
+  latencySamples?: number
+}
+
 /** A live plugin held open across chunks. Callers MUST close it. */
 export interface ExternalInstance {
   process(
     channels: Float32Array[],
     params: Readonly<Record<string, number>>
   ): Promise<Float32Array[] | null>
+  /** Reported delay, for the caller to align its windows by. */
+  readonly latencySamples: number
   close(): void
 }
 
@@ -666,13 +680,40 @@ export function segmentInserts(
   return segments
 }
 
+/**
+ * Drop `samples` from the head of every channel, zero-padding the tail so
+ * the length is unchanged — undoing a reported plugin latency. A plugin
+ * claiming more delay than there is audio is ignored rather than trusted
+ * into silence.
+ */
+export function shiftLeft(channels: Float32Array[], samples: number): Float32Array[] {
+  const shift = Math.round(samples)
+  const length = channels[0]?.length ?? 0
+  if (shift <= 0 || shift >= length) return channels
+  return channels.map((data) => {
+    const out = new Float32Array(length)
+    out.set(data.subarray(shift))
+    return out
+  })
+}
+
 function bufferChannels(buffer: AudioBuffer): Float32Array[] {
   const channels: Float32Array[] = []
   for (let ch = 0; ch < buffer.numberOfChannels; ch++) channels.push(buffer.getChannelData(ch))
   return channels
 }
 
-/** Run a buffer through external plugins in order, out of process. */
+/**
+ * Run a buffer through external plugins in order, out of process, undoing
+ * each one's reported latency as it goes.
+ *
+ * The trim is what makes a frozen track agree with live playback. A
+ * look-ahead plugin answers `latencySamples` and starts its output that
+ * late; live, the native path compensates by delaying everything else
+ * (src/audio/pdc.ts), and offline the equivalent is to drop those leading
+ * samples here. Without it a freeze would land the track behind the grid —
+ * which it has always done, quietly, and which is now measurable.
+ */
 async function processExternalSegment(
   buffer: AudioBuffer,
   instances: PluginInstance[],
@@ -683,7 +724,8 @@ async function processExternalSegment(
     const processed = await external.process(instance, channels, buffer.sampleRate)
     // A failed plugin bypasses rather than aborting the freeze, matching
     // how a missing plugin behaves everywhere else.
-    if (processed && processed.length > 0) channels = processed
+    if (!processed || processed.channels.length === 0) continue
+    channels = shiftLeft(processed.channels, processed.latencySamples ?? 0)
   }
   const out = new OfflineAudioContext(
     channels.length,

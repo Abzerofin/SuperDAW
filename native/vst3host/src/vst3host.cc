@@ -10,6 +10,10 @@
 //                    continuity a reverb tail or delay feedback would reset
 //                    at every chunk boundary, which is plainly audible.
 //
+// A third mode, openRealtime(), shares the same setup path but is driven
+// from ANOTHER addon's audio callback rather than from JS — see the
+// "Realtime instances" section and native/shared/vst3bridge.h.
+//
 // Identity only ever crosses the boundary as descriptor fields — never a
 // filesystem path from the document. See native/README.md.
 
@@ -22,10 +26,14 @@
 #endif
 
 #include <algorithm>
+#include <atomic>
 #include <map>
 #include <memory>
 #include <string>
+#include <thread>
 #include <vector>
+
+#include "vst3bridge.h"
 
 #include "pluginterfaces/gui/iplugview.h"
 #include "pluginterfaces/vst/ivstaudioprocessor.h"
@@ -249,6 +257,16 @@ struct Instance {
   int32 outChannels = 0;
   int32 inBusCount = 0;
   int32 processMode = kRealtime;
+  /**
+   * The plugin's own reported delay, in samples, read AFTER activation
+   * (the point the spec says it is valid). This is what plugin-delay
+   * compensation compensates: a look-ahead limiter or a linear-phase EQ
+   * answers with thousands of samples here, and everything else in the
+   * mix has to wait for it. Read once — a plugin may in principle change
+   * it and call restartComponent(kLatencyChanged), which this host does
+   * not yet chase.
+   */
+  int32 latency = 0;
 
   std::vector<std::vector<float>> inBlock, outBlock;
   std::vector<float*> inPtrs, outPtrs;
@@ -379,6 +397,7 @@ std::unique_ptr<Instance> CreateInstance(const std::string& path,
     return nullptr;
   }
   state->processor->setProcessing(true);
+  state->latency = state->processor->getLatencySamples();
 
   state->inBlock.assign(std::max(state->inChannels, 0),
                         std::vector<float>(blockSize, 0.f));
@@ -559,6 +578,9 @@ Napi::Object ProcessBuffer(const Napi::CallbackInfo& info) {
   result.Set("channels", ToJsChannels(env, output));
   result.Set("inputChannels", Napi::Number::New(env, state->inChannels));
   result.Set("outputChannels", Napi::Number::New(env, state->outChannels));
+  // The freeze path trims this off the head so a frozen track lands on the
+  // grid rather than late by the plugin's own delay.
+  result.Set("latencySamples", Napi::Number::New(env, state->latency));
   return result;
 }
 
@@ -604,6 +626,7 @@ Napi::Object OpenInstance(const Napi::CallbackInfo& info) {
   result.Set("handle", Napi::Number::New(env, handle));
   result.Set("inputChannels", Napi::Number::New(env, state->inChannels));
   result.Set("outputChannels", Napi::Number::New(env, state->outChannels));
+  result.Set("latencySamples", Napi::Number::New(env, state->latency));
   gInstances.emplace(handle, std::move(state));
   return result;
 }
@@ -679,6 +702,261 @@ Napi::Object CloseInstance(const Napi::CallbackInfo& info) {
   const size_t erased =
       gInstances.erase(info[0].As<Napi::Number>().Int32Value());
   result.Set("closed", Napi::Boolean::New(env, erased > 0));
+  return result;
+}
+
+// ---------------------------------------------------------------------------
+// Realtime instances (live in-callback playback)
+// ---------------------------------------------------------------------------
+//
+// Same plugin setup as openInstance, but driven from the AUDIO THREAD of a
+// different addon (audiohost) through the plain C table in
+// native/shared/vst3bridge.h. Nothing here may allocate, lock or call into
+// JS on that path:
+//
+//   - Slots are a FIXED array. A std::map lookup racing an insert from the
+//     JS thread would be undefined behaviour; an atomic pointer in a fixed
+//     slot is not.
+//   - `gRtBusy` is per SLOT, never per instance, so a teardown can wait for
+//     an in-flight process() without the audio thread ever touching freed
+//     memory (it takes the flag BEFORE it loads the pointer).
+//   - Parameter changes cross a single-producer/single-consumer ring of
+//     plain values; the ParameterChanges object is pre-sized at open, so
+//     draining the ring reuses queues instead of allocating them.
+
+struct RtParamChange {
+  uint32_t id = 0;
+  float value = 0;
+};
+
+/** Ring capacity. Overflow drops the OLDEST unread change (see Push). */
+constexpr uint32_t kRtParamRing = 512;
+/** Distinct parameters one block may carry without ParameterChanges growing. */
+constexpr int32 kRtMaxParams = 256;
+
+struct RtInstance {
+  std::unique_ptr<Instance> instance;
+  ParameterChanges changes{kRtMaxParams};
+
+  RtParamChange ring[kRtParamRing];
+  std::atomic<uint32_t> writeIndex{0};
+  std::atomic<uint32_t> readIndex{0};
+
+  /** JS thread only: queue one change for the next block to pick up. */
+  void Push(uint32_t id, float value) {
+    const uint32_t write = writeIndex.load(std::memory_order_relaxed);
+    ring[write % kRtParamRing] = RtParamChange{id, value};
+    writeIndex.store(write + 1, std::memory_order_release);
+  }
+};
+
+std::atomic<RtInstance*> gRtSlots[superdaw::kVst3RtSlots];
+/** Held by the audio thread for the duration of one process() call. */
+std::atomic<bool> gRtBusy[superdaw::kVst3RtSlots];
+/** JS-thread ownership, so a slot is not handed out twice. */
+std::unique_ptr<RtInstance> gRtOwned[superdaw::kVst3RtSlots];
+
+/**
+ * REALTIME. Drains queued parameter changes into the pre-sized
+ * ParameterChanges. Each id lands as one point at sample 0 — the same
+ * shape the offline path uses, and all the document's param model can say
+ * (values change per gesture, not per sample).
+ */
+void RtDrainParams(RtInstance& rt) {
+  rt.changes.clearQueue();
+  const uint32_t write = rt.writeIndex.load(std::memory_order_acquire);
+  uint32_t read = rt.readIndex.load(std::memory_order_relaxed);
+  // A ring that overflowed while the device was stopped: skip to the last
+  // kRtParamRing entries rather than replaying stale values.
+  if (write - read > kRtParamRing) read = write - kRtParamRing;
+  for (; read != write; ++read) {
+    const RtParamChange& change = rt.ring[read % kRtParamRing];
+    int32 queueIndex = 0;
+    if (auto* queue = rt.changes.addParameterData(change.id, queueIndex)) {
+      int32 pointIndex = 0;
+      queue->addPoint(0, std::min(1.0, std::max(0.0, static_cast<double>(change.value))),
+                      pointIndex);
+    }
+  }
+  rt.readIndex.store(write, std::memory_order_relaxed);
+}
+
+/** REALTIME. The bridge's process(); see vst3bridge.h for the contract. */
+bool RtProcess(int32_t slot, const float* const* in, uint32_t inChannels,
+               float* const* out, uint32_t outChannels, uint32_t frames) {
+  if (slot < 0 || slot >= superdaw::kVst3RtSlots || frames == 0) return false;
+  // Take the slot BEFORE reading the pointer: a teardown clears the pointer
+  // and then waits on this flag, so an instance can never be destroyed
+  // under a call that is already running.
+  bool expected = false;
+  if (!gRtBusy[slot].compare_exchange_strong(expected, true, std::memory_order_acquire)) {
+    return false;
+  }
+  RtInstance* rt = gRtSlots[slot].load(std::memory_order_acquire);
+  if (rt == nullptr) {
+    gRtBusy[slot].store(false, std::memory_order_release);
+    return false;
+  }
+
+  Instance& state = *rt->instance;
+  RtDrainParams(*rt);
+
+  AudioBusBuffers inBuffers{};
+  inBuffers.numChannels = static_cast<int32>(state.inBlock.size());
+  inBuffers.channelBuffers32 = state.inPtrs.empty() ? nullptr : state.inPtrs.data();
+  AudioBusBuffers outBuffers{};
+  outBuffers.numChannels = state.outChannels;
+  outBuffers.channelBuffers32 = state.outPtrs.data();
+
+  ProcessData data{};
+  data.processMode = state.processMode;
+  data.symbolicSampleSize = kSample32;
+  data.numInputs = state.inBusCount > 0 ? 1 : 0;
+  data.numOutputs = 1;
+  data.inputs = state.inBusCount > 0 ? &inBuffers : nullptr;
+  data.outputs = &outBuffers;
+  data.inputParameterChanges = &rt->changes;
+
+  bool ok = true;
+  for (uint32_t offset = 0; offset < frames && ok;
+       offset += static_cast<uint32_t>(state.blockSize)) {
+    const int32 n = static_cast<int32>(
+        std::min<uint32_t>(static_cast<uint32_t>(state.blockSize), frames - offset));
+    for (size_t ch = 0; ch < state.inBlock.size(); ++ch) {
+      // Mono material into a stereo input reuses the last real channel,
+      // exactly as the offline path does.
+      const size_t src = inChannels > 0 ? std::min<size_t>(ch, inChannels - 1) : 0;
+      if (inChannels > 0) {
+        std::copy(in[src] + offset, in[src] + offset + n, state.inBlock[ch].begin());
+      } else {
+        std::fill(state.inBlock[ch].begin(), state.inBlock[ch].begin() + n, 0.f);
+      }
+      std::fill(state.inBlock[ch].begin() + n, state.inBlock[ch].end(), 0.f);
+    }
+    data.numSamples = n;
+    ok = state.processor->process(data) == kResultOk;
+    if (!ok) break;
+    for (uint32_t ch = 0; ch < outChannels; ++ch) {
+      const int32 src = std::min<int32>(static_cast<int32>(ch), state.outChannels - 1);
+      std::copy(state.outBlock[src].begin(), state.outBlock[src].begin() + n,
+                out[ch] + offset);
+    }
+    // Only the first sub-block carries the queued parameter points; a
+    // second one must not re-apply them at ITS sample 0.
+    data.inputParameterChanges = nullptr;
+  }
+
+  gRtBusy[slot].store(false, std::memory_order_release);
+  return ok;
+}
+
+superdaw::Vst3RtBridge gRtBridge{superdaw::kVst3RtBridgeAbi, &RtProcess};
+
+/** realtimeBridge() -> external pointer to the C table (see vst3bridge.h). */
+Napi::Value RealtimeBridge(const Napi::CallbackInfo& info) {
+  return Napi::External<superdaw::Vst3RtBridge>::New(info.Env(), &gRtBridge);
+}
+
+/**
+ * openRealtime(path, uid, { sampleRate, blockSize?, channels?, state? })
+ *   -> { slot, latencySamples, inputChannels, outputChannels } | { error }
+ *
+ * `blockSize` must be at least the audio engine's block, since the caller
+ * hands whole blocks in one call.
+ */
+Napi::Object OpenRealtime(const Napi::CallbackInfo& info) {
+  Napi::Env env = info.Env();
+  if (info.Length() < 3 || !info[0].IsString() || !info[1].IsString() ||
+      !info[2].IsObject()) {
+    return Fail(env, "expected (path, uid, options)");
+  }
+  int32_t slot = -1;
+  for (int32_t i = 0; i < superdaw::kVst3RtSlots; ++i) {
+    if (!gRtOwned[i]) {
+      slot = i;
+      break;
+    }
+  }
+  if (slot < 0) return Fail(env, "no free realtime slot");
+
+  const std::string path = info[0].As<Napi::String>().Utf8Value();
+  auto parsedUid = VST3::UID::fromString(info[1].As<Napi::String>().Utf8Value());
+  if (!parsedUid) return Fail(env, "could not parse uid");
+
+  Napi::Object options = info[2].As<Napi::Object>();
+  const double sampleRate = options.Has("sampleRate")
+                                ? options.Get("sampleRate").ToNumber().DoubleValue()
+                                : 48000.0;
+  int32 blockSize = options.Has("blockSize")
+                        ? options.Get("blockSize").ToNumber().Int32Value()
+                        : 128;
+  if (blockSize <= 0) blockSize = 128;
+  int32 channels = options.Has("channels")
+                       ? options.Get("channels").ToNumber().Int32Value()
+                       : 2;
+  if (channels <= 0) channels = 2;
+
+  std::string error;
+  auto state = CreateInstance(path, *parsedUid, sampleRate, blockSize, channels,
+                              kRealtime, error, ReadStateOption(options));
+  if (!state) return Fail(env, error);
+
+  auto rt = std::make_unique<RtInstance>();
+  rt->instance = std::move(state);
+  const int32 latency = rt->instance->latency;
+  const int32 inChannels = rt->instance->inChannels;
+  const int32 outChannels = rt->instance->outChannels;
+
+  gRtOwned[slot] = std::move(rt);
+  // Publish LAST: until this store the audio thread cannot see the slot.
+  gRtSlots[slot].store(gRtOwned[slot].get(), std::memory_order_release);
+
+  Napi::Object result = Napi::Object::New(env);
+  result.Set("slot", Napi::Number::New(env, slot));
+  result.Set("latencySamples", Napi::Number::New(env, latency));
+  result.Set("inputChannels", Napi::Number::New(env, inChannels));
+  result.Set("outputChannels", Napi::Number::New(env, outChannels));
+  return result;
+}
+
+/** setRealtimeParams(slot, params) — normalized 0..1, keyed by param id. */
+Napi::Value SetRealtimeParams(const Napi::CallbackInfo& info) {
+  Napi::Env env = info.Env();
+  if (info.Length() < 2 || !info[0].IsNumber() || !info[1].IsObject()) return env.Undefined();
+  const int32_t slot = info[0].As<Napi::Number>().Int32Value();
+  if (slot < 0 || slot >= superdaw::kVst3RtSlots || !gRtOwned[slot]) return env.Undefined();
+  RtInstance& rt = *gRtOwned[slot];
+  Napi::Object params = info[1].As<Napi::Object>();
+  Napi::Array ids = params.GetPropertyNames();
+  for (uint32_t i = 0; i < ids.Length(); ++i) {
+    Napi::Value key = ids.Get(i);
+    uint32_t id = 0;
+    try {
+      id = static_cast<uint32_t>(std::stoul(key.ToString().Utf8Value()));
+    } catch (...) {
+      continue;  // a non-numeric key is not a VST3 parameter id
+    }
+    rt.Push(id, static_cast<float>(params.Get(key).ToNumber().DoubleValue()));
+  }
+  return env.Undefined();
+}
+
+/** closeRealtime(slot) -> { closed } — waits out any in-flight process(). */
+Napi::Object CloseRealtime(const Napi::CallbackInfo& info) {
+  Napi::Env env = info.Env();
+  Napi::Object result = Napi::Object::New(env);
+  const int32_t slot =
+      info.Length() > 0 && info[0].IsNumber() ? info[0].As<Napi::Number>().Int32Value() : -1;
+  if (slot < 0 || slot >= superdaw::kVst3RtSlots || !gRtOwned[slot]) {
+    result.Set("closed", Napi::Boolean::New(env, false));
+    return result;
+  }
+  gRtSlots[slot].store(nullptr, std::memory_order_release);
+  // One block is microseconds; a spin with yields is bounded and keeps the
+  // audio thread free of any teardown handshake at all.
+  while (gRtBusy[slot].load(std::memory_order_acquire)) std::this_thread::yield();
+  gRtOwned[slot].reset();
+  result.Set("closed", Napi::Boolean::New(env, true));
   return result;
 }
 
@@ -1201,6 +1479,10 @@ Napi::Object Init(Napi::Env env, Napi::Object exports) {
   exports.Set("getEditorParams", Napi::Function::New(env, GetEditorParams));
   exports.Set("processInstance", Napi::Function::New(env, ProcessInstance));
   exports.Set("closeInstance", Napi::Function::New(env, CloseInstance));
+  exports.Set("realtimeBridge", Napi::Function::New(env, RealtimeBridge));
+  exports.Set("openRealtime", Napi::Function::New(env, OpenRealtime));
+  exports.Set("setRealtimeParams", Napi::Function::New(env, SetRealtimeParams));
+  exports.Set("closeRealtime", Napi::Function::New(env, CloseRealtime));
   return exports;
 }
 

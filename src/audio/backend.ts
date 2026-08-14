@@ -38,6 +38,7 @@ import type {
   BackendLatencies,
   BackendNodeId,
   DeviceInfo,
+  ExternalPluginSpec,
   NodeKind,
   NodeOptions,
   ParamEvent,
@@ -52,6 +53,7 @@ export type {
   BackendLatencies,
   BackendNodeId,
   DeviceInfo,
+  ExternalPluginSpec,
   NodeKind,
   NodeOptions,
   ParamEvent,
@@ -60,6 +62,31 @@ export type {
   StreamInfo,
   TapId,
   VoiceId
+}
+
+/**
+ * Hosting external plugin formats (VST3) INSIDE the audio graph — the
+ * capability the native backend has and Web Audio structurally cannot
+ * (docs/NATIVE_AUDIO_BACKEND.md §5). Null on backends without it, where
+ * external inserts keep the freeze / windowed-preview route.
+ *
+ * Opening a plugin is slow and can fail, so `create` is fire-and-forget
+ * like every other node call: the node exists immediately and passes
+ * audio through until (or unless) the host reports it live. Latency
+ * arrives the same way — the plugin has to load before it can be asked.
+ */
+export interface ExternalPluginBackend {
+  create(spec: ExternalPluginSpec): BackendNodeId
+  /** Normalized 0..1 values keyed by the plugin's own parameter ids. */
+  setParams(node: BackendNodeId, params: Readonly<Record<string, number>>): void
+  /**
+   * Reported delay in SAMPLES: 0 once the plugin is live and reports none,
+   * null while it has not answered (or never will, having failed to open —
+   * in which case the node is bypassing and contributes no delay either).
+   */
+  latencySamples(node: BackendNodeId): number | null
+  /** Fires when any node's reported latency changes. Returns unsubscribe. */
+  onLatencyChange(listener: () => void): () => void
 }
 
 export interface IAudioBackend {
@@ -133,6 +160,9 @@ export interface IAudioBackend {
 
   /** Phase-0 escape hatch — see module comment. Null on non-Web-Audio backends. */
   readonly webAudio: WebAudioEscapes | null
+
+  /** External-plugin hosting, or null where the backend cannot (see above). */
+  readonly externalPlugins: ExternalPluginBackend | null
 }
 
 /** The Web-Audio-only surface (each use is phase-2/3 work — module comment). */
@@ -215,6 +245,13 @@ export class WebAudioBackend implements IAudioBackend {
   private nextId = 1
 
   readonly webAudio: WebAudioEscapes
+  /**
+   * Web Audio cannot host a VST3 in the renderer's graph — that is the
+   * whole reason the native backend exists (docs/ARCHITECTURE.md). So
+   * external inserts keep the freeze / windowed-preview behaviour here,
+   * and this stays null forever rather than pretending otherwise.
+   */
+  readonly externalPlugins = null
 
   constructor(
     private options: {
@@ -339,15 +376,24 @@ export class WebAudioBackend implements IAudioBackend {
         ? ctx.createGain()
         : kind === 'stereoPanner'
           ? ctx.createStereoPanner()
-          : kind === 'delay'
-            ? ctx.createDelay(typeof opts?.maxDelay === 'number' ? opts.maxDelay : 1)
+          : kind === 'delay' || kind === 'pdc'
+            ? // A PDC compensator is a plain delay line here. Not being in
+              // a cycle, it has no one-quantum minimum, so delayTime 0 is
+              // an exact passthrough — which is the only value it ever
+              // takes on this backend, since the one thing that reports
+              // latency (an external plugin) never joins this graph.
+              ctx.createDelay(typeof opts?.maxDelay === 'number' ? opts.maxDelay : 1)
             : kind === 'compressor'
               ? ctx.createDynamicsCompressor()
               : kind === 'convolver'
                 ? ctx.createConvolver()
                 : kind === 'oscillator'
                   ? ctx.createOscillator()
-                  : ctx.createBiquadFilter()
+                  : kind === 'external'
+                    ? // Nothing to host: a unity gain, so the chain stays
+                      // connected and the insert simply bypasses.
+                      ctx.createGain()
+                    : ctx.createBiquadFilter()
     const id = this.nextId++
     this.nodes.set(id, node)
     if (opts) this.configureNode(id, opts)

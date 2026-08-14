@@ -187,7 +187,7 @@ const api = {
     sampleRate: number
     params?: Record<string, number>
     stateBlob?: string | null
-  }): Promise<{ channels?: Float32Array[]; error?: string }> =>
+  }): Promise<{ channels?: Float32Array[]; latencySamples?: number; error?: string }> =>
     ipcRenderer.invoke('vst3:process', args),
 
   /**
@@ -201,8 +201,13 @@ const api = {
     blockSize?: number
     channels?: number
     stateBlob?: string | null
-  }): Promise<{ handle?: number; outputChannels?: number; error?: string }> =>
-    ipcRenderer.invoke('vst3:open-instance', args),
+  }): Promise<{
+    handle?: number
+    outputChannels?: number
+    /** The plugin's reported delay, for aligning what it returns. */
+    latencySamples?: number
+    error?: string
+  }> => ipcRenderer.invoke('vst3:open-instance', args),
 
   /** Open a plugin's own GUI in a floating window (one per insert). */
   vst3OpenEditor: (args: {

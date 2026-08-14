@@ -89,14 +89,19 @@ interface Window {
       sampleRate: number
       params?: Record<string, number>
       stateBlob?: string | null
-    }): Promise<{ channels?: Float32Array[]; error?: string }>
+    }): Promise<{ channels?: Float32Array[]; latencySamples?: number; error?: string }>
     vst3OpenInstance(args: {
       uid: string
       sampleRate: number
       blockSize?: number
       channels?: number
       stateBlob?: string | null
-    }): Promise<{ handle?: number; outputChannels?: number; error?: string }>
+    }): Promise<{
+      handle?: number
+      outputChannels?: number
+      latencySamples?: number
+      error?: string
+    }>
     vst3InstanceState(handle: number): Promise<{ stateBlob?: string; error?: string }>
     vst3OpenEditor(args: {
       instanceId: string

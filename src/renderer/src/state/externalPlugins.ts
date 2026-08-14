@@ -3,7 +3,7 @@ import type { ParamDef } from '@core/model/effects'
 import type { PluginDescriptor } from '@core/plugins/descriptor'
 import { descriptorKey } from '@core/plugins/descriptor'
 import { pluginRegistry } from '@audio/pluginRegistry'
-import type { ExternalPluginHost } from '@audio/render'
+import type { ExternalPluginHost, ExternalRender } from '@audio/render'
 
 /**
  * Index of VST3 plugins the MAIN process can run, and the bridge for
@@ -250,7 +250,7 @@ export function externalPluginHost(): ExternalPluginHost | null {
       instance: PluginInstance,
       channels: Float32Array[],
       sampleRate: number
-    ): Promise<Float32Array[] | null> => {
+    ): Promise<ExternalRender | null> => {
       const result = await api.vst3Process({
         uid: instance.descriptor.uid,
         channels,
@@ -267,7 +267,9 @@ export function externalPluginHost(): ExternalPluginHost | null {
         )
         return null
       }
-      return result.channels
+      // The caller trims this off the head, so a frozen track lands on the
+      // grid instead of behind it by the plugin's own delay.
+      return { channels: result.channels, latencySamples: result.latencySamples }
     },
 
     open: async (instance, sampleRate, channels) => {
@@ -289,6 +291,7 @@ export function externalPluginHost(): ExternalPluginHost | null {
       const handle = opened.handle
       let closed = false
       return {
+        latencySamples: opened.latencySamples ?? 0,
         process: async (chunk, params) => {
           if (closed) return null
           const result = await api.vst3ProcessInstance!({

@@ -293,18 +293,26 @@ The built-in instruments (analog synth, sampler, drum kit — see their own
 section) still live on MIDI tracks (`Track.synth`); folding them into
 instrument-plugin instances is a future, separate migration.
 
-### External plugins (VST3) — hosted, but only offline
+### External plugins (VST3) — live under the native backend, offline under Web Audio
 
 VST3 hosting lives in a native addon (`native/vst3host`, Node-API so one
-build loads in both Node and Electron) running in the MAIN process. That
-placement is forced: the renderer runs `sandbox: true`, and a sandboxed
-preload cannot `require()` a native addon. It also rules out live
-streaming — `SharedArrayBuffer` does not cross an Electron process
-boundary, so the usual "native thread writes a SAB, an AudioWorklet reads
-it" design is unavailable, and per-block IPC is far too slow (a 128-frame
-block at 48 kHz is 2.7 ms).
+build loads in both Node and Electron). It cannot live in the renderer:
+that runs `sandbox: true`, and a sandboxed preload cannot `require()` a
+native addon. Nor can the renderer's Web Audio graph reach one across a
+process boundary — `SharedArrayBuffer` does not cross it, so the usual
+"native thread writes a SAB, an AudioWorklet reads it" design is
+unavailable, and per-block IPC is far too slow (a 128-frame block at
+48 kHz is 2.7 ms).
 
-So external inserts are **rendered at freeze time**, which is exactly what
+**Which is why there are two live behaviours, and which one you get
+depends on the audio backend.** Under the native backend the audio
+utilityProcess loads vst3host beside audiohost, so a plugin is one
+lock-free slot from the realtime callback and runs as an ordinary insert
+(next section). Under Web Audio — the default, the browser build, and
+every offline render — nothing has changed: external inserts are rendered
+at freeze time and previewed through the windowed look-ahead.
+
+So under Web Audio, external inserts are **rendered at freeze time**, which is exactly what
 freeze was already for. `renderTrackFreeze` takes an optional
 `ExternalPluginHost` (injected, so `src/audio` stays free of Electron and
 the browser build simply passes nothing). When any insert needs it, the
@@ -340,6 +348,63 @@ are ignored, never trusted). And loaded documents get the same hygiene as
 routes: `format.ts` sanitizes every plugin instance field-by-field
 (descriptor shape, params, blob, rank, track existence) so a doctored
 `.sdaw` cannot smuggle malformed plugin state past the reducer.
+
+### Live VST3 inserts in the callback, and plugin-delay compensation
+
+Under the native backend the audio utilityProcess loads BOTH addons, so
+the wall above moves: the plugin is in the same process as the realtime
+thread, one lock-free slot away instead of behind two seconds of
+look-ahead. Design detail lives in NATIVE_AUDIO_BACKEND.md §5; the parts
+that shape the app:
+
+- **The bridge is a plain C table** (`native/shared/vst3bridge.h`), not a
+  Node-API call: an audio callback cannot enter a JS runtime at all. The
+  table is passed between the two addons as an opaque pointer and its ABI
+  is checked on arrival, because the addons are built separately and
+  nothing otherwise guarantees they were built together. Realtime slots
+  are a FIXED array with a per-slot busy flag the callback takes *before*
+  it reads the pointer, so closing a plugin waits out an in-flight block
+  instead of freeing memory under it.
+- **An external insert is an ordinary insert.** It builds through the same
+  `PluginNodes` shape the builtins use (`audio/externalInsert.ts`), so
+  the engine's chain wiring, bypass, reorder and graph-routing logic are
+  untouched. The provider is minted PER INSTANCE, not registered in the
+  `PluginRegistry`: the plugin needs the instance's opaque `stateBlob` at
+  open time, and the registry's question ("can this descriptor join the
+  RENDERER's graph") is still honestly answered `no` — which is what keeps
+  freeze, mixdown and the export bypass notice correct.
+- **The renderer still never learns a path.** It sends a descriptor uid;
+  MAIN pushes the uid → path index to the audio process over the
+  utilityProcess's own port, never through the renderer.
+- **GUI-only edits reopen the plugin.** Those live solely in the
+  `stateBlob`, which a running instance cannot be told about (it is
+  restored at open), so a changed blob disposes and rebuilds the insert.
+  Params never need this — they are pushed live through a lock-free ring.
+- **Plugin-delay compensation** (`audio/pdc.ts`) is new, and exists
+  because a plugin can now report latency into a live graph at all. Each
+  track chain carries two compensators: one on its own sources and one on
+  its output. Two, because a folder's chain input is fed both by its own
+  material and by its children, and those need different amounts — the
+  children arrive already late by their own plugins. Builtins report
+  ZERO, deliberately: they are Web Audio primitives and Web Audio
+  compensates nothing for them (not even the compressor's internal 6 ms
+  look-ahead), so claiming any here would make live playback disagree
+  with a bounce. The total shows up in the engine's reported output
+  latency, so the drawn playhead lags with the audio.
+- **Licensing is unchanged by this**, and worth saying so explicitly since
+  the audible effect moved. Nobody's plugin is operated across the
+  network and no processed audio is streamed: a collaborator changes a
+  value in the shared document and each machine's own installed copy
+  reads it locally, exactly as before — only sooner. `Declining` (Settings
+  ▸ Collaboration → `acceptCollaboratorParamEdits`) still applies
+  unchanged; it withdraws the placeholder's controls on the non-owner's
+  machine, which is upstream of any of this.
+- **All three paths agree on alignment.** Live native compensates; freeze
+  trims each plugin's reported latency off the head of its segment (a
+  bug that had always been there quietly, and is only measurable now that
+  latency is read at all); and the Web Audio preview reads its dry window
+  that far ahead, which cancels the same delay. The tolerance differs —
+  the preview shifts in whole ticks, the other two in samples.
 
 ## File Bay & persistence
 
@@ -1048,10 +1113,27 @@ anyone raises the comfortable ~100-200-track ceiling.
     the runner takes an injectable stimulus sink so the loop verifies
     hardware-free (an in-context DelayNode reads back exactly).
 
+33. ✅ **Live VST3 inserts + plugin-delay compensation**
+    (NATIVE_AUDIO_BACKEND.md phase 5) — the audio utilityProcess loads
+    BOTH native addons, so an external insert is processed inside the
+    realtime callback instead of behind the 2-second windowed preview.
+    `native/shared/vst3bridge.h` is the plain C table audiohost's callback
+    calls (napi cannot be called from an audio thread); slots are a fixed
+    array with a per-slot busy flag, so a teardown waits out an in-flight
+    block rather than freeing under it. Two new node kinds: `external`
+    (the plugin call, bypassing when no slot is bound) and `pdc` (an exact
+    integer delay — separate from `delay`, whose read side is clamped to a
+    block to resolve feedback cycles). PDC itself is `audio/pdc.ts`: each
+    chain carries a source compensator and an output compensator, because
+    a folder's own material and its children's need different amounts.
+    Only the native backend can do any of this, so the two live
+    behaviours are kept honest by aligning all three paths — live native
+    (PDC), freeze (trims each plugin's reported latency) and the Web Audio
+    preview (reads its dry window that far ahead).
+
 Roadmap beyond: the native backend phases
 (docs/NATIVE_AUDIO_BACKEND.md), collaborator audio streaming +
-proxy renders for remote/missing plugins, live VST3-in-callback + PDC
-(door opened by the backend design), autotune/pitch correction (dedicated
+proxy renders for remote/missing plugins, autotune/pitch correction (dedicated
 AudioWorklet DSP milestone: pitch detection + PSOLA resynthesis),
 per-strip metering + live LUFS on the master, sustain-pedal (CC64) and
 MIDI activity indicators, engine rewire batching for bulk import/template

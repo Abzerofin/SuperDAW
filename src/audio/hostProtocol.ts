@@ -15,6 +15,13 @@ export interface HostStartOptions {
   exclusive?: boolean
 }
 
+/**
+ * The native engine's internal block, and therefore the largest chunk an
+ * external plugin is ever handed in one process() call. Must match
+ * sdengine::kBlockFrames in native/audiohost/src/engine.h.
+ */
+export const AUDIO_BLOCK_FRAMES = 128
+
 /** Renderer → host. */
 export type HostCommand =
   | { t: 'start'; opts: HostStartOptions }
@@ -24,6 +31,22 @@ export type HostCommand =
   /** Reopen the stream on another output device (null = system default). */
   | { t: 'setOutputDevice'; deviceId: string | null }
   | { t: 'createNode'; id: number; kind: NodeKind; opts?: NodeOptions }
+  /**
+   * An `external` node's plugin. Sent BEFORE the createNode it belongs to
+   * would otherwise be, because opening a VST3 is slow and can fail: the
+   * host loads it, then creates the node bound (or not) to a slot, then
+   * answers with `externalReady`. Identity is the descriptor uid — the
+   * renderer never learns, and never sends, a filesystem path.
+   */
+  | {
+      t: 'openExternal'
+      id: number
+      uid: string
+      stateBlob?: string | null
+      channels?: number
+    }
+  /** Normalized 0..1 values keyed by the plugin's own parameter ids. */
+  | { t: 'setPluginParams'; node: number; params: Record<string, number> }
   | { t: 'configureNode'; id: number; opts: NodeOptions }
   | { t: 'connect'; from: number; to: number }
   | { t: 'connectParam'; from: number; to: number; param: ParamName }
@@ -67,6 +90,19 @@ export type HostEvent =
    * without an RPC round-trip inside the UI's path.
    */
   | { t: 'devices'; devices: DeviceInfo[] }
+  /**
+   * The answer to `openExternal`. `ok: false` means the insert is
+   * bypassing — no host, plugin not installed, or the plugin refused to
+   * load — which the renderer reports once rather than retrying.
+   * `latencySamples` is what plugin-delay compensation compensates.
+   */
+  | {
+      t: 'externalReady'
+      node: number
+      ok: boolean
+      latencySamples: number
+      message?: string
+    }
   | {
       t: 'frame'
       /** Stream time when the frame was assembled (the clock base). */
@@ -79,6 +115,18 @@ export type HostEvent =
 
 /** Cadence of the upstream frame (clock resync, meters, ended voices). */
 export const HOST_FRAME_INTERVAL_MS = 33
+
+/**
+ * MAIN → audio process, over the utilityProcess's own parentPort rather
+ * than the renderer's port. A plugin's filesystem path is main's to know:
+ * it comes from main's scanner and must never reach the renderer or the
+ * document, so the audio process is told directly.
+ */
+export interface HostPluginIndex {
+  t: 'plugins'
+  /** descriptor uid → installed bundle path. */
+  paths: Record<string, string>
+}
 
 /** The MessagePort surface both ends actually use (works for Electron's
  *  MessagePortMain-in-utilityProcess and the DOM MessagePort alike). */

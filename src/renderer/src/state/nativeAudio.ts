@@ -81,8 +81,9 @@ export function initNativeAudio(): void {
       audioEngine.setBackendFactory(() => backend)
       statusNotice.show(
         `Native audio active (WASAPI${data.info.exclusive ? ' exclusive' : ''}, ` +
-          `${data.info.sampleRate} Hz, ${data.info.periodFrames}-frame periods). Experimental: ` +
-          'builtin effects, instruments, recording and monitoring stay on Web Audio features.'
+          `${data.info.sampleRate} Hz, ${data.info.periodFrames}-frame periods). ` +
+          'VST3 inserts play live, delay-compensated. Experimental: recording and ' +
+          'input monitoring are unavailable here and need Web Audio.'
       )
     }
     raw.addEventListener('message', decide)

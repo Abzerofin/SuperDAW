@@ -1,6 +1,7 @@
 import type { ProjectState, TrackId } from '@core/model/types'
 import { pluginsOfTrack } from '@core/model/types'
 import { pluginRegistry } from './pluginRegistry'
+import { ticksPerSecond } from './scheduling'
 import {
   canLivePreview,
   renderPreviewWindow,
@@ -109,12 +110,30 @@ export class LivePreview {
     const held = this.instances.get(trackId)
     if (!held || held.length === 0) return null
 
+    // Plugin-delay compensation, done by feeding the plugins the future.
+    //
+    // A plugin that reports L samples of latency answers a window with the
+    // response to material L earlier, which would put the whole previewed
+    // track L late. Reading the DRY window L ahead cancels it exactly: the
+    // plugin's output for [from + L, until + L) is the response to
+    // [from, until), which is the window we wanted. The plugin's input
+    // stream stays continuous because every window is shifted by the same
+    // amount, so tails and delay lines carry across boundaries as before.
+    //
+    // The shift rounds to whole ticks, so it can be out by up to half a
+    // tick (~0.3 ms at 120 bpm) — constant across windows, and far below
+    // what the 2-second preview window itself costs. The native backend,
+    // which runs these plugins in its own callback, compensates in samples
+    // instead (src/audio/pdc.ts).
+    const shiftTicks = Math.round(
+      this.chainLatencySec(held) * ticksPerSecond(this.store.state.tempo)
+    )
     const dry = await renderPreviewWindow(
       this.store.state,
       trackId,
       this.assets,
-      fromTicks,
-      untilTicks,
+      fromTicks + shiftTicks,
+      untilTicks + shiftTicks,
       this.sampleRate
     )
     if (!dry) return null
@@ -154,6 +173,16 @@ export class LivePreview {
       out.getChannelData(ch).set(channels[ch].subarray(0, dry.length))
     }
     return out
+  }
+
+  /**
+   * Total delay this track's held plugins report, in seconds. They run in
+   * series, so their latencies add.
+   */
+  private chainLatencySec(held: readonly HeldInstance[]): number {
+    let samples = 0
+    for (const { live } of held) samples += Math.max(0, live.latencySamples)
+    return samples / this.sampleRate
   }
 
   isOpen(trackId: TrackId): boolean {

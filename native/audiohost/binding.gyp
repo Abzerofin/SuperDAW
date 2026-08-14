@@ -5,7 +5,8 @@
       "sources": ["src/audiohost.cc", "src/miniaudio_impl.c"],
       "include_dirs": [
         "<!@(node -p \"require('node-addon-api').include\")",
-        "vendor"
+        "vendor",
+        "../shared"
       ],
       "defines": [
         "NAPI_DISABLE_CPP_EXCEPTIONS",

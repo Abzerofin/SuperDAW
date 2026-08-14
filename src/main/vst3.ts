@@ -47,7 +47,7 @@ interface Vst3Addon {
       params?: Record<string, number>
       state?: Buffer
     }
-  ): { error?: string; channels?: Float32Array[] }
+  ): { error?: string; channels?: Float32Array[]; latencySamples?: number }
   parameters(
     path: string,
     uid: string
@@ -56,7 +56,13 @@ interface Vst3Addon {
     path: string,
     uid: string,
     options: { sampleRate: number; blockSize?: number; channels?: number; state?: Buffer }
-  ): { error?: string; handle?: number; inputChannels?: number; outputChannels?: number }
+  ): {
+    error?: string
+    handle?: number
+    inputChannels?: number
+    outputChannels?: number
+    latencySamples?: number
+  }
   getInstanceState(handle: number): { error?: string; component?: Buffer }
   processInstance(
     handle: number,
@@ -577,7 +583,12 @@ export function registerVst3Ipc(): void {
         channels?: number
         stateBlob?: string | null
       }
-    ): Promise<{ handle?: number; outputChannels?: number; error?: string }> => {
+    ): Promise<{
+      handle?: number
+      outputChannels?: number
+      latencySamples?: number
+      error?: string
+    }> => {
       const host = loadAddon()
       if (!host) return { error: loadError ?? 'vst3 host unavailable' }
       const plugin = await findPlugin(args.uid)
@@ -592,7 +603,13 @@ export function registerVst3Ipc(): void {
         if (result.error || result.handle === undefined) {
           return { error: result.error ?? 'could not open instance' }
         }
-        return { handle: result.handle, outputChannels: result.outputChannels }
+        return {
+          handle: result.handle,
+          outputChannels: result.outputChannels,
+          // What the plugin says it delays by: the caller aligns its
+          // windows to it (src/audio/livePreview.ts).
+          latencySamples: result.latencySamples
+        }
       } catch (error) {
         return { error: error instanceof Error ? error.message : String(error) }
       }
@@ -663,7 +680,7 @@ export function registerVst3Ipc(): void {
         params?: Record<string, number>
         stateBlob?: string | null
       }
-    ): Promise<{ channels?: Float32Array[]; error?: string }> => {
+    ): Promise<{ channels?: Float32Array[]; latencySamples?: number; error?: string }> => {
       const host = loadAddon()
       if (!host) return { error: loadError ?? 'vst3 host unavailable' }
       // The renderer sends a descriptor uid, never a filesystem path —
@@ -681,7 +698,9 @@ export function registerVst3Ipc(): void {
         if (result.error || !result.channels) {
           return { error: result.error ?? 'processing failed' }
         }
-        return { channels: result.channels }
+        // The freeze path trims this off the head so a frozen track lands
+        // on the grid rather than behind it by the plugin's own delay.
+        return { channels: result.channels, latencySamples: result.latencySamples }
       } catch (error) {
         // A third-party binary throwing must not take the app down.
         return { error: error instanceof Error ? error.message : String(error) }

@@ -4,7 +4,7 @@ import { createEmptyProject } from '@core/model/types'
 import type { PluginDescriptor } from '@core/plugins/descriptor'
 import { builtinEffectDescriptor } from '@core/plugins/builtin'
 import { apply } from '@core/ops/apply'
-import { canLivePreview, segmentInserts, type ExternalPluginHost } from '../render'
+import { canLivePreview, segmentInserts, shiftLeft, type ExternalPluginHost } from '../render'
 
 /**
  * Chain ORDER is the property that matters here: an EQ before a saturator
@@ -195,5 +195,43 @@ suite('canLivePreview', () => {
     // external" at all; there is also then nothing to preview.
     const state = stateWith(instance('a', VST3('ghost'), 1), instance('b', EQ, 2))
     expect(can(state, hostWith('sat'))).toBe(false)
+  })
+})
+
+/**
+ * Undoing a plugin's reported latency on the freeze path.
+ *
+ * A look-ahead plugin's output starts `latencySamples` late. Live, the
+ * native path compensates by delaying everything else (audio/pdc.ts);
+ * offline there is nothing else to delay, so the leading samples come off
+ * instead. Without this a frozen track sits behind the grid — and behind
+ * what live playback of the same chain produces.
+ */
+suite('shiftLeft', () => {
+  const ramp = (n: number): Float32Array => Float32Array.from({ length: n }, (_, i) => i + 1)
+
+  test('drops the head and zero-pads the tail, keeping the length', () => {
+    const out = shiftLeft([ramp(8)], 3)
+    expect([...out[0]]).toEqual([4, 5, 6, 7, 8, 0, 0, 0])
+  })
+
+  test('a plugin reporting no latency is left exactly alone', () => {
+    const input = [ramp(4)]
+    expect(shiftLeft(input, 0)).toBe(input)
+    expect(shiftLeft(input, -5)).toBe(input)
+  })
+
+  test('every channel shifts by the same amount', () => {
+    const [left, right] = shiftLeft([ramp(5), ramp(5).map((v) => -v)], 2)
+    expect([...left]).toEqual([3, 4, 5, 0, 0])
+    expect([...right]).toEqual([-3, -4, -5, 0, 0])
+  })
+
+  test('a latency claim longer than the audio is ignored, not obeyed', () => {
+    // Trusting it would hand the freeze pure silence. A wrong number
+    // should cost alignment, never the whole track.
+    const input = [ramp(4)]
+    expect(shiftLeft(input, 4)).toBe(input)
+    expect(shiftLeft(input, 99)).toBe(input)
   })
 })
