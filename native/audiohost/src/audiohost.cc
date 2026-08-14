@@ -392,17 +392,22 @@ Napi::Value CreateNode(const Napi::CallbackInfo& info) {
   const uint32_t id = info[0].As<Napi::Number>().Uint32Value();
   const std::string kind = info[1].As<Napi::String>();
   std::string biquadType;
+  double maxDelay = 1;
   if (info.Length() > 2 && info[2].IsObject()) {
     auto opts = info[2].As<Napi::Object>();
     if (opts.Has("type") && opts.Get("type").IsString()) {
       biquadType = opts.Get("type").As<Napi::String>();
     }
+    if (opts.Has("maxDelay") && opts.Get("maxDelay").IsNumber()) {
+      maxDelay = opts.Get("maxDelay").As<Napi::Number>().DoubleValue();
+    }
   }
-  const sdengine::NodeKind nodeKind = kind == "stereoPanner"
-                                          ? sdengine::NodeKind::Panner
-                                          : kind == "biquad" ? sdengine::NodeKind::Biquad
-                                                             : sdengine::NodeKind::Gain;
-  EngineOf(env).CreateNode(id, nodeKind, biquadType);
+  const sdengine::NodeKind nodeKind =
+      kind == "stereoPanner" ? sdengine::NodeKind::Panner
+      : kind == "biquad"     ? sdengine::NodeKind::Biquad
+      : kind == "delay"      ? sdengine::NodeKind::Delay
+                             : sdengine::NodeKind::Gain;
+  EngineOf(env).CreateNode(id, nodeKind, biquadType, maxDelay);
   return env.Undefined();
 }
 

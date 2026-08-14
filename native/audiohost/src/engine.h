@@ -163,7 +163,7 @@ class ParamTimeline {
 
 // ----------------------------------------------------------------- graph
 
-enum class NodeKind : uint8_t { Gain, Panner, Biquad };
+enum class NodeKind : uint8_t { Gain, Panner, Biquad, Delay };
 
 /** Web Audio biquad types (the spec's normative coefficient formulas). */
 enum class BiquadType : uint8_t {
@@ -205,9 +205,22 @@ struct Node {
   BiquadType biquadType = BiquadType::Peaking;
   // Biquad state: DF1 histories per stereo channel.
   double bx1[2] = {}, bx2[2] = {}, by1[2] = {}, by2[2] = {};
+  // Delay state: one ring per channel (allocated lazily at first render,
+  // when the sample rate is known), plus the write head in ring frames.
+  // p0 = delayTime seconds; maxDelaySec fixes the ring's size.
+  std::vector<float> ring[2];
+  size_t ringWrite = 0;
+  double maxDelaySec = 1;
   std::vector<uint32_t> inputs;  // node ids feeding this node
   // Per-block scratch (stereo interleaved) — render thread only.
   float block[kBlockFrames * 2] = {};
+  /**
+   * Delay-only: voices targeting a delay deposit HERE, not into `block` —
+   * a delay's output (ring reads, past data) and its input (this block's
+   * arrivals, written to the ring in the ring pass) are different signals,
+   * where every other kind processes its input in place.
+   */
+  float delayIn[kBlockFrames * 2] = {};
   bool rendered = false;
 };
 
@@ -385,11 +398,13 @@ class Engine {
   // an id round-trip per createNode/play would put renderer→host RPC
   // latency inside the scheduling path for no reason.
 
-  void CreateNode(uint32_t id, NodeKind kind, const std::string& biquadType = "") {
+  void CreateNode(uint32_t id, NodeKind kind, const std::string& biquadType = "",
+                  double maxDelaySec = 1) {
     Command c{Command::Op::CreateNode};
     c.a = id;
     c.nodeKind = kind;
     c.str = biquadType;
+    c.x = maxDelaySec;
     Push(std::move(c));
   }
 
@@ -535,6 +550,9 @@ class Engine {
 
     for (auto& [id, node] : nodes_) {
       std::fill(node->block, node->block + frames * 2, 0.0f);
+      if (node->kind == NodeKind::Delay) {
+        std::fill(node->delayIn, node->delayIn + frames * 2, 0.0f);
+      }
       node->rendered = false;
     }
 
@@ -557,6 +575,33 @@ class Engine {
     // Graph: render the master (0); recursion covers reachable nodes.
     RenderNode(0, blockTime, frames, sampleRate);
     std::copy(Get(0)->block, Get(0)->block + frames * 2, out);
+
+    // Delay ring pass: every delay's INPUT sum (feedback subtrees render
+    // here — they hang off the delay and are unreachable from the master)
+    // is written into its ring, one block behind the read side by
+    // construction (see RenderNode's delay case).
+    for (auto& [id, node] : nodes_) {
+      if (node->kind != NodeKind::Delay) continue;
+      if (!node->rendered) RenderNode(id, blockTime, frames, sampleRate);
+      EnsureRing(*node, sampleRate);
+      float sum[kBlockFrames * 2] = {};
+      // Voice deposits arrive via delayIn (see Node.delayIn), graph-edge
+      // inputs via their rendered blocks.
+      for (uint32_t i = 0; i < frames * 2; i++) sum[i] = node->delayIn[i];
+      for (uint32_t inputId : node->inputs) {
+        RenderNode(inputId, blockTime, frames, sampleRate);
+        Node* in = Get(inputId);
+        if (!in) continue;
+        for (uint32_t i = 0; i < frames * 2; i++) sum[i] += in->block[i];
+      }
+      const size_t size = node->ring[0].size();
+      for (uint32_t i = 0; i < frames; i++) {
+        const size_t at = (node->ringWrite + i) % size;
+        node->ring[0][at] = sum[i * 2];
+        node->ring[1][at] = sum[i * 2 + 1];
+      }
+      node->ringWrite = (node->ringWrite + frames) % size;
+    }
 
     // Taps observe their node's post-processing output (mono downmix).
     {
@@ -611,6 +656,8 @@ class Engine {
         if (name == "gain") return &node.p2;
         if (name == "detune") return &node.p3;
         return nullptr;
+      case NodeKind::Delay:
+        return name == "delayTime" ? &node.p0 : nullptr;
     }
     return nullptr;
   }
@@ -625,6 +672,9 @@ class Engine {
           node->p0 = ParamTimeline(1.0);
         } else if (c.nodeKind == NodeKind::Panner) {
           node->p0 = ParamTimeline(0.0);
+        } else if (c.nodeKind == NodeKind::Delay) {
+          node->p0 = ParamTimeline(0.0);  // delayTime seconds
+          node->maxDelaySec = c.x > 0 ? c.x : 1;
         } else {
           node->p0 = ParamTimeline(350.0);  // frequency
           node->p1 = ParamTimeline(1.0);    // Q
@@ -757,15 +807,25 @@ class Engine {
       const size_t i0 = static_cast<size_t>(pos);
       const double frac = pos - static_cast<double>(i0);
       if (dest) {
+        // Delays keep input and output apart (see Node.delayIn).
+        float* target = dest->kind == NodeKind::Delay ? dest->delayIn : dest->block;
         for (size_t ch = 0; ch < 2; ch++) {
           const auto& data = buffer.channels[std::min(ch, channelCount - 1)];
           const float s0 = data[i0];
           const float s1 = i0 + 1 < data.size() ? data[i0 + 1] : 0.0f;
-          dest->block[i * 2 + ch] += static_cast<float>(s0 + (s1 - s0) * frac);
+          target[i * 2 + ch] += static_cast<float>(s0 + (s1 - s0) * frac);
         }
       }
       voice.position += step;
     }
+  }
+
+  static void EnsureRing(Node& node, double sampleRate) {
+    if (!node.ring[0].empty()) return;
+    const size_t size =
+        static_cast<size_t>(std::ceil(node.maxDelaySec * sampleRate)) + 2 * kBlockFrames;
+    node.ring[0].assign(size, 0.0f);
+    node.ring[1].assign(size, 0.0f);
   }
 
   /* Bottom-up graph walk: inputs sum, then the node's own processing. */
@@ -773,6 +833,35 @@ class Engine {
     Node* node = Get(id);
     if (!node || node->rendered) return;
     node->rendered = true;  // set BEFORE recursion: cycles read silence
+    if (node->kind == NodeKind::Delay) {
+      // The read side is a SOURCE: it depends only on PAST blocks, which
+      // is what breaks feedback cycles at one-block granularity — Web
+      // Audio's in-cycle delay rule, applied uniformly (the builtin
+      // delay's minimum time is far above one block, so the clamp is
+      // moot for real material). The write side settles in RenderBlock's
+      // ring pass after the whole graph has rendered.
+      EnsureRing(*node, sampleRate);
+      const double frameDur = 1.0 / sampleRate;
+      const size_t size = node->ring[0].size();
+      const double minDelay = static_cast<double>(frames);
+      const double maxDelay = static_cast<double>(size - frames - 1);
+      for (uint32_t i = 0; i < frames; i++) {
+        double delayFrames = node->p0.ValueAt(blockTime + i * frameDur) * sampleRate;
+        if (delayFrames < minDelay) delayFrames = minDelay;
+        if (delayFrames > maxDelay) delayFrames = maxDelay;
+        double pos = static_cast<double>(node->ringWrite) + i - delayFrames;
+        pos = std::fmod(pos, static_cast<double>(size));
+        if (pos < 0) pos += static_cast<double>(size);
+        const size_t i0 = static_cast<size_t>(pos);
+        const double frac = pos - static_cast<double>(i0);
+        const size_t i1 = (i0 + 1) % size;
+        for (size_t ch = 0; ch < 2; ch++) {
+          node->block[i * 2 + ch] = static_cast<float>(
+              node->ring[ch][i0] * (1 - frac) + node->ring[ch][i1] * frac);
+        }
+      }
+      return;
+    }
     for (uint32_t inputId : node->inputs) {
       RenderNode(inputId, blockTime, frames, sampleRate);
       Node* input = Get(inputId);

@@ -223,6 +223,17 @@ export function buildParityFixture(ctx: BaseAudioContext): Fixture {
         params: effectDefaults('reverb'),
         stateBlob: null
       },
+      // An ENABLED delay: pins the feedback loop through the seam's delay
+      // primitive (the disabled one above pins the bypass path).
+      'plg-dly': {
+        id: 'plg-dly',
+        trackId: 'trk-audio',
+        descriptor: builtinEffectDescriptor('delay'),
+        enabled: true,
+        rank: 0,
+        params: { ...effectDefaults('delay'), time: 0.2, feedback: 0.4, mix: 0.5 },
+        stateBlob: null
+      },
       // The graph-routed track's one node.
       'plg-flt': {
         id: 'plg-flt',

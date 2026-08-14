@@ -27,7 +27,7 @@ export type ParamEvent =
  * (and via configureNode) carry the non-param attributes — a biquad's
  * `type` — which Web Audio also treats as instant plain attributes.
  */
-export type NodeKind = 'gain' | 'stereoPanner' | 'biquad'
+export type NodeKind = 'gain' | 'stereoPanner' | 'biquad' | 'delay'
 
 export type NodeOptions = Record<string, number | string>
 

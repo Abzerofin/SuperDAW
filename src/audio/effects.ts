@@ -261,47 +261,39 @@ const BUILDERS: Record<EffectType, Builder> = {
   },
 
   delay(backend) {
-    const wa = backend.webAudio
-    if (!wa) return null
-    const ctx = wa.ctx
-    const inGain = ctx.createGain()
-    const mixed = ctx.createGain()
-    const dry = ctx.createGain()
-    const wet = ctx.createGain()
-    const delay = ctx.createDelay(2)
-    const feedback = ctx.createGain()
-    const outGain = ctx.createGain()
-    const analyser = ctx.createAnalyser()
-    analyser.fftSize = 2048
-    analyser.smoothingTimeConstant = 0.8
-    inGain.connect(dry)
-    dry.connect(mixed)
-    inGain.connect(delay)
-    delay.connect(wet)
-    wet.connect(mixed)
-    delay.connect(feedback)
-    feedback.connect(delay)
-    mixed.connect(outGain)
-    mixed.connect(analyser)
-    const input = wa.adoptNode(inGain)
-    const output = wa.adoptNode(outGain)
+    // Backend primitives throughout: the feedback loop rides the seam's
+    // in-cycle delay rule (one-block granularity), which both backends
+    // implement — Web Audio natively, the native engine by construction.
+    const input = backend.createNode('gain')
+    const mixed = backend.createNode('gain')
+    const dry = backend.createNode('gain')
+    const wet = backend.createNode('gain')
+    const delay = backend.createNode('delay', { maxDelay: 2 })
+    const feedback = backend.createNode('gain')
+    backend.connect(input, dry)
+    backend.connect(dry, mixed)
+    backend.connect(input, delay)
+    backend.connect(delay, wet)
+    backend.connect(wet, mixed)
+    backend.connect(delay, feedback)
+    backend.connect(feedback, delay)
+    const { out, analysis, disposeTap } = tapOut(backend, mixed)
     return {
       input,
-      output,
-      analysis: { spectrum: analyser },
+      output: out,
+      analysis,
       apply(p, when) {
-        delay.delayTime.setTargetAtTime(p.time ?? 0.3, when, SMOOTH)
-        feedback.gain.setTargetAtTime(p.feedback ?? 0.35, when, SMOOTH)
+        smooth(backend, delay, 'delayTime', p.time ?? 0.3, when)
+        smooth(backend, feedback, 'gain', p.feedback ?? 0.35, when)
         const mix = p.mix ?? 0.25
-        wet.gain.setTargetAtTime(mix, when, SMOOTH)
-        dry.gain.setTargetAtTime(1 - mix * 0.5, when, SMOOTH)
+        smooth(backend, wet, 'gain', mix, when)
+        smooth(backend, dry, 'gain', 1 - mix * 0.5, when)
       },
       dispose() {
-        for (const node of [inGain, mixed, outGain, analyser, dry, wet, delay, feedback]) {
-          node.disconnect()
+        for (const id of [input, mixed, dry, wet, delay, feedback, out]) {
+          backend.disposeNode(id)
         }
-        backend.disposeNode(input)
-        backend.disposeNode(output)
+        disposeTap()
       }
     }
   },
