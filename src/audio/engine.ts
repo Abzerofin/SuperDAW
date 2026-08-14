@@ -2071,8 +2071,13 @@ export class AudioEngine {
     if (!assetId) return null
     const asset = this.assets.get(assetId)
     if (!asset?.buffer) return null
+    // The sampler plays it through the seam like any other buffer, so it
+    // is registered (adopted zero-copy on Web Audio) exactly as clips are.
+    const bufferId = this.ensureBufferRegistered(assetId, false)
+    if (!bufferId) return null
     return {
-      buffer: asset.buffer,
+      bufferId,
+      durationSec: asset.buffer.duration,
       onsets: onsetsForPeaks(asset.peaks, asset.peaksPerSecond)
     }
   }

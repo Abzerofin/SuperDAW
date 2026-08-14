@@ -151,6 +151,7 @@ export function createAudioHostSession(
           offsetSec: c.offsetSec,
           durationSec: c.durationSec,
           rate: c.rate,
+          loop: c.loop,
           destination: c.destination
         })
         break

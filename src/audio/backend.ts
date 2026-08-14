@@ -156,6 +156,9 @@ export function applyParamEvents(param: AudioParam, events: readonly ParamEvent[
       case 'linearRamp':
         param.linearRampToValueAtTime(event.value, event.endTime)
         break
+      case 'exponentialRamp':
+        param.exponentialRampToValueAtTime(event.value, event.endTime)
+        break
       case 'setTarget':
         param.setTargetAtTime(event.value, event.time, event.timeConstant)
         break
@@ -449,6 +452,11 @@ export class WebAudioBackend implements IAudioBackend {
     const source = ctx.createBufferSource()
     source.buffer = buffer
     if (spec.rate !== undefined && spec.rate !== 1) source.playbackRate.value = spec.rate
+    if (spec.loop) {
+      source.loop = true
+      source.loopStart = spec.loop.startSec
+      source.loopEnd = spec.loop.endSec
+    }
     source.connect(this.node(spec.destination))
     const id = this.nextId++
     source.onended = () => {

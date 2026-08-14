@@ -184,6 +184,7 @@ export class NativeAudioBackend {
       offsetSec: spec.offsetSec,
       durationSec: spec.durationSec,
       rate: spec.rate,
+      loop: spec.loop,
       destination: spec.destination
     })
     return id

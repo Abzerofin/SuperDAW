@@ -37,6 +37,7 @@ export type HostCommand =
       offsetSec?: number
       durationSec?: number
       rate?: number
+      loop?: { startSec: number; endSec: number }
       destination: number
     }
   | { t: 'scheduleSource'; id: number; node: number; when: number; stopAt?: number }

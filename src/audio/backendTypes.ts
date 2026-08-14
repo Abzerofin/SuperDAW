@@ -16,6 +16,8 @@ export type TapId = number
 export type ParamEvent =
   | { kind: 'setValue'; value: number; time: number }
   | { kind: 'linearRamp'; value: number; endTime: number }
+  /** Web Audio's exponential ramp — endpoints must be non-zero, same sign. */
+  | { kind: 'exponentialRamp'; value: number; endTime: number }
   | { kind: 'setTarget'; value: number; time: number; timeConstant: number }
   | { kind: 'setCurve'; curve: Float32Array; time: number; duration: number }
   | { kind: 'cancel'; afterTime: number }
@@ -68,5 +70,11 @@ export interface PlaySpec {
   durationSec?: number
   /** Resampling ratio (pitch and stretch combined). Default 1. */
   rate?: number
+  /**
+   * Sustain loop in BUFFER seconds — playback wraps from `endSec` back to
+   * `startSec` instead of ending (Web Audio's loop/loopStart/loopEnd).
+   * The voice then runs until stopped.
+   */
+  loop?: { startSec: number; endSec: number }
   destination: BackendNodeId
 }

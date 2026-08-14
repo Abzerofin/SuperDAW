@@ -44,7 +44,14 @@ constexpr double kPi = 3.14159265358979323846;
 
 // ---------------------------------------------------------------- params
 
-enum class ParamEventKind : uint8_t { SetValue, LinearRamp, SetTarget, SetCurve, Cancel };
+enum class ParamEventKind : uint8_t {
+  SetValue,
+  LinearRamp,
+  ExponentialRamp,
+  SetTarget,
+  SetCurve,
+  Cancel
+};
 
 struct ParamEvent {
   ParamEventKind kind;
@@ -93,12 +100,21 @@ class ParamTimeline {
     for (const ParamEvent& e : events_) {
       const double anchor = AnchorTime(e);
       if (anchor > t) {
-        // A linear ramp whose END is in the future still shapes [now, end).
-        if (e.kind == ParamEventKind::LinearRamp && valueTime <= t) {
+        // A ramp whose END is in the future still shapes [now, end).
+        const bool isRamp = e.kind == ParamEventKind::LinearRamp ||
+                            e.kind == ParamEventKind::ExponentialRamp;
+        if (isRamp && valueTime <= t) {
           const double t0 = valueTime < -1e299 ? anchor : valueTime;
           const double v0 = target ? TargetValueAt(*target, value, t) : value;
           if (e.endTime > t0 && t >= t0) {
             const double phase = (t - t0) / (e.endTime - t0);
+            if (e.kind == ParamEventKind::LinearRamp) {
+              return v0 + (e.value - v0) * phase;
+            }
+            // Exponential: v0·(v1/v0)^phase, undefined through zero — the
+            // spec requires non-zero same-sign endpoints, so a degenerate
+            // pair degrades to the linear reading rather than NaN.
+            if (v0 > 0 && e.value > 0) return v0 * std::pow(e.value / v0, phase);
             return v0 + (e.value - v0) * phase;
           }
         }
@@ -111,6 +127,7 @@ class ParamTimeline {
           target = nullptr;
           break;
         case ParamEventKind::LinearRamp:
+        case ParamEventKind::ExponentialRamp:
           value = e.value;
           valueTime = e.endTime;
           target = nullptr;
@@ -147,8 +164,12 @@ class ParamTimeline {
   }
 
  private:
+  /** A ramp is anchored at its END; every other event at its own time. */
   static double AnchorTime(const ParamEvent& e) {
-    return e.kind == ParamEventKind::LinearRamp ? e.endTime : e.time;
+    return (e.kind == ParamEventKind::LinearRamp ||
+            e.kind == ParamEventKind::ExponentialRamp)
+               ? e.endTime
+               : e.time;
   }
 
   static double TargetValueAt(const ParamEvent& e, double startValue, double t) {
@@ -690,6 +711,9 @@ struct Voice {
   double position = 0;  // fractional buffer frames, from offset
   double consumedSec = 0;
   double stopAt = 1e300;
+  /** Sustain loop in buffer seconds; endSec <= startSec = no loop. */
+  double loopStartSec = 0;
+  double loopEndSec = 0;
   bool started = false;
   bool ended = false;
 };
@@ -854,7 +878,8 @@ class Engine {
 
   /* False when the buffer is unknown (the caller's play() returns null). */
   bool Play(uint32_t id, const std::string& bufferId, double when, double offsetSec,
-            double durationSec, double rate, uint32_t dest) {
+            double durationSec, double rate, uint32_t dest, double loopStartSec = 0,
+            double loopEndSec = 0) {
     std::shared_ptr<SharedBuffer> buffer;
     {
       std::lock_guard<std::mutex> lock(buffersMutex_);
@@ -870,6 +895,8 @@ class Engine {
     c.voice.durationSec = durationSec;
     c.voice.rate = rate > 0 ? rate : 1;
     c.voice.dest = dest;
+    c.voice.loopStartSec = loopStartSec;
+    c.voice.loopEndSec = loopEndSec;
     Push(std::move(c));
     return true;
   }
@@ -1312,6 +1339,10 @@ class Engine {
             ? std::min(bufferFrames, startFrame + voice.durationSec * buffer.sampleRate)
             : bufferFrames;
     const size_t channelCount = buffer.channels.size();
+    const bool looping = voice.loopEndSec > voice.loopStartSec;
+    const double loopStartFrame = voice.loopStartSec * buffer.sampleRate;
+    const double loopEndFrame =
+        std::min(bufferFrames, voice.loopEndSec * buffer.sampleRate);
 
     for (uint32_t i = 0; i < frames; i++) {
       const int64_t frame = blockFrame + i;
@@ -1320,8 +1351,16 @@ class Engine {
         voice.ended = true;
         return;
       }
-      const double pos = startFrame + voice.position;
-      if (pos >= endFrame) {
+      double pos = startFrame + voice.position;
+      if (looping) {
+        // Wrap back to the loop's start instead of ending — Web Audio's
+        // loop/loopStart/loopEnd. The voice then runs until stopped.
+        if (pos >= loopEndFrame) {
+          const double span = loopEndFrame - loopStartFrame;
+          pos = loopStartFrame + std::fmod(pos - loopStartFrame, span);
+          voice.position = pos - startFrame;
+        }
+      } else if (pos >= endFrame) {
         voice.ended = true;
         return;
       }

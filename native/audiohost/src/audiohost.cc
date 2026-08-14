@@ -365,6 +365,10 @@ sdengine::ParamEvent UnpackEvent(const Napi::Object& raw) {
     event.kind = sdengine::ParamEventKind::LinearRamp;
     event.value = num("value");
     event.endTime = num("endTime");
+  } else if (kind == "exponentialRamp") {
+    event.kind = sdengine::ParamEventKind::ExponentialRamp;
+    event.value = num("value");
+    event.endTime = num("endTime");
   } else if (kind == "setTarget") {
     event.kind = sdengine::ParamEventKind::SetTarget;
     event.value = num("value");
@@ -522,10 +526,21 @@ Napi::Value PlayVoice(const Napi::CallbackInfo& info) {
     return spec.Has(key) && spec.Get(key).IsNumber() ? spec.Get(key).As<Napi::Number>()
                                                      : fallback;
   };
+  double loopStart = 0;
+  double loopEnd = 0;
+  if (spec.Has("loop") && spec.Get("loop").IsObject()) {
+    auto loop = spec.Get("loop").As<Napi::Object>();
+    if (loop.Has("startSec") && loop.Get("startSec").IsNumber()) {
+      loopStart = loop.Get("startSec").As<Napi::Number>().DoubleValue();
+    }
+    if (loop.Has("endSec") && loop.Get("endSec").IsNumber()) {
+      loopEnd = loop.Get("endSec").As<Napi::Number>().DoubleValue();
+    }
+  }
   const bool ok = EngineOf(env).Play(
       spec.Get("id").As<Napi::Number>().Uint32Value(), spec.Get("bufferId").As<Napi::String>(),
       num("when", 0), num("offsetSec", 0), num("durationSec", -1), num("rate", 1),
-      spec.Get("destination").As<Napi::Number>().Uint32Value());
+      spec.Get("destination").As<Napi::Number>().Uint32Value(), loopStart, loopEnd);
   return Napi::Boolean::New(env, ok);
 }
 

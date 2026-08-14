@@ -6,7 +6,8 @@ import {
   synthDefaults
 } from '@core/model/effects'
 import { sliceRegions } from '@core/model/slices'
-import type { BackendNodeId, IAudioBackend } from './backend'
+import type { BackendNodeId, IAudioBackend, ParamEvent, VoiceId } from './backend'
+import { makeNoise, noiseBufferId } from './impulse'
 import type { NoteSchedule } from './scheduling'
 import {
   buildLiveSynthVoice,
@@ -28,9 +29,15 @@ import {
  * so the engine keeps exactly one call site per path.
  */
 
-/** What the sampler needs of an asset: decoded audio + slice boundaries. */
+/**
+ * What the sampler needs of an asset: a REGISTERED buffer (the seam's
+ * currency, so the voice plays it on either backend), its length, and the
+ * slice boundaries.
+ */
 export interface InstrumentSample {
-  readonly buffer: AudioBuffer
+  /** Registered backend buffer id; null while the asset is unavailable. */
+  readonly bufferId: string | null
+  readonly durationSec: number
   /** Transient onsets in buffer seconds (slice boundaries in SLICES mode). */
   readonly onsets: readonly number[]
 }
@@ -53,7 +60,7 @@ function samplerRegion(
   sample: InstrumentSample,
   pitch: number
 ): SampleRegion | null {
-  const bufferSec = sample.buffer.duration
+  const bufferSec = sample.durationSec
   if (!(bufferSec > 0)) return null
   if (Math.round(sp.smpMode) === 1) {
     const regions = sliceRegions(sample.onsets, bufferSec)
@@ -66,15 +73,15 @@ function samplerRegion(
 }
 
 function buildSamplerVoice(
-  ctx: BaseAudioContext,
-  dest: AudioNode,
+  backend: IAudioBackend,
+  dest: BackendNodeId,
   s: NoteSchedule,
   sp: Record<string, number>,
-  sample: InstrumentSample,
-  onVoiceEnded?: (source: AudioScheduledSourceNode) => void
-): AudioScheduledSourceNode[] {
+  sample: InstrumentSample
+): BuiltVoice {
+  const empty: BuiltVoice = { voices: [], dispose: () => {} }
   const region = samplerRegion(sp, sample, s.pitch)
-  if (!region) return []
+  if (!region || !sample.bufferId) return empty
   const looping = Math.round(sp.smpMode) === 0 && sp.smpLoop >= 0.5
 
   const peak = SAMPLER_PEAK * s.velocity * sp.smpGain
@@ -83,202 +90,202 @@ function buildSamplerVoice(
   const decayEnd = Math.min(s.endSec, attackEnd + sp.smpDecay)
   const releaseEnd = s.endSec + sp.smpRelease
 
-  const env = ctx.createGain()
-  env.gain.setValueAtTime(0, s.startSec)
-  env.gain.linearRampToValueAtTime(peak, attackEnd)
-  env.gain.linearRampToValueAtTime(sustain, decayEnd)
-  env.gain.setValueAtTime(sustain, s.endSec)
-  env.gain.linearRampToValueAtTime(0.0001, releaseEnd)
-  env.connect(dest)
+  const env = backend.createNode('gain')
+  backend.scheduleParam(env, 'gain', [
+    { kind: 'setValue', value: 0, time: s.startSec },
+    { kind: 'linearRamp', value: peak, endTime: attackEnd },
+    { kind: 'linearRamp', value: sustain, endTime: decayEnd },
+    { kind: 'setValue', value: sustain, time: s.endSec },
+    { kind: 'linearRamp', value: 0.0001, endTime: releaseEnd }
+  ])
+  backend.connect(env, dest)
 
-  const source = ctx.createBufferSource()
-  source.buffer = sample.buffer
-  if (region.rate !== 1) source.playbackRate.value = region.rate
-  source.connect(env)
-  source.onended = () => {
-    onVoiceEnded?.(source)
-    source.disconnect()
-    env.disconnect()
-  }
   const regionLen = region.endSec - region.startSec
-  if (looping) {
-    source.loop = true
-    source.loopStart = region.startSec
-    source.loopEnd = region.endSec
-    source.start(s.startSec, region.startSec)
-    source.stop(releaseEnd + 0.01)
-  } else {
-    // The voice ends at note-release or when the region runs dry at this
-    // rate — whichever comes first.
-    const wantedBufferSec = (releaseEnd - s.startSec) * region.rate
-    source.start(s.startSec, region.startSec, Math.min(regionLen, wantedBufferSec))
+  const voice = backend.play({
+    bufferId: sample.bufferId,
+    when: s.startSec,
+    offsetSec: region.startSec,
+    rate: region.rate,
+    destination: env,
+    ...(looping
+      ? { loop: { startSec: region.startSec, endSec: region.endSec } }
+      : // The voice ends at note-release or when the region runs dry at
+        // this rate — whichever comes first.
+        {
+          durationSec: Math.min(regionLen, (releaseEnd - s.startSec) * region.rate)
+        })
+  })
+  if (voice === null) {
+    backend.disposeNode(env)
+    return empty
   }
-  return [source]
+  // A looped voice would otherwise never stop: end it with the release.
+  if (looping) backend.stopVoice(voice, releaseEnd + 0.01)
+  return { voices: [voice], dispose: () => backend.disposeNode(env) }
 }
 
 function buildLiveSamplerVoice(
-  ctx: BaseAudioContext,
-  dest: AudioNode,
+  backend: IAudioBackend,
+  dest: BackendNodeId,
   pitch: number,
   velocity: number,
   sp: Record<string, number>,
   sample: InstrumentSample,
   onEnded?: () => void
 ): LiveVoiceHandle {
+  const silent: LiveVoiceHandle = {
+    sustains: false,
+    release: () => onEnded?.(),
+    stop: () => onEnded?.()
+  }
   const region = samplerRegion(sp, sample, pitch)
-  if (!region) return { sustains: false, release: () => onEnded?.(), stop: () => onEnded?.() }
+  if (!region || !sample.bufferId) return silent
   const looping = Math.round(sp.smpMode) === 0 && sp.smpLoop >= 0.5
-  const now = ctx.currentTime
+  const now = backend.now()
   const peak = SAMPLER_PEAK * velocity * sp.smpGain
 
-  const env = ctx.createGain()
-  env.gain.setValueAtTime(0, now)
-  env.gain.linearRampToValueAtTime(peak, now + sp.smpAttack)
-  env.gain.linearRampToValueAtTime(peak * sp.smpSustain, now + sp.smpAttack + sp.smpDecay)
-  env.connect(dest)
+  const env = backend.createNode('gain')
+  backend.scheduleParam(env, 'gain', [
+    { kind: 'setValue', value: 0, time: now },
+    { kind: 'linearRamp', value: peak, endTime: now + sp.smpAttack },
+    { kind: 'linearRamp', value: peak * sp.smpSustain, endTime: now + sp.smpAttack + sp.smpDecay }
+  ])
+  backend.connect(env, dest)
 
-  const source = ctx.createBufferSource()
-  source.buffer = sample.buffer
-  if (region.rate !== 1) source.playbackRate.value = region.rate
-  source.connect(env)
+  const voice = backend.play({
+    bufferId: sample.bufferId,
+    when: now,
+    offsetSec: region.startSec,
+    rate: region.rate,
+    destination: env,
+    ...(looping
+      ? { loop: { startSec: region.startSec, endSec: region.endSec } }
+      : { durationSec: region.endSec - region.startSec })
+  })
+  if (voice === null) {
+    backend.disposeNode(env)
+    return silent
+  }
+
   let endedFired = false
-  source.onended = () => {
-    source.disconnect()
-    env.disconnect()
+  const unsubscribe = backend.onVoiceEnded((id) => {
+    if (id !== voice) return
+    unsubscribe()
+    backend.disposeNode(env)
     if (!endedFired) {
       endedFired = true
       onEnded?.()
     }
-  }
-  if (looping) {
-    source.loop = true
-    source.loopStart = region.startSec
-    source.loopEnd = region.endSec
-    source.start(now, region.startSec)
-  } else {
-    source.start(now, region.startSec, region.endSec - region.startSec)
-  }
+  })
 
   let phase: 'held' | 'released' | 'stopped' = 'held'
   const endAt = (when: number, fadeSec: number): void => {
-    const gain = env.gain as AudioParam & { cancelAndHoldAtTime?: (t: number) => AudioParam }
-    if (gain.cancelAndHoldAtTime) gain.cancelAndHoldAtTime(when)
-    else {
-      gain.cancelScheduledValues(when)
-      gain.setValueAtTime(gain.value, when)
-    }
-    gain.linearRampToValueAtTime(0.0001, when + fadeSec)
-    try {
-      source.stop(when + fadeSec + 0.02)
-    } catch {
-      // already ended naturally — nothing to do
-    }
+    backend.scheduleParam(env, 'gain', [
+      { kind: 'cancel', afterTime: when },
+      { kind: 'linearRamp', value: 0.0001, endTime: when + fadeSec }
+    ])
+    backend.stopVoice(voice, when + fadeSec + 0.02)
   }
   return {
     // A looping region plays forever; a one-shot region runs out on its own.
     sustains: looping,
-    release: (when = ctx.currentTime) => {
+    release: (when = backend.now()) => {
       if (phase !== 'held') return
       phase = 'released'
-      endAt(Math.max(when, ctx.currentTime), sp.smpRelease)
+      endAt(Math.max(when, backend.now()), sp.smpRelease)
     },
     stop: () => {
       if (phase === 'stopped') return
       phase = 'stopped'
-      endAt(ctx.currentTime, 0.015)
+      endAt(backend.now(), 0.015)
     }
   }
 }
 
 // -------------------------------------------------------------- drum synth
 
-/** One second of white noise, shared per context (hats fire constantly). */
-const noiseBuffers = new WeakMap<BaseAudioContext, AudioBuffer>()
-
-function noiseBuffer(ctx: BaseAudioContext): AudioBuffer {
-  const cached = noiseBuffers.get(ctx)
-  if (cached) return cached
-  const buffer = ctx.createBuffer(1, Math.ceil(ctx.sampleRate), ctx.sampleRate)
-  const data = buffer.getChannelData(0)
-  // Seeded (mulberry32), NOT Math.random(): the same project must render
-  // the same bytes on every run and every machine — freezes and bounces
-  // are shared with collaborators, and the engine parity harness (and the
-  // future native backend's numerical verification) diffs renders exactly.
-  // Noise is noise; only reproducibility changes.
-  let seed = 0x9e3779b9 ^ Math.round(ctx.sampleRate)
-  for (let i = 0; i < data.length; i++) {
-    seed = (seed + 0x6d2b79f5) | 0
-    let t = Math.imul(seed ^ (seed >>> 15), 1 | seed)
-    t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t
-    data[i] = (((t ^ (t >>> 14)) >>> 0) / 4294967296) * 2 - 1
-  }
-  noiseBuffers.set(ctx, buffer)
-  return buffer
-}
-
-interface DrumVoiceParts {
-  readonly sources: AudioScheduledSourceNode[]
-  /** The voice's output gain — the live wrapper's kill switch. */
-  readonly out: GainNode
-  readonly endSec: number
+/**
+ * The shared noise buffer, registered with the backend on first use (hats
+ * fire constantly, so one registration serves every hit). Generation is
+ * pure and seeded — see audio/impulse.ts.
+ */
+function ensureNoise(backend: IAudioBackend): string {
+  const sampleRate = backend.start().sampleRate
+  const id = noiseBufferId(sampleRate)
+  if (!backend.hasBuffer(id)) backend.registerBuffer(id, makeNoise(sampleRate), sampleRate)
+  return id
 }
 
 /** Ramp a gain from `peak` at t0 down to silence over `decaySec`. */
 function decayEnv(
-  ctx: BaseAudioContext,
+  backend: IAudioBackend,
   t0: number,
   peak: number,
   decaySec: number
-): GainNode {
-  const env = ctx.createGain()
+): BackendNodeId {
+  const env = backend.createNode('gain')
   // An exponential ramp is undefined from 0 — floor the start value.
-  env.gain.setValueAtTime(Math.max(0.0015, peak), t0)
-  env.gain.exponentialRampToValueAtTime(0.001, t0 + decaySec)
+  backend.scheduleParam(env, 'gain', [
+    { kind: 'setValue', value: Math.max(0.0015, peak), time: t0 },
+    { kind: 'exponentialRamp', value: 0.001, endTime: t0 + decaySec }
+  ])
   return env
 }
 
+/** A filtered burst of the shared noise — hats, snare rattle, kick click. */
 function noiseHit(
-  ctx: BaseAudioContext,
+  backend: IAudioBackend,
   t0: number,
-  filterType: BiquadFilterType,
+  filterType: 'lowpass' | 'highpass' | 'bandpass',
   freq: number,
   q: number,
   peak: number,
   decaySec: number,
-  out: GainNode
-): { source: AudioBufferSourceNode; env: GainNode } {
-  const source = ctx.createBufferSource()
-  source.buffer = noiseBuffer(ctx)
-  const filter = ctx.createBiquadFilter()
-  filter.type = filterType
-  filter.frequency.value = freq
-  filter.Q.value = q
-  const env = decayEnv(ctx, t0, peak, decaySec)
-  source.connect(filter)
-  filter.connect(env)
-  env.connect(out)
-  source.start(t0, 0, decaySec + 0.05)
-  return { source, env }
+  out: BackendNodeId,
+  parts: DrumParts
+): void {
+  const filter = backend.createNode('biquad', { type: filterType })
+  backend.scheduleParam(filter, 'frequency', [{ kind: 'setValue', value: freq, time: 0 }])
+  backend.scheduleParam(filter, 'Q', [{ kind: 'setValue', value: q, time: 0 }])
+  const env = decayEnv(backend, t0, peak, decaySec)
+  backend.connect(filter, env)
+  backend.connect(env, out)
+  const voice = backend.play({
+    bufferId: ensureNoise(backend),
+    when: t0,
+    offsetSec: 0,
+    durationSec: decaySec + 0.05,
+    destination: filter
+  })
+  if (voice !== null) parts.voices.push(voice)
+  parts.nodes.push(filter, env)
 }
 
+/** A pitched oscillator burst under a decay envelope. */
 function oscHit(
-  ctx: BaseAudioContext,
+  backend: IAudioBackend,
   t0: number,
-  type: OscillatorType,
+  type: 'sine' | 'square' | 'triangle' | 'sawtooth',
   freq: number,
   peak: number,
   decaySec: number,
-  out: GainNode
-): { osc: OscillatorNode; env: GainNode } {
-  const osc = ctx.createOscillator()
-  osc.type = type
-  osc.frequency.value = freq
-  const env = decayEnv(ctx, t0, peak, decaySec)
-  osc.connect(env)
-  env.connect(out)
-  osc.start(t0)
-  osc.stop(t0 + decaySec + 0.05)
-  return { osc, env }
+  out: BackendNodeId,
+  parts: DrumParts
+): BackendNodeId {
+  const osc = backend.createNode('oscillator', { type })
+  backend.scheduleParam(osc, 'frequency', [{ kind: 'setValue', value: freq, time: 0 }])
+  const env = decayEnv(backend, t0, peak, decaySec)
+  backend.connect(osc, env)
+  backend.connect(env, out)
+  parts.voices.push(backend.scheduleSource(osc, t0, t0 + decaySec + 0.05))
+  parts.nodes.push(osc, env)
+  return osc
+}
+
+/** Everything one drum hit created, for tracking and teardown. */
+interface DrumParts {
+  voices: VoiceId[]
+  nodes: BackendNodeId[]
 }
 
 /**
@@ -288,78 +295,97 @@ function oscHit(
  * clap filter), and the pad's `level` is applied by the caller on `out`.
  */
 function buildDrumHit(
-  ctx: BaseAudioContext,
+  backend: IAudioBackend,
   t0: number,
   padKey: string,
   tune: number,
   decay: number,
   tone: number,
-  out: GainNode
-): { sources: AudioScheduledSourceNode[]; endSec: number } {
+  out: BackendNodeId,
+  parts: DrumParts
+): number {
   const k = Math.pow(2, tune / 12)
-  const sources: AudioScheduledSourceNode[] = []
   let endSec = t0 + 0.3
 
   switch (padKey) {
     case 'kick': {
       const dur = 0.4 * decay
-      const osc = ctx.createOscillator()
-      osc.type = 'sine'
-      osc.frequency.setValueAtTime(160 * k, t0)
-      osc.frequency.exponentialRampToValueAtTime(Math.max(20, 44 * k), t0 + 0.11)
-      const env = decayEnv(ctx, t0, 1, dur)
-      osc.connect(env)
-      env.connect(out)
-      osc.start(t0)
-      osc.stop(t0 + dur + 0.05)
-      sources.push(osc)
+      // A sine whose pitch drops fast — the thump.
+      const osc = oscHit(backend, t0, 'sine', 160 * k, 1, dur, out, parts)
+      backend.scheduleParam(osc, 'frequency', [
+        { kind: 'setValue', value: 160 * k, time: t0 },
+        { kind: 'exponentialRamp', value: Math.max(20, 44 * k), endTime: t0 + 0.11 }
+      ])
       if (tone > 0.02) {
-        const click = noiseHit(ctx, t0, 'highpass', 1500, 0.7, tone * 0.6, 0.02, out)
-        sources.push(click.source)
+        noiseHit(backend, t0, 'highpass', 1500, 0.7, tone * 0.6, 0.02, out, parts)
       }
       endSec = t0 + dur + 0.05
       break
     }
     case 'snare': {
       const dur = 0.2 * decay
-      const body = oscHit(ctx, t0, 'triangle', 176 * k, (1 - tone * 0.5) * 0.8, 0.11 * decay, out)
-      body.osc.frequency.exponentialRampToValueAtTime(Math.max(30, 155 * k), t0 + 0.08)
-      const noise = noiseHit(ctx, t0, 'highpass', 1400 * k, 0.7, 0.4 + tone * 0.6, dur, out)
-      sources.push(body.osc, noise.source)
+      const body = oscHit(
+        backend,
+        t0,
+        'triangle',
+        176 * k,
+        (1 - tone * 0.5) * 0.8,
+        0.11 * decay,
+        out,
+        parts
+      )
+      // NOTE: deliberately NOT anchored at t0, unlike the kick and toms.
+      // oscHit's setValue sits at time 0, so this ramp spans the whole
+      // timeline up to t0+0.08 — meaning the body's pitch drop is only
+      // audible on a note at the very start of the song. That is a latent
+      // BUG carried from the Web Audio implementation, preserved here on
+      // purpose: a port must not change how existing projects sound, and
+      // the parity harness catches it the moment it does (it caught
+      // exactly this). Fixing it is a deliberate, separate change —
+      // anchoring the setValue at t0 is the one-line fix.
+      backend.scheduleParam(body, 'frequency', [
+        { kind: 'exponentialRamp', value: Math.max(30, 155 * k), endTime: t0 + 0.08 }
+      ])
+      noiseHit(backend, t0, 'highpass', 1400 * k, 0.7, 0.4 + tone * 0.6, dur, out, parts)
       endSec = t0 + dur + 0.05
       break
     }
     case 'clap': {
       const dur = 0.28 * decay
-      const source = ctx.createBufferSource()
-      source.buffer = noiseBuffer(ctx)
-      const filter = ctx.createBiquadFilter()
-      filter.type = 'bandpass'
-      filter.frequency.value = (800 + tone * 1600) * k
-      filter.Q.value = 1.4
+      const filter = backend.createNode('biquad', { type: 'bandpass' })
+      backend.scheduleParam(filter, 'frequency', [
+        { kind: 'setValue', value: (800 + tone * 1600) * k, time: 0 }
+      ])
+      backend.scheduleParam(filter, 'Q', [{ kind: 'setValue', value: 1.4, time: 0 }])
       // Three quick re-attacks then the tail — the classic clap stutter.
-      const env = ctx.createGain()
-      env.gain.setValueAtTime(0, t0)
+      const env = backend.createNode('gain')
+      const events: ParamEvent[] = [{ kind: 'setValue', value: 0, time: t0 }]
       for (let i = 0; i < 3; i++) {
         const at = t0 + i * 0.011
-        env.gain.linearRampToValueAtTime(1, at + 0.002)
-        env.gain.linearRampToValueAtTime(0.25, at + 0.01)
+        events.push({ kind: 'linearRamp', value: 1, endTime: at + 0.002 })
+        events.push({ kind: 'linearRamp', value: 0.25, endTime: at + 0.01 })
       }
-      env.gain.linearRampToValueAtTime(0.9, t0 + 0.036)
-      env.gain.exponentialRampToValueAtTime(0.001, t0 + dur)
-      source.connect(filter)
-      filter.connect(env)
-      env.connect(out)
-      source.start(t0, 0, dur + 0.05)
-      sources.push(source)
+      events.push({ kind: 'linearRamp', value: 0.9, endTime: t0 + 0.036 })
+      events.push({ kind: 'exponentialRamp', value: 0.001, endTime: t0 + dur })
+      backend.scheduleParam(env, 'gain', events)
+      backend.connect(filter, env)
+      backend.connect(env, out)
+      const voice = backend.play({
+        bufferId: ensureNoise(backend),
+        when: t0,
+        offsetSec: 0,
+        durationSec: dur + 0.05,
+        destination: filter
+      })
+      if (voice !== null) parts.voices.push(voice)
+      parts.nodes.push(filter, env)
       endSec = t0 + dur + 0.05
       break
     }
     case 'hatc':
     case 'hato': {
       const dur = (padKey === 'hatc' ? 0.055 : 0.4) * decay
-      const noise = noiseHit(ctx, t0, 'highpass', 5000 + tone * 5000, 0.7, 0.8, dur, out)
-      sources.push(noise.source)
+      noiseHit(backend, t0, 'highpass', 5000 + tone * 5000, 0.7, 0.8, dur, out, parts)
       endSec = t0 + dur + 0.05
       break
     }
@@ -367,80 +393,63 @@ function buildDrumHit(
     case 'tomh': {
       const base = (padKey === 'toml' ? 105 : 172) * k
       const dur = 0.3 * decay
-      const osc = ctx.createOscillator()
-      osc.type = 'sine'
-      osc.frequency.setValueAtTime(base * 1.6, t0)
-      osc.frequency.exponentialRampToValueAtTime(base, t0 + 0.04)
-      const env = decayEnv(ctx, t0, 0.9, dur)
-      osc.connect(env)
-      env.connect(out)
-      osc.start(t0)
-      osc.stop(t0 + dur + 0.05)
-      const skin = noiseHit(ctx, t0, 'lowpass', 900, 0.7, tone * 0.3, 0.03, out)
-      sources.push(osc, skin.source)
+      const osc = oscHit(backend, t0, 'sine', base * 1.6, 0.9, dur, out, parts)
+      backend.scheduleParam(osc, 'frequency', [
+        { kind: 'setValue', value: base * 1.6, time: t0 },
+        { kind: 'exponentialRamp', value: base, endTime: t0 + 0.04 }
+      ])
+      noiseHit(backend, t0, 'lowpass', 900, 0.7, tone * 0.3, 0.03, out, parts)
       endSec = t0 + dur + 0.05
       break
     }
     case 'ride': {
       const dur = 0.7 * decay
-      const noise = noiseHit(ctx, t0, 'highpass', 6000 + tone * 4000, 0.7, 0.5, dur, out)
-      sources.push(noise.source)
+      noiseHit(backend, t0, 'highpass', 6000 + tone * 4000, 0.7, 0.5, dur, out, parts)
       // Two inharmonic squares give the metallic ping.
       for (const freq of [523.7, 812.3]) {
-        const ping = oscHit(ctx, t0, 'square', freq * k, 0.12, dur * 0.6, out)
-        sources.push(ping.osc)
+        oscHit(backend, t0, 'square', freq * k, 0.12, dur * 0.6, out, parts)
       }
       endSec = t0 + dur + 0.05
       break
     }
   }
-  return { sources, endSec }
+  return endSec
 }
 
+/** A drum voice: the pad's hit under its level/velocity output gain. */
 function buildDrumVoice(
-  ctx: BaseAudioContext,
-  dest: AudioNode,
+  backend: IAudioBackend,
+  dest: BackendNodeId,
   t0: number,
   pitch: number,
   velocity: number,
   sp: Record<string, number>
-): DrumVoiceParts | null {
+): { parts: DrumParts; out: BackendNodeId; endSec: number } | null {
   const pad = drumPadForPitch(pitch)
   if (!pad) return null
   const level = sp[`${pad.key}Level`] ?? 1
   if (level <= 0) return null
-  const out = ctx.createGain()
-  out.gain.value = DRUM_PEAK * level * velocity
-  out.connect(dest)
-  const hit = buildDrumHit(
-    ctx,
+  const out = backend.createNode('gain')
+  backend.scheduleParam(out, 'gain', [
+    { kind: 'setValue', value: DRUM_PEAK * level * velocity, time: 0 }
+  ])
+  backend.connect(out, dest)
+  const parts: DrumParts = { voices: [], nodes: [out] }
+  const endSec = buildDrumHit(
+    backend,
     t0,
     pad.key,
     sp[`${pad.key}Tune`] ?? 0,
     sp[`${pad.key}Decay`] ?? 1,
     sp[`${pad.key}Tone`] ?? 0.5,
-    out
+    out,
+    parts
   )
-  if (hit.sources.length === 0) {
-    out.disconnect()
+  if (parts.voices.length === 0) {
+    for (const node of parts.nodes) backend.disposeNode(node)
     return null
   }
-  return { sources: hit.sources, out, endSec: hit.endSec }
-}
-
-/** Wire teardown: disconnect the voice graph after the LAST source ends. */
-function teardownAfterAll(
-  parts: DrumVoiceParts,
-  onVoiceEnded?: (source: AudioScheduledSourceNode) => void
-): void {
-  let remaining = parts.sources.length
-  for (const source of parts.sources) {
-    source.onended = () => {
-      onVoiceEnded?.(source)
-      source.disconnect()
-      if (--remaining === 0) parts.out.disconnect()
-    }
-  }
+  return { parts, out, endSec }
 }
 
 // -------------------------------------------------------------- dispatch
@@ -459,29 +468,21 @@ export function buildInstrumentVoice(
   sample: InstrumentSample | null
 ): BuiltVoice {
   const kind = instrumentKindOf(synthParams)
-  // The analog synth is fully ported: backend primitives, both backends.
   if (kind === 'analog') return buildSynthVoice(backend, dest, s, synthParams)
-
-  // Sampler and drums still build Web Audio graphs, so under a backend
-  // without those escapes they are silent — the same honest bypass a
-  // missing plugin gets, until their ports land.
-  const wa = backend.webAudio
-  if (!wa) return { voices: [], dispose: () => {} }
-  const ctx = wa.ctx
-  const destNode = wa.nodeOf(dest)
   const sp = { ...synthDefaults(), ...synthParams }
-  const sources =
-    kind === 'sampler'
-      ? sample
-        ? buildSamplerVoice(ctx, destNode, s, sp, sample)
-        : []
-      : (() => {
-          const parts = buildDrumVoice(ctx, destNode, s.startSec, s.pitch, s.velocity, sp)
-          if (!parts) return []
-          teardownAfterAll(parts)
-          return parts.sources
-        })()
-  return { voices: sources.map((source) => wa.adoptVoice(source)), dispose: () => {} }
+  if (kind === 'sampler') {
+    return sample
+      ? buildSamplerVoice(backend, dest, s, sp, sample)
+      : { voices: [], dispose: () => {} }
+  }
+  const built = buildDrumVoice(backend, dest, s.startSec, s.pitch, s.velocity, sp)
+  if (!built) return { voices: [], dispose: () => {} }
+  return {
+    voices: built.parts.voices,
+    dispose: () => {
+      for (const node of built.parts.nodes) backend.disposeNode(node)
+    }
+  }
 }
 
 /**
@@ -502,62 +503,50 @@ export function buildLiveInstrumentVoice(
   if (kind === 'analog') {
     return buildLiveSynthVoice(backend, dest, pitch, velocity, synthParams, onEnded)
   }
-  const wa = backend.webAudio
-  const silent: LiveVoiceHandle = {
-    sustains: false,
-    release: () => onEnded?.(),
-    stop: () => onEnded?.()
-  }
-  if (!wa) return silent // sampler/drums await their ports (see above)
-  const ctx = wa.ctx
-  const dest2 = wa.nodeOf(dest)
   const sp = { ...synthDefaults(), ...synthParams }
   if (kind === 'sampler') {
-    if (!sample) return silent
-    return buildLiveSamplerVoice(ctx, dest2, pitch, velocity, sp, sample, onEnded)
+    if (!sample) {
+      return { sustains: false, release: () => onEnded?.(), stop: () => onEnded?.() }
+    }
+    return buildLiveSamplerVoice(backend, dest, pitch, velocity, sp, sample, onEnded)
   }
-  return buildLiveDrumVoice(ctx, dest2, pitch, velocity, sp, onEnded)
+  return buildLiveDrumVoice(backend, dest, pitch, velocity, sp, onEnded)
 }
 
 function buildLiveDrumVoice(
-  ctx: BaseAudioContext,
-  dest: AudioNode,
+  backend: IAudioBackend,
+  dest: BackendNodeId,
   pitch: number,
   velocity: number,
   sp: Record<string, number>,
   onEnded?: () => void
 ): LiveVoiceHandle {
-  const parts = buildDrumVoice(ctx, dest, ctx.currentTime, pitch, velocity, sp)
-  if (!parts) return { sustains: false, release: () => onEnded?.(), stop: () => onEnded?.() }
-  let remaining = parts.sources.length
+  const built = buildDrumVoice(backend, dest, backend.now(), pitch, velocity, sp)
+  if (!built) return { sustains: false, release: () => onEnded?.(), stop: () => onEnded?.() }
+  const { parts, out } = built
+  let remaining = parts.voices.length
   let endedFired = false
-  for (const source of parts.sources) {
-    source.onended = () => {
-      source.disconnect()
-      if (--remaining === 0) {
-        parts.out.disconnect()
-        if (!endedFired) {
-          endedFired = true
-          onEnded?.()
-        }
-      }
+  const unsubscribe = backend.onVoiceEnded((id) => {
+    if (!parts.voices.includes(id)) return
+    if (--remaining > 0) return
+    unsubscribe()
+    for (const node of parts.nodes) backend.disposeNode(node)
+    if (!endedFired) {
+      endedFired = true
+      onEnded?.()
     }
-  }
+  })
   return {
     // Every hit is a fixed-length decay — it always ends by itself.
     sustains: false,
     // One-shots: a lifted key does not cut a cymbal.
     release: () => {},
     stop: () => {
-      const now = ctx.currentTime
-      parts.out.gain.setTargetAtTime(0.0001, now, 0.008)
-      for (const source of parts.sources) {
-        try {
-          source.stop(now + 0.03)
-        } catch {
-          // already stopped
-        }
-      }
+      const now = backend.now()
+      backend.scheduleParam(out, 'gain', [
+        { kind: 'setTarget', value: 0.0001, time: now, timeConstant: 0.008 }
+      ])
+      for (const voice of parts.voices) backend.stopVoice(voice, now + 0.03)
     }
   }
 }

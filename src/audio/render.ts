@@ -1,4 +1,4 @@
-import type { AutomationPoint, PluginInstance, ProjectState, TrackId } from '@core/model/types'
+﻿import type { AutomationPoint, PluginInstance, ProjectState, TrackId } from '@core/model/types'
 import type { PluginDescriptor } from '@core/plugins/descriptor'
 import {
   automationOf,
@@ -70,8 +70,13 @@ async function prewarmWarpedClips(state: ProjectState, assets: AssetSourceLike):
   }
 }
 
-/** Resolve a track's sampler sample, mirroring the live engine exactly. */
+/**
+ * Resolve a track's sampler sample, mirroring the live engine exactly —
+ * including registering it with this render's backend adapter, since the
+ * voice plays it through the seam.
+ */
 function samplerSampleFor(
+  backend: WebAudioBackend,
   assets: AssetSourceLike,
   track: { samplerAssetId?: string | null } | undefined
 ): InstrumentSample | null {
@@ -79,8 +84,10 @@ function samplerSampleFor(
   if (!assetId) return null
   const asset = assets.get(assetId)
   if (!asset?.buffer) return null
+  if (!backend.hasBuffer(assetId)) backend.webAudio.adoptBuffer(assetId, asset.buffer)
   return {
-    buffer: asset.buffer,
+    bufferId: assetId,
+    durationSec: asset.buffer.duration,
     onsets: onsetsForPeaks(asset.peaks ?? null, asset.peaksPerSecond ?? 0)
   }
 }
@@ -343,7 +350,7 @@ function scheduleSources(
       escapes.adoptNode(dest),
       s,
       track?.synth ?? {},
-      samplerSampleFor(assets, track)
+      samplerSampleFor(rb, assets, track)
     )
   }
 }
