@@ -8,6 +8,8 @@ import type {
   BackendNodeId,
   ExternalPluginSpec,
   IAudioBackend,
+  InputHandle,
+  InputOpenConfig,
   NodeKind,
   NodeOptions,
   ParamEvent,
@@ -121,6 +123,12 @@ class HostingBackend implements IAudioBackend {
   disposeNode(): void {}
   masterNode(): BackendNodeId {
     return 0
+  }
+  outputNode(): BackendNodeId {
+    return 0
+  }
+  async openInput(_config: InputOpenConfig): Promise<InputHandle> {
+    throw new Error('this backend fixture never opens a live input')
   }
   scheduleParam(node: BackendNodeId, param: ParamName, events: readonly ParamEvent[]): void {
     this.ops.push({ op: 'scheduleParam', node, param, events: [...events] })

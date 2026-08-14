@@ -282,6 +282,9 @@ function scriptedAddon(options: { captureChannels: number }): AudiohostAddon & {
     setInputCapture: (node, enabled, capacityFrames) =>
       calls.push(`setInputCapture ${node} ${enabled} ${capacityFrames}`),
     drainCapture: () => queue.splice(0, queue.length),
+    // No vst3host in this fixture — every external insert would bypass,
+    // which is irrelevant to the input protocol these tests drive.
+    attachVst3Bridge: () => false,
     renderOffline: () => new Float32Array(0)
   }
 }

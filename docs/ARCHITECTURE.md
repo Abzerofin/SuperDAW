@@ -1113,7 +1113,27 @@ anyone raises the comfortable ~100-200-track ceiling.
     the runner takes an injectable stimulus sink so the loop verifies
     hardware-free (an in-context DelayNode reads back exactly).
 
-33. ✅ **Live VST3 inserts + plugin-delay compensation**
+33. ✅ **Native duplex input** (NATIVE_AUDIO_BACKEND.md phase 3) — the
+    audio addon opens a duplex `ma_device` on demand (only once a track
+    actually arms, so the OS's microphone indicator stays honest), and
+    capture frames arrive in the SAME callback that renders output:
+    monitoring is pure in-callback DSP, no second stream, no IPC. A new
+    `input` node kind reproduces `audio/input.ts`'s channel-selection rule
+    (mono duplicates one channel to both sides, stereo takes the pair);
+    capture itself rides a lock-free ring per input node, drained in
+    100 ms batches, with a reader that falls a whole ring behind losing
+    the OLDEST frames and saying so through a jump in the batch's start
+    time — the recorder pads that gap with silence rather than splicing.
+    The seam gained `openInput(config) → {node, channelCount, sampleRate,
+    capture(), dispose()}` on BOTH backends (Web Audio moved its
+    getUserMedia + capture worklet behind the same call), and
+    `setMonitorSource(trackId, node)` became `setMonitorInput(trackId,
+    handle)` — the one engine signature the native design flagged as
+    unable to survive the process split. The native engine now
+    pre-creates node 0 = output and node 1 = master (the loopback
+    calibration's stimulus plays post-fader), which is the split
+    milestone 34's PDC compensators and external inserts hang off of.
+34. ✅ **Live VST3 inserts + plugin-delay compensation**
     (NATIVE_AUDIO_BACKEND.md phase 5) — the audio utilityProcess loads
     BOTH native addons, so an external insert is processed inside the
     realtime callback instead of behind the 2-second windowed preview.
