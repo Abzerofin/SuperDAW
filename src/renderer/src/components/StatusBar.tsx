@@ -99,6 +99,7 @@ function HealthStatus({ state }: { state: ProjectState }): React.JSX.Element {
 
   const info = audioEngine.contextInfo()
   const heap = healthSampler.heapMb
+  const xruns = audioEngine.xruns()
   const row = (label: string, value: string, bad = false): React.JSX.Element => (
     <div key={label} className="health-row">
       <span>{label}</span>
@@ -127,6 +128,10 @@ function HealthStatus({ state }: { state: ProjectState }): React.JSX.Element {
               ? `≈ ${(info.baseLatencySec * 1000).toFixed(1)} ms (${Math.round(info.baseLatencySec * info.sampleRate)} frames)`
               : 'n/a'
           )}
+          {/* Dropouts, where the backend can count them. Surfacing this
+              is how a struggling buffer size shows up as a NUMBER before
+              it shows up as crackles in someone's recording. */}
+          {xruns !== null && row('Audio dropouts', `${xruns}`, xruns > 0)}
           {row(
             'Collaboration',
             collab.mode === 'off'

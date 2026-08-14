@@ -535,6 +535,17 @@ export class AudioEngine {
     return this.ensureBackend().webAudio ? 'web' : 'native'
   }
 
+  /**
+   * Dropouts the audio device has reported (native only; null under Web
+   * Audio, which exposes no such counter). The design's phase-4 health
+   * signal: a rising count means the callback missed its deadline, and
+   * seeing it BEFORE users report crackles is the whole point.
+   */
+  xruns(): number | null {
+    const backend = this.backend as (IAudioBackend & { xruns?: number }) | null
+    return typeof backend?.xruns === 'number' ? backend.xruns : null
+  }
+
   private async applyOutputDevice(): Promise<boolean> {
     if (!this.backend) return this.outputDeviceId === null
     return this.backend.setOutputDevice(this.outputDeviceId)
