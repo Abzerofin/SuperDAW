@@ -152,5 +152,9 @@ interface Window {
       }[]
       error?: string
     }>
+    /** Native audio backend (src/main/audioHost.ts). Optional: Electron only. */
+    audioHostAcquire(): Promise<{ error?: string }>
+    audioHostRelease(): Promise<void>
+    onAudioHostExited(handler: () => void): () => void
   }
 }

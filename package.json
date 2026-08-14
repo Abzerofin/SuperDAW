@@ -35,6 +35,10 @@
       {
         "from": "native/vst3host/build/Release/vst3host.node",
         "to": "native/vst3host/build/Release/vst3host.node"
+      },
+      {
+        "from": "native/audiohost/build/Release/audiohost.node",
+        "to": "native/audiohost/build/Release/audiohost.node"
       }
     ],
     "win": {

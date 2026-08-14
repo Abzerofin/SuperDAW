@@ -14,9 +14,11 @@ import {
 import {
   preferences,
   usePreferences,
+  type AudioSystemChoice,
   type LatencyHintChoice,
   type TempoConformChoice
 } from '@/state/preferences'
+import { nativeAudioActive } from '@/state/nativeAudio'
 import { PluginsPane } from './PluginsPane'
 import { ThemesPane } from './ThemesPane'
 import { ProjectPane } from './ProjectPane'
@@ -340,6 +342,31 @@ function AudioPane(): React.JSX.Element {
   return (
     <div className="settings-pane">
       <h2>Audio</h2>
+
+      {window.superdaw && (
+        <div className="settings-field">
+          <label htmlFor="settings-audio-system">Audio system (experimental)</label>
+          <select
+            id="settings-audio-system"
+            value={preferences.audioSystem}
+            onChange={(e) => preferences.set('audioSystem', e.target.value as AudioSystemChoice)}
+          >
+            <option value="web">Web Audio — full features (recommended)</option>
+            <option value="native">Native (WASAPI) — lowest playback latency, experimental</option>
+          </select>
+          <p className="settings-dim">
+            {nativeAudioActive()
+              ? 'Native audio is running this session. '
+              : preferences.audioSystem === 'native'
+                ? 'Takes effect the next time SuperDAW starts. '
+                : ''}
+            The native backend plays clips, automation and the mixer through a dedicated audio
+            process for lower latency. Builtin effects, instruments, recording and monitoring
+            still run on Web Audio features and are unavailable under it for now; any failure
+            falls back to Web Audio automatically.
+          </p>
+        </div>
+      )}
 
       <div className="settings-field">
         <label htmlFor="settings-latency-hint">Buffer size / latency</label>

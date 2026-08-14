@@ -403,6 +403,41 @@ export class AudioEngine {
     this.backendFactory = factory
   }
 
+  /**
+   * Tear the whole backend-scoped world down — chains, inserts, voices,
+   * taps, monitors, adopted buffers — and forget the backend, so the next
+   * ensureBackend() rebuilds against whatever the CURRENT factory
+   * returns. This is the native backend's crash fallback: main notices
+   * the audio utilityProcess exit, the renderer resets the factory to Web
+   * Audio and calls this, and playback machinery reconstructs itself on
+   * the next use (a status-bar notice tells the user — never a popup).
+   */
+  resetBackend(factory: (() => IAudioBackend) | null): void {
+    this.stopAllSources()
+    this.teardownPreview()
+    this.stopScheduler()
+    this.stopMetronome()
+    this.stopTrackLoopScheduler()
+    this.stopFxAutomation()
+    this.stopPadScheduler()
+    this.liveAllNotesOff()
+    for (const entry of this.fxNodes.values()) entry.nodes.dispose()
+    this.fxNodes.clear()
+    this.graphPorts.clear()
+    this.chains.clear()
+    this.inputWaveTaps.clear()
+    this.monitors.clear()
+    this.padSampleVoices.clear()
+    this.padClipLoops.clear()
+    this.voiceCleanups.clear()
+    this.adoptedBufferSource.clear()
+    this.warpedKeysByAsset.clear()
+    this.masterTap = null
+    this.meterBuf = null
+    this.backend = null
+    this.backendFactory = factory
+  }
+
   /** Start the backend (idempotent). Safe pre-gesture; starts suspended. */
   private ensureBackend(): IAudioBackend {
     if (this.backend) return this.backend
@@ -549,10 +584,12 @@ export class AudioEngine {
     // bypassed synth is silent for scheduled notes and must be live too.
     if (!track || !isNoteTrackKind(track.kind) || track.frozenAssetId !== null) return
     if (!synthIsAudible(track.synth)) return
-    // Live voices are Web-Audio-built until the phase-2 DSP ports.
-    const ctx = this.ensureContext()
+    // Live voices are Web-Audio-built until the phase-2 DSP ports — under
+    // the native backend they are silent rather than crashing the router.
+    const escapes = this.ensureBackend().webAudio
+    if (!escapes) return
+    const ctx = escapes.ctx
     if (ctx.state === 'suspended') void ctx.resume()
-    const escapes = this.backend!.webAudio!
 
     const key = Math.min(127, Math.max(0, Math.round(pitch)))
     let voices = this.liveVoices.get(trackId)
@@ -854,10 +891,18 @@ export class AudioEngine {
     this.smooth(this.backend.masterNode(), 'gain', volume)
   }
 
+  /** Decode-only context for non-Web-Audio backends (never routed). */
+  private decodeCtx: AudioContext | null = null
+
   async decode(data: ArrayBuffer): Promise<AudioBuffer> {
     // Decode stays renderer-side Web Audio by design (§3: the native
-    // backend receives decoded planar floats, never encoded bytes).
-    return this.ensureContext().decodeAudioData(data)
+    // backend receives decoded planar floats, never encoded bytes). Under
+    // the native backend a standalone context does the decoding — it owns
+    // no output and never joins any graph.
+    const backend = this.ensureBackend()
+    if (backend.webAudio) return backend.webAudio.ctx.decodeAudioData(data)
+    if (!this.decodeCtx) this.decodeCtx = new AudioContext()
+    return this.decodeCtx.decodeAudioData(data)
   }
 
   /** Autoplay policy: nudge a suspended Web Audio context (no-op natively). */

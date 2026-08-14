@@ -19,6 +19,14 @@ export type TempoConformChoice = 'ask' | 'always' | 'never'
  */
 export type LatencyHintChoice = 'interactive' | 'balanced' | 'playback'
 
+/**
+ * Which audio backend drives playback (Settings ▸ Audio, Electron only).
+ * 'native' = the WASAPI audiohost utilityProcess (experimental; applies
+ * at the next launch, and every failure falls back to Web Audio with a
+ * status notice — see renderer/state/nativeAudio.ts).
+ */
+export type AudioSystemChoice = 'web' | 'native'
+
 interface Preferences {
   /** Middle-CLICK sends a collaboration ping (drag always pans). */
   middleClickPing: boolean
@@ -43,6 +51,8 @@ interface Preferences {
   recordLatencyTrimMs: number
   /** Buffer-size request for the audio engine (see LatencyHintChoice). */
   latencyHint: LatencyHintChoice
+  /** Playback backend (see AudioSystemChoice). Applies at next launch. */
+  audioSystem: AudioSystemChoice
   /** Seconds between crash-recovery snapshots while the project is dirty. */
   autosaveIntervalSec: number
   /** Whole-UI zoom factor (1 = 100%). Personal + per-machine by nature. */
@@ -68,6 +78,7 @@ const DEFAULTS: Preferences = {
   countInBars: 1,
   recordLatencyTrimMs: 0,
   latencyHint: 'interactive',
+  audioSystem: 'web',
   autosaveIntervalSec: 20,
   uiScale: 1
 }
@@ -79,8 +90,12 @@ class PreferencesStore {
   private version = 0
   private listeners = new Set<() => void>()
 
+  /** Resolves once stored values are loaded — boot-order-sensitive
+   *  consumers (the native-audio init) wait on this. */
+  readonly ready: Promise<void>
+
   constructor() {
-    void this.init()
+    this.ready = this.init()
   }
 
   private async init(): Promise<void> {
@@ -116,6 +131,9 @@ class PreferencesStore {
       latencyHint: ['interactive', 'balanced', 'playback'].includes(stored.latencyHint as string)
         ? (stored.latencyHint as LatencyHintChoice)
         : DEFAULTS.latencyHint,
+      audioSystem: ['web', 'native'].includes(stored.audioSystem as string)
+        ? (stored.audioSystem as AudioSystemChoice)
+        : DEFAULTS.audioSystem,
       autosaveIntervalSec:
         typeof stored.autosaveIntervalSec === 'number' &&
         Number.isFinite(stored.autosaveIntervalSec)
@@ -171,6 +189,10 @@ class PreferencesStore {
 
   get latencyHint(): LatencyHintChoice {
     return this.prefs.latencyHint
+  }
+
+  get audioSystem(): AudioSystemChoice {
+    return this.prefs.audioSystem
   }
 
   get autosaveIntervalSec(): number {

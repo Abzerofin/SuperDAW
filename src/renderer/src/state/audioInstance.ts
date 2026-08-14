@@ -22,3 +22,11 @@ audioEngine.setLatencyHintProvider(() => preferences.latencyHint)
 // inserts are silent until frozen, exactly as before.
 subscribeExternalPlugins(() => audioEngine.setExternalHost(externalPluginHost()))
 void scanExternalPlugins()
+
+// Native backend (Settings ▸ Audio ▸ Audio system, Electron only): decided
+// once the stored preference is known — dynamic import breaks the module
+// cycle (nativeAudio needs audioEngine).
+void preferences.ready.then(async () => {
+  const { initNativeAudio } = await import('./nativeAudio')
+  initNativeAudio()
+})

@@ -3,6 +3,7 @@ import { copyFile, readFile } from 'node:fs/promises'
 import { basename, join } from 'node:path'
 import { asBuffer, writeFileAtomic } from './atomicWrite'
 import { readAppData, setAppData } from './appData'
+import { registerAudioHost, shutdownAudioHost } from './audioHost'
 import { registerCollabIpc } from './collabServer'
 import { registerRecoveryIpc } from './recovery'
 import { registerVst3Ipc } from './vst3'
@@ -252,6 +253,7 @@ app.whenReady().then(() => {
   registerCollabIpc()
   registerRecoveryIpc()
   registerVst3Ipc()
+  registerAudioHost()
   createWindow()
   checkForUpdates()
   // Warm the plugin index in the background. It runs out of process and
@@ -265,4 +267,8 @@ app.whenReady().then(() => {
 
 app.on('window-all-closed', () => {
   if (process.platform !== 'darwin') app.quit()
+})
+
+app.on('will-quit', () => {
+  shutdownAudioHost()
 })

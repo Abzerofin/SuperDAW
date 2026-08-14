@@ -5,15 +5,17 @@ import { version } from './package.json'
 
 export default defineConfig({
   // ws stays a runtime require: bundling it trips on its optional native deps.
-  // The plugin scanner is a SECOND entry, not part of index: it is forked as
-  // a utilityProcess, so it has to exist as its own file on disk.
+  // The plugin scanner and the audio host are SEPARATE entries, not part of
+  // index: each is forked as a utilityProcess, so each has to exist as its
+  // own file on disk.
   main: {
     build: {
       rollupOptions: {
         external: ['ws'],
         input: {
           index: resolve('src/main/index.ts'),
-          pluginScanWorker: resolve('src/main/pluginScanWorker.ts')
+          pluginScanWorker: resolve('src/main/pluginScanWorker.ts'),
+          audioHostWorker: resolve('src/main/audioHostWorker.ts')
         }
       }
     }

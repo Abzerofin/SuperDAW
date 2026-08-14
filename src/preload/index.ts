@@ -286,6 +286,25 @@ const api = {
   vst3CloseInstance: (handle: number): Promise<{ closed: boolean }> =>
     ipcRenderer.invoke('vst3:close-instance', handle),
 
+  // ----- Native audio backend (see src/main/audioHost.ts) -----
+
+  /**
+   * Spawn (or recycle) the audio utilityProcess and have main send this
+   * window one end of a direct MessageChannel to it. The PORT cannot
+   * cross the context bridge — it arrives via window.postMessage (see
+   * the listener below); this call only triggers and reports errors.
+   */
+  audioHostAcquire: (): Promise<{ error?: string }> => ipcRenderer.invoke('audiohost:acquire'),
+
+  audioHostRelease: (): Promise<void> => ipcRenderer.invoke('audiohost:release'),
+
+  /** Fires when the audio process dies — the fall-back-to-Web-Audio signal. */
+  onAudioHostExited: (handler: () => void): (() => void) => {
+    const listener = (): void => handler()
+    ipcRenderer.on('audiohost:exited', listener)
+    return () => ipcRenderer.off('audiohost:exited', listener)
+  },
+
   /** Automatable parameters of an installed VST3. Values are normalized 0..1. */
   vst3Parameters: (
     uid: string
@@ -306,3 +325,17 @@ const api = {
 export type SuperDawApi = typeof api
 
 contextBridge.exposeInMainWorld('superdaw', api)
+
+// MessagePorts cannot cross the context bridge; the documented route into
+// a sandboxed page is window.postMessage with a transfer. Main sends the
+// audio-host port here after audioHostAcquire; the page listens for
+// 'message' events whose data is 'audiohost:port'. (Declared locally:
+// the preload compiles in the DOM-free node program but runs in a page.)
+declare const window: {
+  postMessage(message: unknown, targetOrigin: string, transfer?: unknown[]): void
+}
+
+ipcRenderer.on('audiohost:port', (event) => {
+  const port = event.ports[0]
+  if (port) window.postMessage('audiohost:port', '*', [port])
+})
