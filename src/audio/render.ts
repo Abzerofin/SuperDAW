@@ -287,6 +287,10 @@ function scheduleSources(
     return gain
   }
 
+  // Instrument voices build from backend primitives, so this pass needs
+  // the same per-render adapter the insert pass uses.
+  const rb = new WebAudioBackend({ contextFactory: () => ctx as AudioContext })
+  const escapes = rb.webAudio
   const makeBuffer = (channels: readonly Float32Array[], sampleRate: number): AudioBuffer => {
     const b = ctx.createBuffer(channels.length, channels[0].length, sampleRate)
     channels.forEach((data, ch) => b.copyToChannel(data as Float32Array<ArrayBuffer>, ch))
@@ -332,7 +336,15 @@ function scheduleSources(
     const dest = destinationFor(s.clipId, s.trackId)
     if (!dest) continue
     const track = state.tracks[s.trackId]
-    buildInstrumentVoice(ctx, dest, s, track?.synth ?? {}, samplerSampleFor(assets, track))
+    // Through the same per-render backend adapter the inserts use, so
+    // bounces build instrument voices exactly as playback does.
+    buildInstrumentVoice(
+      rb,
+      escapes.adoptNode(dest),
+      s,
+      track?.synth ?? {},
+      samplerSampleFor(assets, track)
+    )
   }
 }
 

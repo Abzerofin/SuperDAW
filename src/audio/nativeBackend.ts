@@ -189,6 +189,12 @@ export class NativeAudioBackend {
     return id
   }
 
+  scheduleSource(node: BackendNodeId, when: number, stopAt?: number): VoiceId {
+    const id = this.nextId++
+    this.send({ t: 'scheduleSource', id, node, when, stopAt })
+    return id
+  }
+
   stopVoice(id: VoiceId, atTime?: number): void {
     this.send({ t: 'stopVoice', id, atTime })
   }

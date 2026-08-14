@@ -545,6 +545,17 @@ struct Node {
   // Oscillator: waveform + running phase in [0, 1).
   OscType oscType = OscType::Sine;
   double phase = 0;
+  /**
+   * Scheduled-source lifecycle, for GENERATED voices (an oscillator in a
+   * synth note) — what buffer voices get from Voice. The node is silent
+   * outside [srcStart, srcStop); once srcStop passes it reports ended
+   * under `voiceId`, exactly like a buffer voice running out, so the
+   * engine's teardown and bookkeeping stay uniform.
+   */
+  double srcStart = 0;
+  double srcStop = 1e300;
+  uint32_t voiceId = 0;
+  bool srcEnded = false;
   std::vector<uint32_t> inputs;  // node ids feeding this node
   /**
    * Nodes feeding a PARAM rather than the audio input, per slot — Web
@@ -705,6 +716,7 @@ struct Command {
     DisposeNode,
     ScheduleParam,
     Play,
+    ScheduleSource,
     StopVoice,
     CreateTap,
     DisposeTap
@@ -862,6 +874,20 @@ class Engine {
     return true;
   }
 
+  /**
+   * Schedule a GENERATED source (an oscillator) as a voice: audible from
+   * `when` until `stopAt`, then ended under `voiceId`. `stopAt` of
+   * infinity means open-ended — a held live note, ended by StopVoice.
+   */
+  void ScheduleSource(uint32_t voiceId, uint32_t node, double when, double stopAt) {
+    Command c{Command::Op::ScheduleSource};
+    c.a = node;
+    c.b = voiceId;
+    c.x = when;
+    c.event.time = stopAt;  // reuse: the command's spare double
+    Push(std::move(c));
+  }
+
   void StopVoice(uint32_t id, double atTime) {
     Command c{Command::Op::StopVoice};
     c.a = id;
@@ -949,6 +975,18 @@ class Engine {
         it = voices_.erase(it);
       } else {
         ++it;
+      }
+    }
+
+    // Scheduled generated sources report ended once their window closes —
+    // swept here rather than in the render so an unreachable node (its
+    // chain already torn down) still ends instead of leaking its voice.
+    const double blockEnd = blockTime + frames / sampleRate;
+    for (auto& [id, node] : nodes_) {
+      if (node->voiceId == 0 || node->srcEnded) continue;
+      if (blockEnd >= node->srcStop) {
+        node->srcEnded = true;
+        NotifyEnded(node->voiceId);
       }
     }
 
@@ -1190,7 +1228,18 @@ class Engine {
         voices_.push_back(std::move(voice));
         break;
       }
-      case Command::Op::StopVoice:
+      case Command::Op::ScheduleSource: {
+        Node* node = Get(c.a);
+        if (!node) break;
+        node->voiceId = c.b;
+        node->srcStart = c.x;
+        node->srcStop = c.event.time;
+        node->srcEnded = false;
+        node->phase = 0;
+        break;
+      }
+      case Command::Op::StopVoice: {
+        bool found = false;
         for (auto& voice : voices_) {
           if (voice->id != c.a) continue;
           if (c.x < 0) {
@@ -1198,9 +1247,23 @@ class Engine {
           } else {
             voice->stopAt = c.x;
           }
+          found = true;
+          break;
+        }
+        if (found) break;
+        // Generated sources carry their voice id on the node itself.
+        for (auto& [id, node] : nodes_) {
+          if (node->voiceId != c.a || node->srcEnded) continue;
+          if (c.x < 0) {
+            node->srcEnded = true;
+            NotifyEnded(c.a);
+          } else {
+            node->srcStop = c.x;
+          }
           break;
         }
         break;
+      }
       case Command::Op::CreateTap: {
         auto tap = std::make_unique<Tap>();
         tap->node = c.voice.dest;
@@ -1297,10 +1360,16 @@ class Engine {
     }
     if (node->kind == NodeKind::Oscillator) {
       // A source: no inputs, writes its waveform to both channels (so a
-      // param connection's mono downmix sees exactly this signal).
+      // param connection's mono downmix sees exactly this signal). A
+      // SCHEDULED oscillator (voiceId set) is silent outside its window.
       const double frameDur = 1.0 / sampleRate;
       for (uint32_t i = 0; i < frames; i++) {
         const double t = blockTime + i * frameDur;
+        if (node->voiceId != 0 && (t < node->srcStart || t >= node->srcStop)) {
+          node->block[i * 2] = 0;
+          node->block[i * 2 + 1] = 0;
+          continue;
+        }
         double freq = node->p0.ValueAt(t) + ParamMod(*node, 0, i);
         const double detune = node->p1.ValueAt(t);
         if (detune != 0) freq *= std::pow(2.0, detune / 1200.0);

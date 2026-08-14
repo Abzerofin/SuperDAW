@@ -39,6 +39,7 @@ export type HostCommand =
       rate?: number
       destination: number
     }
+  | { t: 'scheduleSource'; id: number; node: number; when: number; stopAt?: number }
   | { t: 'stopVoice'; id: number; atTime?: number }
   | { t: 'createTap'; id: number; node: number; frames: number }
   | { t: 'disposeTap'; id: number }

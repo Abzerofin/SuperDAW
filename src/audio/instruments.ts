@@ -6,8 +6,14 @@ import {
   synthDefaults
 } from '@core/model/effects'
 import { sliceRegions } from '@core/model/slices'
+import type { BackendNodeId, IAudioBackend } from './backend'
 import type { NoteSchedule } from './scheduling'
-import { buildLiveSynthVoice, buildSynthVoice, type LiveVoiceHandle } from './synth'
+import {
+  buildLiveSynthVoice,
+  buildSynthVoice,
+  type BuiltVoice,
+  type LiveVoiceHandle
+} from './synth'
 
 /**
  * The built-in instruments beyond the analog synth: a SAMPLER (an asset
@@ -446,23 +452,36 @@ function teardownAfterAll(
  * still transferring = silent, exactly like a clip whose asset is absent).
  */
 export function buildInstrumentVoice(
-  ctx: BaseAudioContext,
-  dest: AudioNode,
+  backend: IAudioBackend,
+  dest: BackendNodeId,
   s: NoteSchedule,
   synthParams: Readonly<Record<string, number>>,
-  sample: InstrumentSample | null,
-  onVoiceEnded?: (source: AudioScheduledSourceNode) => void
-): AudioScheduledSourceNode[] {
+  sample: InstrumentSample | null
+): BuiltVoice {
   const kind = instrumentKindOf(synthParams)
-  if (kind === 'analog') return buildSynthVoice(ctx, dest, s, synthParams, onVoiceEnded)
+  // The analog synth is fully ported: backend primitives, both backends.
+  if (kind === 'analog') return buildSynthVoice(backend, dest, s, synthParams)
+
+  // Sampler and drums still build Web Audio graphs, so under a backend
+  // without those escapes they are silent — the same honest bypass a
+  // missing plugin gets, until their ports land.
+  const wa = backend.webAudio
+  if (!wa) return { voices: [], dispose: () => {} }
+  const ctx = wa.ctx
+  const destNode = wa.nodeOf(dest)
   const sp = { ...synthDefaults(), ...synthParams }
-  if (kind === 'sampler') {
-    return sample ? buildSamplerVoice(ctx, dest, s, sp, sample, onVoiceEnded) : []
-  }
-  const parts = buildDrumVoice(ctx, dest, s.startSec, s.pitch, s.velocity, sp)
-  if (!parts) return []
-  teardownAfterAll(parts, onVoiceEnded)
-  return parts.sources
+  const sources =
+    kind === 'sampler'
+      ? sample
+        ? buildSamplerVoice(ctx, destNode, s, sp, sample)
+        : []
+      : (() => {
+          const parts = buildDrumVoice(ctx, destNode, s.startSec, s.pitch, s.velocity, sp)
+          if (!parts) return []
+          teardownAfterAll(parts)
+          return parts.sources
+        })()
+  return { voices: sources.map((source) => wa.adoptVoice(source)), dispose: () => {} }
 }
 
 /**
@@ -471,8 +490,8 @@ export function buildInstrumentVoice(
  * teardown) cuts them short.
  */
 export function buildLiveInstrumentVoice(
-  ctx: BaseAudioContext,
-  dest: AudioNode,
+  backend: IAudioBackend,
+  dest: BackendNodeId,
   pitch: number,
   velocity: number,
   synthParams: Readonly<Record<string, number>>,
@@ -481,14 +500,23 @@ export function buildLiveInstrumentVoice(
 ): LiveVoiceHandle {
   const kind = instrumentKindOf(synthParams)
   if (kind === 'analog') {
-    return buildLiveSynthVoice(ctx, dest, pitch, velocity, synthParams, onEnded)
+    return buildLiveSynthVoice(backend, dest, pitch, velocity, synthParams, onEnded)
   }
+  const wa = backend.webAudio
+  const silent: LiveVoiceHandle = {
+    sustains: false,
+    release: () => onEnded?.(),
+    stop: () => onEnded?.()
+  }
+  if (!wa) return silent // sampler/drums await their ports (see above)
+  const ctx = wa.ctx
+  const dest2 = wa.nodeOf(dest)
   const sp = { ...synthDefaults(), ...synthParams }
   if (kind === 'sampler') {
-    if (!sample) return { sustains: false, release: () => onEnded?.(), stop: () => onEnded?.() }
-    return buildLiveSamplerVoice(ctx, dest, pitch, velocity, sp, sample, onEnded)
+    if (!sample) return silent
+    return buildLiveSamplerVoice(ctx, dest2, pitch, velocity, sp, sample, onEnded)
   }
-  return buildLiveDrumVoice(ctx, dest, pitch, velocity, sp, onEnded)
+  return buildLiveDrumVoice(ctx, dest2, pitch, velocity, sp, onEnded)
 }
 
 function buildLiveDrumVoice(

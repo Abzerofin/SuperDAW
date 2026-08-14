@@ -577,12 +577,8 @@ export class AudioEngine {
     // bypassed synth is silent for scheduled notes and must be live too.
     if (!track || !isNoteTrackKind(track.kind) || track.frozenAssetId !== null) return
     if (!synthIsAudible(track.synth)) return
-    // Live voices are Web-Audio-built until the phase-2 DSP ports — under
-    // the native backend they are silent rather than crashing the router.
-    const escapes = this.ensureBackend().webAudio
-    if (!escapes) return
-    const ctx = escapes.ctx
-    if (ctx.state === 'suspended') void ctx.resume()
+    const backend = this.ensureBackend()
+    this.resumeOutput()
 
     const key = Math.min(127, Math.max(0, Math.round(pitch)))
     let voices = this.liveVoices.get(trackId)
@@ -596,8 +592,8 @@ export class AudioEngine {
 
     const seq = ++this.liveVoiceSeq
     const handle = buildLiveInstrumentVoice(
-      ctx,
-      escapes.nodeOf(this.chain(trackId).input),
+      backend,
+      this.chain(trackId).input,
       key,
       Math.min(1, Math.max(0, velocity)),
       track.synth,
@@ -2040,30 +2036,26 @@ export class AudioEngine {
       )
       const byTrack = this.trackSources(s.trackId)
       const track = state.tracks[s.trackId]
-      const adopted = new Map<AudioScheduledSourceNode, VoiceId>()
-      const sources = buildInstrumentVoice(
-        escapes.ctx,
-        escapes.nodeOf(dest),
+      const built = buildInstrumentVoice(
+        backend,
+        dest,
         s,
         track?.synth ?? {},
-        this.samplerSampleFor(track),
-        (source) => {
-          // The voice id exists by the time any source can end: adoption
-          // happens synchronously below, before the voice is audible.
-          const voice = adopted.get(source)
-          if (voice === undefined) return
-          this.sources.delete(voice)
-          byTrack.delete(voice)
-          collect?.delete(voice)
-          this.voiceCleanups.delete(voice)
-        }
+        this.samplerSampleFor(track)
       )
-      for (const source of sources) {
-        const voice = escapes.adoptVoice(source)
-        adopted.set(source, voice)
+      // The instrument owns a small graph (oscillators → filter → env);
+      // it is torn down once every voice it minted has ended.
+      let remaining = built.voices.length
+      for (const voice of built.voices) {
         this.sources.add(voice)
         byTrack.add(voice)
         collect?.add(voice)
+        this.voiceCleanups.set(voice, () => {
+          this.sources.delete(voice)
+          byTrack.delete(voice)
+          collect?.delete(voice)
+          if (--remaining === 0) built.dispose()
+        })
       }
     }
   }

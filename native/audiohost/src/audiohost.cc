@@ -529,6 +529,18 @@ Napi::Value PlayVoice(const Napi::CallbackInfo& info) {
   return Napi::Boolean::New(env, ok);
 }
 
+/** scheduleSource(voiceId, nodeId, when, stopAt) — generated-source voice. */
+Napi::Value ScheduleSource(const Napi::CallbackInfo& info) {
+  Napi::Env env = info.Env();
+  const double stopAt = info.Length() > 3 && info[3].IsNumber()
+                            ? info[3].As<Napi::Number>().DoubleValue()
+                            : 1e300;
+  EngineOf(env).ScheduleSource(info[0].As<Napi::Number>().Uint32Value(),
+                               info[1].As<Napi::Number>().Uint32Value(),
+                               info[2].As<Napi::Number>().DoubleValue(), stopAt);
+  return env.Undefined();
+}
+
 Napi::Value StopVoice(const Napi::CallbackInfo& info) {
   Napi::Env env = info.Env();
   const double atTime =
@@ -613,6 +625,7 @@ static Napi::Object InitModule(Napi::Env env, Napi::Object exports) {
   exports.Set("hasBuffer", Napi::Function::New(env, HasBuffer));
   exports.Set("releaseBuffer", Napi::Function::New(env, ReleaseBuffer));
   exports.Set("play", Napi::Function::New(env, PlayVoice));
+  exports.Set("scheduleSource", Napi::Function::New(env, ScheduleSource));
   exports.Set("stopVoice", Napi::Function::New(env, StopVoice));
   exports.Set("createTap", Napi::Function::New(env, CreateTap));
   exports.Set("readTap", Napi::Function::New(env, ReadTap));

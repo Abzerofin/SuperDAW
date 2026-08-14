@@ -99,6 +99,14 @@ export interface IAudioBackend {
   releaseBuffer(id: string): void
   play(spec: PlaySpec): VoiceId | null
   /**
+   * Schedule a GENERATED source node (an oscillator) as a voice: audible
+   * from `when` until `stopAt`, then reported through onVoiceEnded like
+   * any buffer voice. Omit `stopAt` for an open-ended note (a held key),
+   * ended later by stopVoice. The caller owns the node and disposes its
+   * graph when the voice ends.
+   */
+  scheduleSource(node: BackendNodeId, when: number, stopAt?: number): VoiceId
+  /**
    * With `atTime`: schedule the stop and let the end notification clean
    * up (a pad's fade-out). Without: stop and disconnect immediately
    * (teardown), which still fires the end notification.
@@ -298,9 +306,9 @@ export class WebAudioBackend implements IAudioBackend {
     const id = this.nextId++
     this.nodes.set(id, node)
     if (opts) this.configureNode(id, opts)
-    // Oscillator primitives run from creation — the native engine's
-    // equivalent has no separate start, so neither does the seam.
-    if (node instanceof OscillatorNode) node.start()
+    // Oscillators do NOT auto-start: scheduleSource is how any generated
+    // source begins, so a synth note and a free-running LFO take the
+    // same path on both backends.
     return id
   }
 
@@ -454,6 +462,13 @@ export class WebAudioBackend implements IAudioBackend {
     }
     this.voices.set(id, { source })
     return id
+  }
+
+  scheduleSource(node: BackendNodeId, when: number, stopAt?: number): VoiceId {
+    const source = this.node(node) as AudioScheduledSourceNode
+    source.start(when)
+    if (stopAt !== undefined && Number.isFinite(stopAt)) source.stop(stopAt)
+    return this.webAudio.adoptVoice(source)
   }
 
   stopVoice(id: VoiceId, atTime?: number): void {

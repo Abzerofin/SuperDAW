@@ -39,6 +39,7 @@ export interface AudiohostAddon {
   registerBuffer(id: string, channels: Float32Array[], sampleRate: number): void
   releaseBuffer(id: string): void
   play(spec: Record<string, unknown>): boolean
+  scheduleSource(voiceId: number, node: number, when: number, stopAt?: number): void
   stopVoice(id: number, atTime?: number): void
   createTap(id: number, node: number, frames: number): void
   disposeTap(id: number): void
@@ -152,6 +153,9 @@ export function createAudioHostSession(
           rate: c.rate,
           destination: c.destination
         })
+        break
+      case 'scheduleSource':
+        addon.scheduleSource(c.id, c.node, c.when, c.stopAt)
         break
       case 'stopVoice':
         addon.stopVoice(c.id, c.atTime)

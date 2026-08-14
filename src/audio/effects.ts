@@ -361,6 +361,8 @@ const BUILDERS: Record<EffectType, Builder> = {
     const osc = backend.createNode('oscillator', { type: 'sine' })
     setNow(backend, osc, 'frequency', 4)
     let currentWave = 'sine'
+    // Free-running from now, no end: the same call a synth note uses.
+    backend.scheduleSource(osc, 0)
     backend.connect(osc, depthGain)
     backend.connectParam(depthGain, carrier, 'gain')
     const { out, analysis, disposeTap } = tapOut(backend, carrier)
