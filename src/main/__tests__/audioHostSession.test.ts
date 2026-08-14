@@ -36,7 +36,14 @@ describe.skipIf(!hasAddon)('audio host session ↔ NativeAudioBackend', () => {
     const session = createAudioHostSession(addon, wirePort(port2), { manualFrames: true })
     const backend = new NativeAudioBackend(wirePort(port1))
     backend.adoptStreamInfo(
-      { sampleRate: 48000, outputChannels: 2, periodFrames: 128, periodCount: 3, exclusive: false },
+      {
+        sampleRate: 48000,
+        outputChannels: 2,
+        periodFrames: 128,
+        periodCount: 3,
+        exclusive: false,
+        inputChannels: 0
+      },
       0.01
     )
     expect(backend.start().sampleRate).toBe(48000)

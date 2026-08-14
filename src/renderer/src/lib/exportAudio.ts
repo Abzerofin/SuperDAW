@@ -206,13 +206,13 @@ export function vst3BypassWarning(state: ProjectState): string | null {
 export async function exportMixdown(): Promise<boolean> {
   const state = projectStore.state
   const { exportFormat, exportBitDepth } = state.settings
-  // Bounce at the live context rate — the rate every asset was decoded at
-  // — so the mixdown resamples nothing on the way out and a bounce
-  // re-imported on this machine round-trips rate-exact.
+  // Bounce at the DECODE rate — the rate every asset was decoded at — so
+  // the mixdown resamples nothing on the way out and a bounce re-imported
+  // on this machine round-trips rate-exact (backend design §6).
   const mixed = await renderMixdownChannels(
     state,
     assetStore,
-    audioEngine.ensureContext().sampleRate
+    audioEngine.decodeSampleRate()
   )
   if (!mixed) return false
   const data = await encode(mixed.channels, mixed.sampleRate, exportFormat, exportBitDepth)
@@ -240,7 +240,7 @@ export async function exportTrackAudio(trackId: TrackId, format: ExportFormat): 
     state,
     trackId,
     assetStore,
-    audioEngine.ensureContext().sampleRate
+    audioEngine.decodeSampleRate()
   )
   if (!mixed) return false
   const data = await encode(mixed.channels, mixed.sampleRate, format, state.settings.exportBitDepth)

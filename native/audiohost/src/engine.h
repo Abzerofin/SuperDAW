@@ -191,8 +191,23 @@ enum class NodeKind : uint8_t {
   Delay,
   Compressor,
   Convolver,
-  Oscillator
+  Oscillator,
+  /** The duplex stream's capture side, channel-selected (phase 3). */
+  Input
 };
+
+/**
+ * Node 0 is the OUTPUT — what the device actually hears — and node 1 is
+ * the master fader hanging off it. Both are pre-created and
+ * indestructible.
+ *
+ * The split exists for one caller: the loopback calibration plays its
+ * stimulus POST-fader, exactly as it does on Web Audio (where the sink is
+ * ctx.destination, not the master gain), so a pulled-down master can never
+ * decide whether the measurement hears itself.
+ */
+constexpr uint32_t kOutputNode = 0;
+constexpr uint32_t kMasterNode = 1;
 
 // ------------------------------------------------------------------ FFT
 
@@ -532,6 +547,38 @@ inline BiquadType ParseBiquadType(const std::string& name) {
   return BiquadType::Peaking;
 }
 
+/**
+ * A capture ring — one input node's selected channels, written by the
+ * render thread and drained by the JS thread at UI cadence (§5's table:
+ * capture crosses the process boundary in ~100 ms batches, never at
+ * callback cadence).
+ *
+ * Single writer, single reader, no locks and no allocation on the audio
+ * thread: the storage is sized on the JS thread and handed over by
+ * command, and only `written` crosses threads — its release/acquire pair
+ * also publishes `firstSec`/`sampleRate`, which are written once before
+ * the first increment. A reader that falls more than a ring behind loses
+ * the OLDEST frames and says so through the next chunk's start time, so a
+ * take ends up with an audible hole rather than a silent misalignment.
+ */
+struct CaptureRing {
+  std::vector<float> data;  // interleaved stereo, `capacity` frames
+  size_t capacity = 0;
+  std::atomic<uint64_t> written{0};
+  uint64_t read = 0;   // JS thread only
+  double firstSec = 0; // stream time of written-frame 0
+  double sampleRate = 0;
+};
+
+/** One drained batch: stereo planar frames plus the stream time of the
+ *  first of them — the seam's `capture(chunk, firstFrameTime)` currency. */
+struct CaptureChunk {
+  uint32_t node = 0;
+  double startSec = 0;
+  uint32_t frames = 0;
+  std::vector<float> left, right;
+};
+
 struct Node {
   NodeKind kind = NodeKind::Gain;
   bool alive = true;
@@ -566,6 +613,16 @@ struct Node {
   // Oscillator: waveform + running phase in [0, 1).
   OscType oscType = OscType::Sine;
   double phase = 0;
+  /**
+   * Input: which hardware channel(s) of the capture side to take —
+   * audio/input.ts's semantics exactly (mono duplicates one channel to
+   * both sides, stereo takes the channel and the next one). `capture` is
+   * non-null while someone is recording this input; it is allocated on
+   * the JS thread and swapped in here, never built on the audio thread.
+   */
+  uint32_t inputChannel = 0;
+  bool inputStereo = false;
+  std::shared_ptr<CaptureRing> capture;
   /**
    * Scheduled-source lifecycle, for GENERATED voices (an oscillator in a
    * synth note) — what buffer voices get from Voice. The node is silent
@@ -752,16 +809,19 @@ struct Command {
     ScheduleSource,
     StopVoice,
     CreateTap,
-    DisposeTap
+    DisposeTap,
+    ConfigureInput,
+    SetInputCapture
   } op;
   uint32_t a = 0;  // node / voice / tap id
-  uint32_t b = 0;  // target node / frames
+  uint32_t b = 0;  // target node / frames / input channel
   NodeKind nodeKind = NodeKind::Gain;
   double x = 0;         // stopVoice atTime (<0 = immediate)
-  std::string str;      // param name / biquad type
+  std::string str;      // param name / biquad type / input mode
   ParamEvent event{};
   std::shared_ptr<SharedBuffer> buffer;    // Play
   std::shared_ptr<ConvolverState> convState;  // ConfigureNode (convolver IR)
+  std::shared_ptr<CaptureRing> captureRing;   // SetInputCapture (null = off)
   Voice voice{};                           // Play template
 };
 
@@ -774,8 +834,11 @@ struct Command {
 class Engine {
  public:
   Engine() {
-    // Node 0 is the master gain, pre-created and indestructible.
-    nodes_.emplace(0u, std::make_unique<Node>());
+    // The output (0) and the master fader (1) hanging off it — see
+    // kOutputNode. Both pre-created and indestructible.
+    nodes_.emplace(kOutputNode, std::make_unique<Node>());
+    nodes_.emplace(kMasterNode, std::make_unique<Node>());
+    nodes_[kOutputNode]->inputs.push_back(kMasterNode);
     // Wavetables are built once, here on the constructing (JS) thread —
     // never on the audio thread, and shared by every oscillator node.
     waveTables_[static_cast<size_t>(OscType::Sine)].Build(OscType::Sine);
@@ -792,12 +855,15 @@ class Engine {
   // an id round-trip per createNode/play would put renderer→host RPC
   // latency inside the scheduling path for no reason.
 
-  void CreateNode(uint32_t id, NodeKind kind, const std::string& biquadType = "",
-                  double maxDelaySec = 1) {
+  /** `typeName` is the biquad/oscillator waveform, or an input's
+   *  "mono"/"stereo" mode; `channel` is an input's first hardware channel. */
+  void CreateNode(uint32_t id, NodeKind kind, const std::string& typeName = "",
+                  double maxDelaySec = 1, uint32_t channel = 0) {
     Command c{Command::Op::CreateNode};
     c.a = id;
+    c.b = channel;
     c.nodeKind = kind;
-    c.str = biquadType;
+    c.str = typeName;
     c.x = maxDelaySec;
     Push(std::move(c));
   }
@@ -807,6 +873,73 @@ class Engine {
     c.a = id;
     c.str = biquadType;
     Push(std::move(c));
+  }
+
+  /** Re-point an input node's channel selection without rebuilding it. */
+  void ConfigureInput(uint32_t id, const std::string& mode, uint32_t channel) {
+    Command c{Command::Op::ConfigureInput};
+    c.a = id;
+    c.b = channel;
+    c.str = mode;
+    Push(std::move(c));
+  }
+
+  /**
+   * Start/stop recording an input node. The ring is sized and allocated
+   * HERE, on the JS thread; the render thread only ever swaps the finished
+   * object in — the same discipline the convolver's partition spectra
+   * follow.
+   */
+  void SetInputCapture(uint32_t nodeId, bool enabled, uint32_t capacityFrames) {
+    std::shared_ptr<CaptureRing> ring;
+    if (enabled) {
+      ring = std::make_shared<CaptureRing>();
+      ring->capacity = std::max<size_t>(capacityFrames, kBlockFrames);
+      ring->data.assign(ring->capacity * 2, 0.0f);
+    }
+    {
+      std::lock_guard<std::mutex> lock(captureMutex_);
+      if (enabled) captures_[nodeId] = ring;
+      else captures_.erase(nodeId);
+    }
+    Command c{Command::Op::SetInputCapture};
+    c.a = nodeId;
+    c.captureRing = std::move(ring);
+    Push(std::move(c));
+  }
+
+  /** Everything captured since the last drain, per input node (JS thread). */
+  std::vector<CaptureChunk> DrainCapture() {
+    std::vector<CaptureChunk> out;
+    std::lock_guard<std::mutex> lock(captureMutex_);
+    for (auto& [id, ring] : captures_) {
+      const uint64_t w = ring->written.load(std::memory_order_acquire);
+      if (w <= ring->read) continue;
+      uint64_t available = w - ring->read;
+      if (available > ring->capacity) {
+        // Fell a whole ring behind: the oldest frames are already
+        // overwritten. Skip to what survives — the jump in startSec is
+        // what tells the recorder to pad the hole with silence.
+        ring->read = w - ring->capacity;
+        available = ring->capacity;
+      }
+      CaptureChunk chunk;
+      chunk.node = id;
+      chunk.frames = static_cast<uint32_t>(available);
+      chunk.startSec =
+          ring->firstSec +
+          (ring->sampleRate > 0 ? static_cast<double>(ring->read) / ring->sampleRate : 0.0);
+      chunk.left.resize(available);
+      chunk.right.resize(available);
+      for (uint64_t i = 0; i < available; i++) {
+        const size_t slot = static_cast<size_t>((ring->read + i) % ring->capacity);
+        chunk.left[i] = ring->data[slot * 2];
+        chunk.right[i] = ring->data[slot * 2 + 1];
+      }
+      ring->read = w;
+      out.push_back(std::move(chunk));
+    }
+    return out;
   }
 
   /**
@@ -855,7 +988,11 @@ class Engine {
   }
 
   void DisposeNode(uint32_t id) {
-    if (id == 0) return;
+    if (id == kOutputNode || id == kMasterNode) return;
+    {
+      std::lock_guard<std::mutex> lock(captureMutex_);
+      captures_.erase(id);
+    }
     Command c{Command::Op::DisposeNode};
     c.a = id;
     Push(std::move(c));
@@ -971,18 +1108,38 @@ class Engine {
    * interleaved stereo buffer, on the CALLER's thread. Requires the
    * device to be stopped (the two must never render concurrently).
    */
-  void RenderOffline(double startTime, uint32_t frames, double sampleRate, float* out) {
+  void RenderOffline(double startTime, uint32_t frames, double sampleRate, float* out,
+                     const float* input = nullptr, uint32_t inputChannels = 0) {
     double t = startTime;
     uint32_t done = 0;
     while (done < frames) {
       const uint32_t n = std::min(kBlockFrames, frames - done);
+      // Slice the supplied capture material exactly as the duplex callback
+      // hands its own input over, so an offline verification run exercises
+      // the identical path.
+      SetInputBlock(input != nullptr && inputChannels > 0
+                        ? input + static_cast<size_t>(done) * inputChannels
+                        : nullptr,
+                    inputChannels, n);
       RenderBlock(t, n, sampleRate, out + static_cast<size_t>(done) * 2);
       t += static_cast<double>(n) / sampleRate;
       done += n;
     }
+    SetInputBlock(nullptr, 0, 0);
   }
 
   // ---- render thread ----
+
+  /**
+   * The duplex stream's capture side for the block ABOUT TO RENDER —
+   * interleaved frames exactly as the device callback delivered them.
+   * Borrowed, never owned: valid only for the RenderBlock that follows.
+   */
+  void SetInputBlock(const float* interleaved, uint32_t channels, uint32_t frames) {
+    inputBlock_ = interleaved;
+    inputBlockChannels_ = channels;
+    inputBlockFrames_ = frames;
+  }
 
   /* One block: apply pending commands, run voices into nodes, walk the
    * graph bottom-up into the master, feed taps. `out` = stereo
@@ -1027,9 +1184,32 @@ class Engine {
       }
     }
 
-    // Graph: render the master (0); recursion covers reachable nodes.
-    RenderNode(0, blockTime, frames, sampleRate);
-    std::copy(Get(0)->block, Get(0)->block + frames * 2, out);
+    // Input nodes are SOURCES fed by the device's capture side, and they
+    // render whether or not anything is listening: recording without
+    // monitoring is the normal case, so capture must not depend on the
+    // node being reachable from the output.
+    for (auto& [id, node] : nodes_) {
+      if (node->kind != NodeKind::Input) continue;
+      RenderNode(id, blockTime, frames, sampleRate);
+      CaptureRing* ring = node->capture.get();
+      if (ring == nullptr || ring->capacity == 0) continue;
+      const uint64_t at = ring->written.load(std::memory_order_relaxed);
+      if (at == 0) {
+        ring->firstSec = blockTime;
+        ring->sampleRate = sampleRate;
+      }
+      for (uint32_t i = 0; i < frames; i++) {
+        const size_t slot = static_cast<size_t>((at + i) % ring->capacity);
+        ring->data[slot * 2] = node->block[i * 2];
+        ring->data[slot * 2 + 1] = node->block[i * 2 + 1];
+      }
+      // Release: publishes the frames above AND firstSec/sampleRate.
+      ring->written.store(at + frames, std::memory_order_release);
+    }
+
+    // Graph: render the output (0); recursion covers reachable nodes.
+    RenderNode(kOutputNode, blockTime, frames, sampleRate);
+    std::copy(Get(kOutputNode)->block, Get(kOutputNode)->block + frames * 2, out);
 
     // Delay ring pass: every delay's INPUT sum (feedback subtrees render
     // here — they hang off the delay and are unreachable from the master)
@@ -1125,6 +1305,7 @@ class Engine {
         if (name == "detune") return 1;
         return -1;
       case NodeKind::Convolver:
+      case NodeKind::Input:
         return -1;
     }
     return -1;
@@ -1175,6 +1356,9 @@ class Engine {
           node->p0 = ParamTimeline(440.0);  // frequency Hz
           node->p1 = ParamTimeline(0.0);    // detune cents
           node->oscType = c.str.empty() ? OscType::Sine : ParseOscType(c.str);
+        } else if (c.nodeKind == NodeKind::Input) {
+          node->inputStereo = c.str == "stereo";
+          node->inputChannel = c.b;
         } else if (c.nodeKind == NodeKind::Compressor) {
           // Web Audio's DynamicsCompressorNode defaults.
           node->p0 = ParamTimeline(-24.0);  // threshold dB
@@ -1314,6 +1498,19 @@ class Engine {
         taps_.erase(c.a);
         break;
       }
+      case Command::Op::ConfigureInput: {
+        Node* node = Get(c.a);
+        if (!node || node->kind != NodeKind::Input) break;
+        node->inputStereo = c.str == "stereo";
+        node->inputChannel = c.b;
+        break;
+      }
+      case Command::Op::SetInputCapture: {
+        Node* node = Get(c.a);
+        if (!node) break;
+        node->capture = std::move(c.captureRing);
+        break;
+      }
     }
   }
 
@@ -1430,6 +1627,27 @@ class Engine {
         node->phase += freq / sampleRate;
         if (node->phase >= 1.0) node->phase -= std::floor(node->phase);
         if (node->phase < 0) node->phase -= std::floor(node->phase);
+      }
+      return;
+    }
+    if (node->kind == NodeKind::Input) {
+      // The capture side, channel-selected exactly as audio/input.ts does
+      // it: mono duplicates one channel to both sides (centred, so panning
+      // still decides placement), stereo takes the channel and the next.
+      //
+      // The output is ALWAYS two channels — the Web Audio tap's merger is
+      // a 2-channel node even in mono mode — so `sawStereo` is set
+      // unconditionally and a hard-panned monitor obeys the same one of
+      // StereoPanner's two laws on both backends.
+      node->sawStereo = true;
+      const uint32_t channels = inputBlockChannels_;
+      if (inputBlock_ == nullptr || channels == 0) return;  // block is zeroed
+      const uint32_t left = std::min(node->inputChannel, channels - 1);
+      const uint32_t right = node->inputStereo ? std::min(left + 1, channels - 1) : left;
+      const uint32_t n = std::min(frames, inputBlockFrames_);
+      for (uint32_t i = 0; i < n; i++) {
+        node->block[i * 2] = inputBlock_[static_cast<size_t>(i) * channels + left];
+        node->block[i * 2 + 1] = inputBlock_[static_cast<size_t>(i) * channels + right];
       }
       return;
     }
@@ -1645,6 +1863,16 @@ class Engine {
   std::vector<uint32_t> ended_;
 
   std::mutex tapReadMutex_;
+
+  /** JS-thread-owned view of the live capture rings (the render thread
+   *  reaches them only through the node that owns the shared_ptr). */
+  std::mutex captureMutex_;
+  std::map<uint32_t, std::shared_ptr<CaptureRing>> captures_;
+
+  /** The current block's capture material — see SetInputBlock. */
+  const float* inputBlock_ = nullptr;
+  uint32_t inputBlockChannels_ = 0;
+  uint32_t inputBlockFrames_ = 0;
 
   WaveTableSet waveTables_[4];
 

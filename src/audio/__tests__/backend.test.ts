@@ -88,6 +88,13 @@ class MockBackend implements IAudioBackend {
   masterNode(): BackendNodeId {
     return 0
   }
+  /** No device behind the mock, so no post-fader stage to distinguish. */
+  outputNode(): BackendNodeId {
+    return 0
+  }
+  async openInput(): Promise<never> {
+    throw new Error('MockBackend has no capture side')
+  }
   scheduleParam(node: BackendNodeId, param: 'gain' | 'pan', events: readonly ParamEvent[]): void {
     this.ops.push({ op: 'scheduleParam', node, param, events: [...events] })
   }

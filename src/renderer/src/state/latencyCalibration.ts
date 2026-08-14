@@ -7,10 +7,10 @@ import {
   summarizeMeasurements
 } from '@audio/calibration'
 import { measureLoopbackOnce } from '@audio/calibrationRun'
+import type { InputHandle } from '@audio/backendTypes'
 import { appStorageGet, appStorageSet } from './appStorage'
 import { audioEngine } from './audioInstance'
 import { audioDevices } from './audioDevices'
-import { trackInputs } from './trackInputs'
 import { preferences } from './preferences'
 
 /**
@@ -116,22 +116,27 @@ class LatencyCalibrationStore {
     this.step = 0
     this.lastError = null
     this.emit()
-    let deviceKey: string | null = null
-    let source: MediaStreamAudioSourceNode | null = null
+    const inputs: InputHandle[] = []
     try {
-      const ctx = audioEngine.ensureContext()
-      if (ctx.state === 'suspended') await ctx.resume()
-      // null follows the global input selection — the device recording uses.
-      const acquired = await trackInputs.acquire(null)
-      deviceKey = acquired.key
-      source = ctx.createMediaStreamSource(acquired.stream)
+      await audioEngine.ensureStarted()
+      const backend = audioEngine.activeBackend()
+      // null follows the global input selection — the device recording
+      // uses. One handle per channel PAIR: the sweep may come back on any
+      // input of an interface, and openInput only ever hands over the two
+      // channels it was asked for.
+      const deviceId = audioDevices.inputDeviceId
+      const first = await audioEngine.openInput({ mode: 'stereo', channel: 0, deviceId })
+      inputs.push(first)
+      for (let channel = 2; channel + 1 < first.channelCount; channel += 2) {
+        inputs.push(await audioEngine.openInput({ mode: 'stereo', channel, deviceId }))
+      }
 
       const lags: number[] = []
       let confidence = Number.POSITIVE_INFINITY
       for (let pass = 0; pass < REPEAT_COUNT; pass++) {
         this.step = pass + 1
         this.emit()
-        const result = await measureLoopbackOnce(ctx, source)
+        const result = await measureLoopbackOnce(backend, inputs)
         if (
           result.confidence < MIN_CONFIDENCE ||
           result.roundTripSec < 0 ||
@@ -159,7 +164,7 @@ class LatencyCalibrationStore {
       this.stored = {
         inputDeviceId: audioDevices.inputDeviceId,
         outputDeviceId: audioDevices.outputDeviceId,
-        sampleRate: ctx.sampleRate,
+        sampleRate: audioEngine.sampleRate(),
         latencyHint: preferences.latencyHint,
         roundTripMs: summary.roundTripSec * 1000,
         outputLatencyAtMeasureMs: audioEngine.outputLatencySec() * 1000,
@@ -175,12 +180,7 @@ class LatencyCalibrationStore {
             ? error.message
             : String(error)
     } finally {
-      try {
-        source?.disconnect()
-      } catch {
-        // already disconnected — fine
-      }
-      if (deviceKey) trackInputs.release(deviceKey)
+      for (const input of inputs) input.dispose()
       this.measuring = false
       this.step = 0
       this.emit()
