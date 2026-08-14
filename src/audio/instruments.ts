@@ -334,16 +334,20 @@ function buildDrumHit(
         out,
         parts
       )
-      // NOTE: deliberately NOT anchored at t0, unlike the kick and toms.
-      // oscHit's setValue sits at time 0, so this ramp spans the whole
-      // timeline up to t0+0.08 — meaning the body's pitch drop is only
-      // audible on a note at the very start of the song. That is a latent
-      // BUG carried from the Web Audio implementation, preserved here on
-      // purpose: a port must not change how existing projects sound, and
-      // the parity harness catches it the moment it does (it caught
-      // exactly this). Fixing it is a deliberate, separate change —
-      // anchoring the setValue at t0 is the one-line fix.
+      // Anchored at t0, like the kick and toms. This anchor used to be
+      // missing, which left the ramp's previous event at oscHit's
+      // setValue at time 0 — a pitch drop nominally spanning the whole
+      // song. Chromium hid that: it does not evaluate a source's param
+      // timeline before the source renders, so the ramp was implicitly
+      // anchored to the render quantum containing the hit (the body
+      // started up to 0.7 Hz flat, inaudible). The native engine reads
+      // the timeline literally, so the body had already arrived at
+      // 155 Hz — every native snare was flat-pitched. Anchoring is the
+      // shape BOTH backends agree on; `crossBackendParity.test.ts` pins
+      // it. Web Audio output shifts very slightly, hence the
+      // regenerated parity baseline.
       backend.scheduleParam(body, 'frequency', [
+        { kind: 'setValue', value: 176 * k, time: t0 },
         { kind: 'exponentialRamp', value: Math.max(30, 155 * k), endTime: t0 + 0.08 }
       ])
       noiseHit(backend, t0, 'highpass', 1400 * k, 0.7, 0.4 + tone * 0.6, dur, out, parts)

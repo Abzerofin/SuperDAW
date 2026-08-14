@@ -200,6 +200,52 @@ describe.skipIf(!hasAddon)('cross-backend parity: composed graphs', () => {
     addon.drainEnded()
   })
 
+  test('a pitch envelope on a LATER-starting source, as Web Audio renders it', () => {
+    const t0 = clock
+    clock += 3
+    // The drum synth's pitch drops (kick, snare, toms) are a ramp on an
+    // oscillator that starts at the hit, not at time 0 — and that is the
+    // one place the two backends can disagree about a param TIMELINE
+    // rather than about DSP. Chromium does not evaluate a source's
+    // timeline before the source renders, so it implicitly anchors a
+    // ramp whose previous event sits at time 0; the native engine reads
+    // the timeline literally and would arrive at the ramp's target long
+    // before the hit. An ANCHORED ramp is the shape both agree on, so
+    // that is what the builders must emit and what this pins.
+    const osc = id++
+    addon.createNode(osc, 'oscillator', { type: 'triangle' })
+    addon.scheduleParam(osc, 'frequency', [{ kind: 'setValue', value: 176, time: 0 }])
+    addon.scheduleParam(osc, 'frequency', [
+      { kind: 'setValue', value: 176, time: t0 },
+      { kind: 'exponentialRamp', value: 155, endTime: t0 + 0.08 }
+    ])
+    addon.connect(osc, 0)
+    const voice = id++
+    addon.scheduleSource(voice, osc, t0, t0 + 0.25)
+
+    const out = addon.renderOffline(t0, Math.round(0.2 * SR), SR)
+    // Per-cycle frequency from interpolated positive-going zero
+    // crossings — the pitch trajectory the ear actually follows.
+    const cross: number[] = []
+    for (let i = 1; i < Math.round(0.085 * SR); i++) {
+      const a = out[(i - 1) * 2]
+      const b = out[i * 2]
+      if (a < 0 && b >= 0) cross.push((i - 1 + a / (a - b)) / SR)
+    }
+    const hz = cross.slice(1).map((t, i) => 1 / (t - cross[i]))
+    // Measured in the dev page against Chromium at 48 kHz: the two
+    // backends agree to better than 0.01 Hz on every cycle.
+    const chromium = [
+      173.62, 172.03, 170.44, 168.85, 167.27, 165.68, 164.09, 162.5, 160.91, 159.33, 157.74,
+      156.15
+    ]
+    expect(hz.length).toBe(chromium.length)
+    hz.forEach((v, i) => expect(Math.abs(v - chromium[i])).toBeLessThan(0.05))
+
+    addon.disposeNode(osc)
+    addon.drainEnded()
+  })
+
   test('a full voice path: instrument → insert → pan → bus → master', () => {
     const t0 = clock
     clock += 3
