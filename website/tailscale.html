@@ -1,0 +1,197 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Remote collaboration with Tailscale — SuperDAW</title>
+<meta name="description" content="How to use Tailscale to collaborate on SuperDAW sessions across the internet without a VPN provider or server.">
+<meta name="theme-color" content="#0d0a08">
+<link rel="icon" href="logo.svg" type="image/svg+xml">
+<link rel="stylesheet" href="styles.css">
+</head>
+<body>
+
+<a class="skip" href="#main">Skip to content</a>
+
+<nav class="nav">
+  <div class="wrap">
+    <a class="nav-brand" href="index.html">
+      <img src="logo.svg" alt="">
+      SuperDAW
+    </a>
+    <div class="nav-links">
+      <a href="index.html#features">Features</a>
+      <a href="index.html#collaboration">Collaboration</a>
+      <a href="index.html#specs">Specs</a>
+      <a href="index.html#get">Get it</a>
+      <a href="donate.html">Donate</a>
+      <a href="https://github.com/Abzerofin/SuperDAW">GitHub</a>
+    </div>
+  </div>
+</nav>
+
+<header class="hero" style="padding: 64px 0 52px;">
+  <div class="wrap">
+    <h1 style="font-size: clamp(2.2rem, 5.5vw, 3.2rem);">Remote collaboration with Tailscale</h1>
+    <p class="lede">
+      How to set up peer-to-peer SuperDAW sessions across the internet, with zero latency
+      overhead compared to being on the same network.
+    </p>
+  </div>
+</header>
+
+<main id="main">
+
+<section>
+  <div class="wrap">
+    <p class="eyebrow">The problem</p>
+    <h2>SuperDAW's LAN mode is faster, but LAN means local network.</h2>
+    <p class="section-lede">
+      SuperDAW's peer-to-peer architecture is built for direct connection — the host and
+      peers talk straight to each other with no relay in between. This is perfect on a LAN,
+      but it doesn't work when you're in different cities. For now, there's a workaround.
+    </p>
+  </div>
+</section>
+
+<section>
+  <div class="wrap">
+    <p class="eyebrow">The workaround</p>
+    <h2>Tailscale makes your internet look like a LAN.</h2>
+    <p class="section-lede">
+      <a href="https://tailscale.com">Tailscale</a> is a mesh VPN — it puts all your devices
+      on one virtual private network, and they see each other as if they're on the same LAN.
+      SuperDAW's peer-to-peer code just works, unchanged.
+    </p>
+
+    <h3 style="margin: 36px 0 16px;">Why this works</h3>
+    <ul class="free" style="margin-bottom: 40px;">
+      <li>
+        <strong>Mesh, not hub-and-spoke</strong>
+        Machines talk directly to each other, not through a central server. Tailscale just
+        makes the routing work.
+      </li>
+      <li>
+        <strong>End-to-end encrypted</strong>
+        Your traffic stays encrypted between peers. Tailscale never sees your project.
+      </li>
+      <li>
+        <strong>Free tier is real</strong>
+        You can connect up to 100 devices for free. No credit card, no time limit.
+      </li>
+      <li>
+        <strong>Works everywhere</strong>
+        Firewalls, NAT, carrier-grade NAT — Tailscale's UDP hole-punching finds a path.
+      </li>
+    </ul>
+
+    <div class="cta" style="justify-content:flex-start;">
+      <a class="btn btn-primary" href="https://tailscale.com/download">Download Tailscale</a>
+    </div>
+  </div>
+</section>
+
+<section>
+  <div class="wrap">
+    <p class="eyebrow">Setup</p>
+    <h2>Getting it running in three steps.</h2>
+
+    <ol class="steps">
+      <li>
+        <strong>Install Tailscale on every machine</strong> that will collaborate.
+        <a href="https://tailscale.com/download">Get it for Windows, Mac, Linux or mobile</a>.
+      </li>
+      <li>
+        <strong>Sign in with any account</strong> (Google, GitHub, Microsoft, or a Tailscale
+        account). You'll be assigned an IP on the Tailscale network — write it down.
+      </li>
+      <li>
+        <strong>Start a SuperDAW session as usual.</strong> Click Collab → Start. Share the
+        join code with your collaborators — it will encode your Tailscale IP, not your real one.
+        When they join, they'll be connecting through the virtual network.
+      </li>
+    </ol>
+
+    <h3 style="margin: 36px 0 16px;">That's it.</h3>
+    <p style="color: var(--muted); max-width: 660px; margin: 0;">
+      SuperDAW has no idea Tailscale is there. It just sees machines on the same network
+      and goes peer-to-peer. Latency is the same as being in the same room.
+    </p>
+  </div>
+</section>
+
+<section>
+  <div class="wrap">
+    <p class="eyebrow">The limits</p>
+    <h2>What Tailscale can't do.</h2>
+    <p class="section-lede">
+      Tailscale is a workaround, not a permanent solution. We're building a proper relay
+      transport into SuperDAW so you don't need this extra step.
+    </p>
+
+    <div class="grid" style="grid-template-columns: repeat(auto-fit, minmax(300px, 1fr));">
+      <div class="card">
+        <h3 style="margin-top:0;">It's another tool to install</h3>
+        <p>One more dependency, one more thing to troubleshoot if it breaks. We want
+          SuperDAW to do this by itself.</p>
+      </div>
+      <div class="card">
+        <h3 style="margin-top:0;">It requires accounts</h3>
+        <p>You have to sign in somewhere, even on the free tier. SuperDAW's whole point
+          is no accounts at all.</p>
+      </div>
+      <div class="card">
+        <h3 style="margin-top:0;">Extra setup friction</h3>
+        <p>One more thing to explain to collaborators who've never heard of a VPN. Most
+          just want to share a code and make music.</p>
+      </div>
+    </div>
+  </div>
+</section>
+
+<section>
+  <div class="wrap" style="text-align:center;">
+    <h2 style="margin-bottom:16px;">When we ship the real thing</h2>
+    <p class="section-lede" style="margin: 0 auto 28px;">
+      The relay-based transport is on the roadmap. For now, Tailscale gets you remote
+      peer-to-peer sessions that work.
+    </p>
+    <div class="cta">
+      <a class="btn btn-primary" href="https://tailscale.com/download">Get Tailscale</a>
+      <a class="btn" href="index.html">Back to SuperDAW</a>
+    </div>
+  </div>
+</section>
+
+</main>
+
+<footer>
+  <div class="wrap">
+    <div class="fcol">
+      <span class="fhead">Project</span>
+      <a href="https://github.com/Abzerofin/SuperDAW">GitHub repository</a>
+      <a href="https://github.com/Abzerofin/SuperDAW/releases/latest">Latest release</a>
+      <a href="https://github.com/Abzerofin/SuperDAW/issues">Issues &amp; bug reports</a>
+    </div>
+    <div class="fcol">
+      <span class="fhead">Documentation</span>
+      <a href="https://github.com/Abzerofin/SuperDAW/blob/master/docs/ARCHITECTURE.md">Architecture</a>
+      <a href="https://github.com/Abzerofin/SuperDAW/blob/master/docs/PROTOCOL.md">Sync protocol</a>
+      <a href="https://github.com/Abzerofin/SuperDAW/blob/master/docs/NETWORKING.md">Networking</a>
+    </div>
+    <div class="fcol">
+      <span class="fhead">Support</span>
+      <a href="https://github.com/sponsors/Abzerofin">GitHub Sponsors</a>
+      <a href="https://ko-fi.com/superplant">Ko-fi</a>
+      <a href="https://github.com/Abzerofin/SuperDAW/blob/master/LICENSE">License</a>
+    </div>
+    <div class="legal">
+      SuperDAW — a collaboration-first professional DAW.<br>
+      Free software under the GPL-3.0-or-later.<br>
+      Music you make with it is yours.
+    </div>
+  </div>
+</footer>
+
+</body>
+</html>

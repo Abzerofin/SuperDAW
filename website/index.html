@@ -189,36 +189,42 @@
 
 <section id="collaboration">
   <div class="wrap">
-    <p class="eyebrow">How multiplayer works</p>
-    <h2>Share a code. That's the setup.</h2>
+    <p class="eyebrow">Collaboration</p>
+    <h2>LAN-first, peer-to-peer.</h2>
     <p class="section-lede">
-      One person hosts and everyone else joins. Your own edits apply instantly — they
-      never wait on the network.
+      One person starts a session, shares a 15-character code, and everyone on the same
+      network joins directly — no server, no accounts, lowest possible latency. Your own
+      edits apply instantly.
     </p>
 
     <ol class="steps">
-      <li><strong>Click Collab → Start.</strong> Your machine becomes the host. Nothing is uploaded anywhere.</li>
-      <li><strong>Share the join code.</strong> Short enough to paste in a chat or read aloud on a call.</li>
-      <li><strong>They paste it in.</strong> The project streams over and everyone starts editing.</li>
+      <li><strong>Click Collab → Start.</strong> Your machine becomes the host.</li>
+      <li><strong>Share the join code.</strong> Short enough to paste in chat or read aloud on a call.</li>
+      <li><strong>They paste it in.</strong> Everyone connects straight to the host, edits sync live.</li>
     </ol>
 
-    <div class="two-col">
-      <div class="transport">
-        <span class="code">15-character code · LAN</span>
-        <h3>Same network</h3>
-        <p>Peers connect straight to the host. No server involved, lowest possible latency.</p>
-        <p>
-          A mesh VPN like <a href="https://tailscale.com">Tailscale</a> makes this work
-          across the internet unchanged — it's how remote sessions have actually been tested.
-        </p>
-      </div>
-      <div class="transport">
-        <span class="code">8-character code · Internet</span>
-        <h3>Anywhere</h3>
-        <p>Peers dial a relay that forwards sealed payloads without ever understanding your project. One extra hop, no router config.</p>
-        <p>The relay is in the repository too, if you'd rather run your own.</p>
-      </div>
+    <p style="color: var(--muted); max-width: 660px; margin: 30px 0 0;">
+      <strong>Remote sessions:</strong> Everyone on the same network means LAN. For collaboration
+      across the internet right now, you can use a mesh VPN like
+      <a href="https://tailscale.com">Tailscale</a> to put all machines on one virtual network —
+      then the LAN mode works unchanged, peer-to-peer, with no server involved.
+    </p>
+
+    <div class="cta" style="justify-content:flex-start; margin: 24px 0 0;">
+      <a class="btn" href="tailscale.html">Learn how to use Tailscale</a>
     </div>
+  </div>
+</section>
+
+<section>
+  <div class="wrap">
+    <p class="eyebrow">What's coming</p>
+    <h2>Full online collaboration.</h2>
+    <p class="section-lede" style="margin-bottom:0;">
+      We're working on a relay-based transport so remote sessions work without any VPN workaround — the same
+      peer-to-peer sync, but dialed through a relay that never understands your project. For now, Tailscale
+      gives you the real thing while we build that.
+    </p>
   </div>
 </section>
 
