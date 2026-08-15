@@ -163,6 +163,15 @@ a:hover { text-decoration: underline; }
 .btn-primary:hover { background: linear-gradient(180deg, #ffa04d, #f06a00); border-color: #ffa04d; }
 .btn-note { display: block; margin-top: 14px; font-size: 13px; color: var(--dim); }
 
+.hero-shot { margin: 46px auto 0; max-width: 980px; }
+.hero-shot img {
+  display: block; width: 100%; height: auto;
+  border: 1px solid var(--line-2);
+  border-radius: 12px;
+  background: #0b0908;
+  box-shadow: 0 24px 60px -20px rgba(0, 0, 0, 0.85);
+}
+
 /* ---------- generic section ---------- */
 
 section { padding: 76px 0; border-bottom: 1px solid var(--line); }
@@ -226,6 +235,70 @@ h3 { margin: 0 0 8px; font-size: 1.05rem; font-weight: 650; letter-spacing: -0.0
 }
 .card .ico svg { width: 18px; height: 18px; }
 .card p { margin: 0; color: var(--muted); font-size: 14.5px; }
+
+/* Cards carrying a screenshot reveal it on hover (and on keyboard focus, so
+   the shot is reachable without a pointer).
+
+   Collapse via max-height rather than the grid 0fr→1fr trick: interpolating
+   grid-template-rows is only supported in recent Chromium, and silently fails
+   to animate elsewhere. Every screenshot shares the 1424×835 source ratio, so
+   the ceiling below clears the tallest rendered height at any card width. */
+.card.has-shot { cursor: pointer; }
+.card.has-shot:hover,
+.card.has-shot:focus-within { border-color: var(--line-2); }
+
+.card .shot {
+  margin: 0;               /* <figure> carries a default margin */
+  max-height: 0;
+  opacity: 0;
+  overflow: hidden;
+  transition: max-height 0.34s ease, opacity 0.24s ease, margin-top 0.34s ease;
+}
+.card.has-shot:hover .shot,
+.card.has-shot:focus-within .shot,
+.card.has-shot.open .shot {
+  max-height: 460px;
+  opacity: 1;
+  margin-top: 18px;
+}
+.card .shot img {
+  display: block;
+  width: 100%;
+  height: auto;
+  border-radius: 7px;
+  border: 1px solid var(--line-2);
+  background: #0b0908;
+}
+.card .shot figcaption {
+  margin: 8px 0 0;
+  font-family: var(--mono); font-size: 11.5px;
+  color: var(--dim);
+}
+
+/* The hint only makes sense where a pointer can actually hover. */
+.card .shot-hint {
+  display: inline-flex; align-items: center; gap: 5px;
+  margin-top: 12px;
+  font-family: var(--mono); font-size: 11px; letter-spacing: 0.06em;
+  text-transform: uppercase; color: var(--dim);
+  transition: color 0.15s;
+}
+.card .shot-hint svg { width: 12px; height: 12px; }
+.card.has-shot:hover .shot-hint,
+.card.has-shot:focus-within .shot-hint { color: var(--orange); }
+.card.has-shot:hover .shot-hint .lbl-show,
+.card.has-shot:focus-within .shot-hint .lbl-show { display: none; }
+.card .shot-hint .lbl-hide { display: none; }
+.card.has-shot:hover .shot-hint .lbl-hide,
+.card.has-shot:focus-within .shot-hint .lbl-hide { display: inline; }
+
+/* Touch devices get no hover: show every screenshot inline instead of
+   hiding it behind an interaction that cannot happen. */
+@media (hover: none) {
+  .card .shot { max-height: 460px; opacity: 1; margin-top: 18px; }
+  .card .shot-hint { display: none; }
+  .card.has-shot { cursor: default; }
+}
 
 /* ---------- collaboration ---------- */
 
