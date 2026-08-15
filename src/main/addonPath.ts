@@ -8,15 +8,21 @@ import { join } from 'node:path'
  * which cannot resolve it itself (a utilityProcess has no `app`).
  */
 export function resolveAddonPath(): string | null {
-  return resolveNativeModule('native/vst3host/build/Release/vst3host.node')
+  return resolveResourcePath('native/vst3host/build/Release/vst3host.node')
 }
 
 /** The native audio backend addon (same recipe, same packaging path). */
 export function resolveAudiohostPath(): string | null {
-  return resolveNativeModule('native/audiohost/build/Release/audiohost.node')
+  return resolveResourcePath('native/audiohost/build/Release/audiohost.node')
 }
 
-function resolveNativeModule(relative: string): string | null {
+/** The app/window icon — .ico on Windows for taskbar clarity, .png elsewhere. */
+export function resolveIconPath(): string | null {
+  const name = process.platform === 'win32' ? 'resources/icon.ico' : 'resources/icon.png'
+  return resolveResourcePath(name)
+}
+
+function resolveResourcePath(relative: string): string | null {
   const candidates = [
     join(app.getAppPath(), relative),
     join(process.cwd(), relative),

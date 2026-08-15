@@ -9,6 +9,7 @@ import { registerRecoveryIpc } from './recovery'
 import { registerVst3Ipc } from './vst3'
 import { checkForUpdates } from './updater'
 import { ensureScanned } from './pluginScan'
+import { resolveIconPath } from './addonPath'
 
 const PROJECT_FILTERS = [{ name: 'SuperDAW Project', extensions: ['sdaw'] }]
 
@@ -201,6 +202,7 @@ function registerCloseGuard(win: BrowserWindow): void {
 }
 
 function createWindow(): void {
+  const iconPath = resolveIconPath()
   const win = new BrowserWindow({
     width: 1440,
     height: 900,
@@ -209,6 +211,7 @@ function createWindow(): void {
     show: false,
     backgroundColor: '#141518',
     title: 'SuperDAW',
+    ...(iconPath ? { icon: iconPath } : {}),
     webPreferences: {
       preload: join(__dirname, '../preload/index.js'),
       contextIsolation: true,

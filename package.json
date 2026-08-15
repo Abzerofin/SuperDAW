@@ -39,10 +39,19 @@
       {
         "from": "native/audiohost/build/Release/audiohost.node",
         "to": "native/audiohost/build/Release/audiohost.node"
+      },
+      {
+        "from": "resources/icon.ico",
+        "to": "resources/icon.ico"
+      },
+      {
+        "from": "resources/icon.png",
+        "to": "resources/icon.png"
       }
     ],
     "win": {
       "target": "nsis",
+      "icon": "build/icon.ico",
       "signAndEditExecutable": false
     },
     "nsis": {
