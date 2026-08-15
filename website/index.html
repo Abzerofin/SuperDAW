@@ -1,0 +1,335 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>SuperDAW — the collaboration-first DAW</title>
+<meta name="description" content="A professional digital audio workstation with real-time multiplayer built in. No accounts, no cloud, no AI. Free and open source under the GPL.">
+<meta name="theme-color" content="#0d0a08">
+<link rel="icon" href="logo.svg" type="image/svg+xml">
+<link rel="stylesheet" href="styles.css">
+
+<meta property="og:type" content="website">
+<meta property="og:title" content="SuperDAW — the collaboration-first DAW">
+<meta property="og:description" content="Real-time multiplayer music production. No accounts, no cloud, no AI. Free and open source.">
+<meta property="og:image" content="logo.svg">
+<meta name="twitter:card" content="summary">
+</head>
+<body>
+
+<a class="skip" href="#main">Skip to content</a>
+
+<nav class="nav">
+  <div class="wrap">
+    <a class="nav-brand" href="index.html">
+      <img src="logo.svg" alt="">
+      SuperDAW
+    </a>
+    <div class="nav-links">
+      <a href="#features">Features</a>
+      <a href="#collaboration">Collaboration</a>
+      <a href="#specs">Specs</a>
+      <a href="#get">Get it</a>
+      <a href="donate.html">Donate</a>
+      <a href="https://github.com/Abzerofin/SuperDAW">GitHub</a>
+    </div>
+  </div>
+</nav>
+
+<header class="hero">
+  <div class="wrap">
+    <img class="mark" src="logo.svg" alt="SuperDAW logo">
+    <h1>Make music together,<br>in the same session.</h1>
+    <p class="lede">
+      A professional DAW with real-time collaboration built in —
+      <strong>no accounts, no cloud, no AI</strong>. Your projects are ordinary files
+      on your own disk.
+    </p>
+
+    <div class="badges">
+      <span class="badge">Version <b>1.3.0</b></span>
+      <span class="badge">Windows desktop</span>
+      <span class="badge">GPL-3.0-or-later</span>
+      <span class="badge">Free &amp; open source</span>
+    </div>
+
+    <div class="cta">
+      <a class="btn btn-primary" href="https://github.com/Abzerofin/SuperDAW/releases/latest">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+          <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/>
+        </svg>
+        Download for Windows
+      </a>
+      <a class="btn" href="https://github.com/Abzerofin/SuperDAW">
+        <svg viewBox="0 0 24 24" fill="currentColor" aria-hidden="true">
+          <path d="M12 .5C5.7.5.5 5.7.5 12c0 5.1 3.3 9.4 7.9 10.9.6.1.8-.2.8-.6v-2c-3.2.7-3.9-1.5-3.9-1.5-.5-1.3-1.3-1.7-1.3-1.7-1.1-.7.1-.7.1-.7 1.2.1 1.8 1.2 1.8 1.2 1 1.8 2.7 1.3 3.4 1 .1-.8.4-1.3.7-1.6-2.6-.3-5.3-1.3-5.3-5.8 0-1.3.5-2.3 1.2-3.1-.1-.3-.5-1.5.1-3.2 0 0 1-.3 3.3 1.2a11.5 11.5 0 0 1 6 0C17.6 4.7 18.6 5 18.6 5c.6 1.7.2 2.9.1 3.2.8.8 1.2 1.8 1.2 3.1 0 4.5-2.7 5.5-5.3 5.8.4.4.8 1.1.8 2.2v3.3c0 .3.2.7.8.6 4.6-1.5 7.9-5.8 7.9-10.9C23.5 5.7 18.3.5 12 .5z"/>
+        </svg>
+        Source on GitHub
+      </a>
+    </div>
+    <small class="btn-note">Free forever. Installed copies update themselves.</small>
+  </div>
+</header>
+
+<main id="main">
+
+<section>
+  <div class="wrap">
+    <p class="eyebrow">What it refuses to be</p>
+    <h2>Three deliberate absences.</h2>
+    <p class="section-lede">
+      Much of what makes SuperDAW different is what it leaves out. These are design
+      decisions, not gaps.
+    </p>
+    <div class="pillars">
+      <div class="pillar">
+        <p class="no">No</p>
+        <h3>AI features</h3>
+        <p>Nothing generates or "improves" your music. The tool does what you tell it to, and nothing else.</p>
+      </div>
+      <div class="pillar">
+        <p class="no">No</p>
+        <h3>Accounts</h3>
+        <p>No sign-up, no login, no profile. Share a short code and your collaborators are in.</p>
+      </div>
+      <div class="pillar">
+        <p class="no">No</p>
+        <h3>Cloud dependency</h3>
+        <p>Projects are single <code>.sdaw</code> files on your disk. Nothing you need to open your work lives on a server.</p>
+      </div>
+    </div>
+  </div>
+</section>
+
+<section id="features">
+  <div class="wrap">
+    <p class="eyebrow">Capabilities</p>
+    <h2>A full workstation, not a demo.</h2>
+    <p class="section-lede">
+      Everything below is synced to your collaborators and undoable.
+    </p>
+
+    <div class="grid">
+
+      <div class="card">
+        <div class="ico"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M17 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M23 21v-2a4 4 0 0 0-3-3.87"/><path d="M16 3.13a4 4 0 0 1 0 7.75"/></svg></div>
+        <h3>Real-time collaboration</h3>
+        <p>Several people in one project at once, with live cursors and per-user undo. Edit offline and it resyncs on reconnect.</p>
+      </div>
+
+      <div class="card">
+        <div class="ico"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="1 4 1 10 7 10"/><path d="M3.51 15a9 9 0 1 0 2.13-9.36L1 10"/></svg></div>
+        <h3>Everything is undoable</h3>
+        <p>Every edit is one serializable operation, so there's no such thing as a change that syncs but can't be undone.</p>
+      </div>
+
+      <div class="card">
+        <div class="ico"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 18v-6a9 9 0 0 1 18 0v6"/><path d="M21 19a2 2 0 0 1-2 2h-1a2 2 0 0 1-2-2v-3a2 2 0 0 1 2-2h3zM3 19a2 2 0 0 0 2 2h1a2 2 0 0 0 2-2v-3a2 2 0 0 0-2-2H3z"/></svg></div>
+        <h3>Native low-latency audio</h3>
+        <p>A dedicated WASAPI engine with automatic fallback, and monitoring handled in the same callback that renders output.</p>
+      </div>
+
+      <div class="card">
+        <div class="ico"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="2" y="2" width="20" height="20" rx="2"/><path d="M8 2v20M16 2v20M2 8h20M2 16h20"/></svg></div>
+        <h3>VST3 plugins, live</h3>
+        <p>Inserts run in the realtime callback with automatic plugin-delay compensation, so they stay aligned with every other track.</p>
+      </div>
+
+      <div class="card">
+        <div class="ico"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="4" y1="21" x2="4" y2="14"/><line x1="4" y1="10" x2="4" y2="3"/><line x1="12" y1="21" x2="12" y2="12"/><line x1="12" y1="8" x2="12" y2="3"/><line x1="20" y1="21" x2="20" y2="16"/><line x1="20" y1="12" x2="20" y2="3"/><line x1="1" y1="14" x2="7" y2="14"/><line x1="9" y1="8" x2="15" y2="8"/><line x1="17" y1="16" x2="23" y2="16"/></svg></div>
+        <h3>Instruments &amp; effects</h3>
+        <p>Eleven built-in effects — EQ, compressor, limiter, delay, reverb and more — plus an analog synth, sampler and drum kit.</p>
+      </div>
+
+      <div class="card">
+        <div class="ico"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="2" y="6" width="20" height="12" rx="2"/><path d="M6 6v7M10 6v7M14 6v7M18 6v7"/></svg></div>
+        <h3>Piano roll &amp; MIDI</h3>
+        <p>Live keyboard input, recording and <code>.mid</code> import, on integer timing that stays deterministic across machines.</p>
+      </div>
+
+      <div class="card">
+        <div class="ico"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="4" y1="21" x2="4" y2="10"/><circle cx="4" cy="6" r="2.5"/><line x1="12" y1="21" x2="12" y2="14"/><circle cx="12" cy="10" r="2.5"/><line x1="20" y1="21" x2="20" y2="8"/><circle cx="20" cy="4" r="2.5"/></svg></div>
+        <h3>Mixer &amp; automation</h3>
+        <p>Per-track fader, pan, mute and solo with a master bus, plus sample-accurate volume automation and track freeze.</p>
+      </div>
+
+      <div class="card">
+        <div class="ico"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="7" height="7" rx="1"/><rect x="14" y="3" width="7" height="7" rx="1"/><rect x="3" y="14" width="7" height="7" rx="1"/><rect x="14" y="14" width="7" height="7" rx="1"/></svg></div>
+        <h3>Performance pads</h3>
+        <p>An 8×8 launchpad played by mouse, keyboard or MIDI grid — and the whole session hears your hits.</p>
+      </div>
+
+      <div class="card">
+        <div class="ico"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/></svg></div>
+        <h3>Chat &amp; comments</h3>
+        <p>Project chat plus comment threads pinned to individual clips and tracks, saved inside the project file.</p>
+      </div>
+
+      <div class="card">
+        <div class="ico"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"/></svg></div>
+        <h3>File Bay</h3>
+        <p>Folders and waveform thumbnails. Drag assets onto tracks, or drag files in from the OS to import.</p>
+      </div>
+
+      <div class="card">
+        <div class="ico"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="9"/><polyline points="12 7 12 12 15.5 14"/></svg></div>
+        <h3>Warp &amp; tempo</h3>
+        <p>Stretch a clip's timing without moving its pitch, or repitch it without changing its length.</p>
+      </div>
+
+      <div class="card">
+        <div class="ico"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M20 21v-8H4v8"/><path d="M7 13V3h10v10"/><circle cx="12" cy="17" r="1.5"/></svg></div>
+        <h3>Autosave &amp; recovery</h3>
+        <p>Periodic snapshots of unsaved work, and an interface error surfaces as an error — never as a lost project.</p>
+      </div>
+
+    </div>
+  </div>
+</section>
+
+<section id="collaboration">
+  <div class="wrap">
+    <p class="eyebrow">How multiplayer works</p>
+    <h2>Share a code. That's the setup.</h2>
+    <p class="section-lede">
+      One person hosts and everyone else joins. Your own edits apply instantly — they
+      never wait on the network.
+    </p>
+
+    <ol class="steps">
+      <li><strong>Click Collab → Start.</strong> Your machine becomes the host. Nothing is uploaded anywhere.</li>
+      <li><strong>Share the join code.</strong> Short enough to paste in a chat or read aloud on a call.</li>
+      <li><strong>They paste it in.</strong> The project streams over and everyone starts editing.</li>
+    </ol>
+
+    <div class="two-col">
+      <div class="transport">
+        <span class="code">15-character code · LAN</span>
+        <h3>Same network</h3>
+        <p>Peers connect straight to the host. No server involved, lowest possible latency.</p>
+        <p>
+          A mesh VPN like <a href="https://tailscale.com">Tailscale</a> makes this work
+          across the internet unchanged — it's how remote sessions have actually been tested.
+        </p>
+      </div>
+      <div class="transport">
+        <span class="code">8-character code · Internet</span>
+        <h3>Anywhere</h3>
+        <p>Peers dial a relay that forwards sealed payloads without ever understanding your project. One extra hop, no router config.</p>
+        <p>The relay is in the repository too, if you'd rather run your own.</p>
+      </div>
+    </div>
+  </div>
+</section>
+
+<section id="specs">
+  <div class="wrap">
+    <p class="eyebrow">Under the hood</p>
+    <h2>The technical picture.</h2>
+    <p class="section-lede">
+      Full architecture notes live in
+      <a href="https://github.com/Abzerofin/SuperDAW/blob/master/docs/ARCHITECTURE.md">docs/ARCHITECTURE.md</a>.
+    </p>
+
+    <div class="specs">
+      <dl>
+        <dt>Current version</dt><dd>1.3.0</dd>
+        <dt>Platform</dt><dd>Windows desktop (Electron)</dd>
+        <dt>Built with</dt><dd>Electron 43 · React 19 · TypeScript</dd>
+        <dt>Audio engines</dt><dd>Web Audio · native WASAPI (experimental)</dd>
+        <dt>Plugin format</dt><dd>VST3, hosted out-of-process</dd>
+        <dt>Timebase</dt><dd>Integer ticks, PPQ 960</dd>
+        <dt>Project format</dt><dd>Single-file <code>.sdaw</code></dd>
+        <dt>Export</dt><dd>WAV mixdown, rendered offline</dd>
+        <dt>Accounts required</dt><dd><em>None</em></dd>
+        <dt>AI features</dt><dd><em>None, by design</em></dd>
+        <dt>License</dt><dd>GNU GPL v3.0 or later</dd>
+      </dl>
+    </div>
+  </div>
+</section>
+
+<section id="get">
+  <div class="wrap">
+    <p class="eyebrow">Get it</p>
+    <h2>Install it, or build it yourself.</h2>
+    <p class="section-lede">
+      Installed copies update themselves from GitHub Releases.
+    </p>
+
+    <div class="cta" style="justify-content:flex-start; margin: 0 0 40px;">
+      <a class="btn btn-primary" href="https://github.com/Abzerofin/SuperDAW/releases/latest">Download the installer</a>
+      <a class="btn" href="https://github.com/Abzerofin/SuperDAW">Browse the source</a>
+    </div>
+
+    <pre><span class="c"># requires Node.js 20 or newer</span>
+git clone https://github.com/Abzerofin/SuperDAW.git
+cd SuperDAW
+npm install
+
+npm run dev       <span class="c"># desktop app (Electron)</span>
+npm run dev:web   <span class="c"># UI only, in a browser</span>
+npm run test      <span class="c"># core test suite</span></pre>
+  </div>
+</section>
+
+<section>
+  <div class="wrap">
+    <p class="eyebrow">Licensing</p>
+    <h2>Free software. Your music is yours.</h2>
+    <p class="section-lede" style="margin-bottom:0;">
+      SuperDAW is GPL-3.0-or-later. The copyleft covers this program's source code —
+      <strong>not</strong> the projects, presets or recordings you make with it. When you
+      use third-party plugins you're responsible for their license terms, which are
+      covered in
+      <a href="https://github.com/Abzerofin/SuperDAW/blob/master/PLUGIN_LICENSE_TERMS.md">PLUGIN_LICENSE_TERMS.md</a>.
+    </p>
+  </div>
+</section>
+
+<section>
+  <div class="wrap" style="text-align:center;">
+    <p class="eyebrow">Support the project</p>
+    <h2>SuperDAW is free, and stays free.</h2>
+    <p class="section-lede" style="margin: 0 auto 30px;">
+      No company, no investors, nothing to upsell you. If it's useful to you, you can
+      help keep it going.
+    </p>
+    <div class="cta">
+      <a class="btn btn-primary" href="donate.html">Ways to support</a>
+    </div>
+  </div>
+</section>
+
+</main>
+
+<footer>
+  <div class="wrap">
+    <div class="fcol">
+      <span class="fhead">Project</span>
+      <a href="https://github.com/Abzerofin/SuperDAW">GitHub repository</a>
+      <a href="https://github.com/Abzerofin/SuperDAW/releases/latest">Latest release</a>
+      <a href="https://github.com/Abzerofin/SuperDAW/issues">Issues &amp; bug reports</a>
+    </div>
+    <div class="fcol">
+      <span class="fhead">Documentation</span>
+      <a href="https://github.com/Abzerofin/SuperDAW/blob/master/docs/ARCHITECTURE.md">Architecture</a>
+      <a href="https://github.com/Abzerofin/SuperDAW/blob/master/docs/PROTOCOL.md">Sync protocol</a>
+      <a href="https://github.com/Abzerofin/SuperDAW/blob/master/docs/NETWORKING.md">Networking</a>
+    </div>
+    <div class="fcol">
+      <span class="fhead">Support</span>
+      <a href="https://github.com/sponsors/Abzerofin">GitHub Sponsors</a>
+      <a href="https://ko-fi.com/superplant">Ko-fi</a>
+      <a href="https://github.com/Abzerofin/SuperDAW/blob/master/LICENSE">License</a>
+    </div>
+    <div class="legal">
+      SuperDAW — a collaboration-first professional DAW.<br>
+      Free software under the GPL-3.0-or-later.<br>
+      Music you make with it is yours.
+    </div>
+  </div>
+</footer>
+
+</body>
+</html>
