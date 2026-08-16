@@ -70,7 +70,7 @@
     <small class="btn-note">Free forever. Installed copies update themselves.</small>
 
     <figure class="hero-shot">
-      <img src="screenshots/timeline.png" alt="The SuperDAW timeline: thirteen named tracks with coloured audio and MIDI clips arranged across the bars" width="1424" height="835">
+      <img src="screenshots/timeline.png" alt="The SuperDAW timeline: thirteen named tracks with coloured audio and MIDI clips arranged across the bars" width="1440" height="900">
     </figure>
   </div>
 </header>
@@ -124,7 +124,7 @@
           <span class="lbl-show">Hover to see it</span><span class="lbl-hide">Session panel</span>
         </span>
         <figure class="shot"><div>
-          <img src="screenshots/collaboration.png" alt="The collaboration panel showing a LAN join code and three people in the session" loading="lazy" width="1424" height="835">
+          <img src="screenshots/collaboration.png" alt="The collaboration panel showing a LAN join code and three people in the session" loading="lazy" width="1440" height="900">
           <figcaption>Share the code · everyone in the session is listed</figcaption>
         </div></figure>
       </div>
@@ -156,7 +156,7 @@
           <span class="lbl-show">Hover to see it</span><span class="lbl-hide">Insert chain</span>
         </span>
         <figure class="shot"><div>
-          <img src="screenshots/effects.png" alt="A track's insert chain: the built-in synth, a notch filter with its response curve, and a reverb" loading="lazy" width="1424" height="835">
+          <img src="screenshots/effects.png" alt="A track's insert chain: the built-in synth, a notch filter with its response curve, and a reverb" loading="lazy" width="1440" height="900">
           <figcaption>Synth · notch filter · reverb on one track</figcaption>
         </div></figure>
       </div>
@@ -170,7 +170,7 @@
           <span class="lbl-show">Hover to see it</span><span class="lbl-hide">Piano roll</span>
         </span>
         <figure class="shot"><div>
-          <img src="screenshots/piano-roll.png" alt="The piano roll editor showing MIDI notes across several bars beside a piano keyboard" loading="lazy" width="1424" height="835">
+          <img src="screenshots/piano-roll.png" alt="The piano roll editor showing MIDI notes across several bars beside a piano keyboard" loading="lazy" width="1440" height="900">
           <figcaption>Notes in the bottom-dock editor</figcaption>
         </div></figure>
       </div>
@@ -184,7 +184,7 @@
           <span class="lbl-show">Hover to see it</span><span class="lbl-hide">Mixer</span>
         </span>
         <figure class="shot"><div>
-          <img src="screenshots/mixer.png" alt="The mixer: a colour-coded channel strip per track with pan, fader and mute/solo, plus a master strip" loading="lazy" width="1424" height="835">
+          <img src="screenshots/mixer.png" alt="The mixer: a colour-coded channel strip per track with pan, fader and mute/solo, plus a master strip" loading="lazy" width="1440" height="900">
           <figcaption>A strip per track, and the master bus</figcaption>
         </div></figure>
       </div>
@@ -198,7 +198,7 @@
           <span class="lbl-show">Hover to see it</span><span class="lbl-hide">Pad grid</span>
         </span>
         <figure class="shot"><div>
-          <img src="screenshots/pads.png" alt="The 8×8 performance pad grid with a row of coloured note pads and a row of clip-launch pads" loading="lazy" width="1424" height="835">
+          <img src="screenshots/pads.png" alt="The 8×8 performance pad grid with a row of coloured note pads and a row of clip-launch pads" loading="lazy" width="1440" height="900">
           <figcaption>Note pads and clip launches on the 8×8 grid</figcaption>
         </div></figure>
       </div>
@@ -218,7 +218,7 @@
           <span class="lbl-show">Hover to see it</span><span class="lbl-hide">File Bay</span>
         </span>
         <figure class="shot"><div>
-          <img src="screenshots/file-bay.png" alt="The File Bay panel, where imported audio and MIDI live and can be dragged onto tracks" loading="lazy" width="1424" height="835">
+          <img src="screenshots/file-bay.png" alt="The File Bay panel, where imported audio and MIDI live and can be dragged onto tracks" loading="lazy" width="1440" height="900">
           <figcaption>Drop audio or MIDI in to import it</figcaption>
         </div></figure>
       </div>
@@ -256,14 +256,21 @@
     </ol>
 
     <p style="color: var(--muted); max-width: 660px; margin: 30px 0 0;">
-      <strong>Remote sessions:</strong> Everyone on the same network means LAN. For collaboration
-      across the internet right now, you can use a mesh VPN like
-      <a href="https://tailscale.com">Tailscale</a> to put all machines on one virtual network —
-      then the LAN mode works unchanged, peer-to-peer, with no server involved.
+      In a studio or rehearsal room this needs nothing at all — no VPN, no account, not
+      even an internet connection, just the network already in the room. It is as much a
+      tracking tool as a writing one: because every machine records its own inputs into
+      the same session, a room can capture more simultaneous microphones than any one
+      interface has channels for, with an engineer editing the takes as they land.
+    </p>
+
+    <p style="color: var(--muted); max-width: 660px; margin: 18px 0 0;">
+      <strong style="color:var(--text)">Working remotely?</strong> Until native relay support
+      ships, a mesh VPN like <a href="https://tailscale.com">Tailscale</a> puts distant
+      machines on one virtual network, and this same mode works across it unchanged.
     </p>
 
     <div class="cta" style="justify-content:flex-start; margin: 24px 0 0;">
-      <a class="btn" href="tailscale.html">Learn how to use Tailscale</a>
+      <a class="btn" href="tailscale.html">Setting up a remote session</a>
     </div>
   </div>
 </section>
@@ -273,9 +280,10 @@
     <p class="eyebrow">What's coming</p>
     <h2>Full online collaboration.</h2>
     <p class="section-lede" style="margin-bottom:0;">
-      We're working on a relay-based transport so remote sessions work without any VPN workaround — the same
-      peer-to-peer sync, but dialed through a relay that never understands your project. For now, Tailscale
-      gives you the real thing while we build that.
+      A relay-based transport is in development, so sessions between distant machines will
+      work with no VPN and no extra account — the same sync, dialed through a relay that
+      never understands your project. Sessions on a shared network already work today and
+      are unaffected by any of this.
     </p>
   </div>
 </section>

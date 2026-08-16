@@ -4,10 +4,15 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Remote collaboration with Tailscale — SuperDAW</title>
-<meta name="description" content="How to use Tailscale to collaborate on SuperDAW sessions across the internet without a VPN provider or server.">
+<meta name="description" content="Step-by-step: set up Tailscale, connect another person to it, and run a remote SuperDAW session peer-to-peer with no relay.">
 <meta name="theme-color" content="#0d0a08">
 <link rel="icon" href="logo.svg" type="image/svg+xml">
 <link rel="stylesheet" href="styles.css">
+
+<meta property="og:type" content="website">
+<meta property="og:title" content="Remote collaboration with Tailscale — SuperDAW">
+<meta property="og:description" content="Step-by-step: set up Tailscale and connect another person for a remote SuperDAW session.">
+<meta property="og:image" content="logo.svg">
 </head>
 <body>
 
@@ -32,10 +37,11 @@
 
 <header class="hero" style="padding: 64px 0 52px;">
   <div class="wrap">
-    <h1 style="font-size: clamp(2.2rem, 5.5vw, 3.2rem);">Remote collaboration with Tailscale</h1>
+    <h1 style="font-size: clamp(2.2rem, 5.5vw, 3.2rem);">Remote sessions with Tailscale</h1>
     <p class="lede">
-      How to set up peer-to-peer SuperDAW sessions across the internet, with zero latency
-      overhead compared to being on the same network.
+      SuperDAW connects peers directly, which needs everyone on one network. Tailscale
+      builds that network across the internet — so a collaborator three time zones away
+      joins exactly like someone in the next room.
     </p>
   </div>
 </header>
@@ -44,121 +50,345 @@
 
 <section>
   <div class="wrap">
-    <p class="eyebrow">The problem</p>
-    <h2>SuperDAW's LAN mode is faster, but LAN means local network.</h2>
+    <p class="eyebrow">Why this is needed</p>
+    <h2>LAN means local network — for now.</h2>
     <p class="section-lede">
-      SuperDAW's peer-to-peer architecture is built for direct connection — the host and
-      peers talk straight to each other with no relay in between. This is perfect on a LAN,
-      but it doesn't work when you're in different cities. For now, there's a workaround.
+      SuperDAW's session host listens on its own address and peers connect straight to
+      it. No server sits in the middle, which is why latency is as low as it is. It also
+      means the two machines have to be able to see each other, and two houses on two
+      different internet connections cannot.
     </p>
-  </div>
-</section>
-
-<section>
-  <div class="wrap">
-    <p class="eyebrow">The workaround</p>
-    <h2>Tailscale makes your internet look like a LAN.</h2>
-    <p class="section-lede">
-      <a href="https://tailscale.com">Tailscale</a> is a mesh VPN — it puts all your devices
-      on one virtual private network, and they see each other as if they're on the same LAN.
-      SuperDAW's peer-to-peer code just works, unchanged.
+    <p style="color: var(--muted); max-width: 660px; margin: 0 0 26px;">
+      A <strong style="color:var(--text)">mesh VPN</strong> solves exactly this. It gives every one of your
+      machines an address on one private virtual network, and they reach each other over
+      that network no matter whose Wi-Fi they are actually on. SuperDAW does not need to
+      know it is happening — it just sees two machines that can reach each other.
     </p>
 
-    <h3 style="margin: 36px 0 16px;">Why this works</h3>
-    <ul class="free" style="margin-bottom: 40px;">
-      <li>
-        <strong>Mesh, not hub-and-spoke</strong>
-        Machines talk directly to each other, not through a central server. Tailscale just
-        makes the routing work.
-      </li>
-      <li>
-        <strong>End-to-end encrypted</strong>
-        Your traffic stays encrypted between peers. Tailscale never sees your project.
-      </li>
-      <li>
-        <strong>Free tier is real</strong>
-        You can connect up to 100 devices for free. No credit card, no time limit.
-      </li>
-      <li>
-        <strong>Works everywhere</strong>
-        Firewalls, NAT, carrier-grade NAT — Tailscale's UDP hole-punching finds a path.
-      </li>
-    </ul>
-
-    <div class="cta" style="justify-content:flex-start;">
-      <a class="btn btn-primary" href="https://tailscale.com/download">Download Tailscale</a>
+    <div class="callout" style="border-left-color: var(--cyan);">
+      <p>
+        <strong>If you are all in the same building, you can close this page.</strong>
+        A studio, a rehearsal room, a house, one venue's Wi-Fi — anywhere the machines
+        already share a network, SuperDAW sessions work on their own with nothing
+        installed and no account anywhere. Tailscale is only for the case where the
+        network does not already exist.
+      </p>
     </div>
   </div>
 </section>
 
 <section>
   <div class="wrap">
-    <p class="eyebrow">Setup</p>
-    <h2>Getting it running in three steps.</h2>
+    <p class="eyebrow">Before you start</p>
+    <h2>What this costs and what you need.</h2>
 
-    <ol class="steps">
+    <ul class="free" style="margin-bottom: 34px;">
       <li>
-        <strong>Install Tailscale on every machine</strong> that will collaborate.
-        <a href="https://tailscale.com/download">Get it for Windows, Mac, Linux or mobile</a>.
+        <strong>Free, for this use</strong>
+        Tailscale's Personal plan is free forever and covers up to 6 users with unlimited
+        personal devices — far more than a session needs. It is for non-commercial use.
       </li>
       <li>
-        <strong>Sign in with any account</strong> (Google, GitHub, Microsoft, or a Tailscale
-        account). You'll be assigned an IP on the Tailscale network — write it down.
+        <strong>Both people install it</strong>
+        Tailscale has to run on every machine in the session. There is no way for one
+        person to cover for everyone.
       </li>
       <li>
-        <strong>Start a SuperDAW session as usual.</strong> Click Collab → Start. Share the
-        join code with your collaborators — it will encode your Tailscale IP, not your real one.
-        When they join, they'll be connecting through the virtual network.
+        <strong>Both people sign in somewhere</strong>
+        Tailscale authenticates through an existing account — Google, Microsoft, GitHub,
+        Apple and others. There is no separate password to invent.
       </li>
-    </ol>
+      <li>
+        <strong>Roughly ten minutes, once</strong>
+        After the first setup, later sessions are just "start Tailscale, start SuperDAW".
+      </li>
+    </ul>
 
-    <h3 style="margin: 36px 0 16px;">That's it.</h3>
-    <p style="color: var(--muted); max-width: 660px; margin: 0;">
-      SuperDAW has no idea Tailscale is there. It just sees machines on the same network
-      and goes peer-to-peer. Latency is the same as being in the same room.
-    </p>
+    <div class="callout">
+      <p>
+        <strong>A note on what you are trusting.</strong> Tailscale is a third party and a
+        separate company from SuperDAW — it needs an account, which is exactly the thing
+        SuperDAW itself avoids. Traffic between peers is end-to-end encrypted and
+        Tailscale cannot read your project, but the tradeoff is real and it is the reason
+        this is a stopgap rather than the plan. Native relay support is being built so
+        this page eventually becomes unnecessary.
+      </p>
+    </div>
   </div>
 </section>
 
 <section>
   <div class="wrap">
-    <p class="eyebrow">The limits</p>
-    <h2>What Tailscale can't do.</h2>
+    <p class="eyebrow">Part 1 · Both of you</p>
+    <h2>Install Tailscale and sign in.</h2>
     <p class="section-lede">
-      Tailscale is a workaround, not a permanent solution. We're building a proper relay
-      transport into SuperDAW so you don't need this extra step.
+      Everyone in the session does this on their own machine, including the host.
+    </p>
+
+    <ol class="steps">
+      <li>
+        <strong>Download it</strong> from
+        <a href="https://tailscale.com/download">tailscale.com/download</a>. There are
+        builds for Windows, macOS, Linux, iOS and Android. On Windows you get an
+        installer; run it and let it install the network adapter it asks about — that
+        adapter is the whole mechanism.
+      </li>
+      <li>
+        <strong>Sign in</strong> when it opens. Pick any provider you already have an
+        account with. <em style="color:var(--text); font-style:normal">Both of you should
+        sign in the same way if you plan to share a tailnet</em> — see Part 2.
+      </li>
+      <li>
+        <strong>Confirm it is connected.</strong> On Windows, Tailscale lives in the
+        system tray (the arrow near the clock); the menu should say <em style="color:var(--text); font-style:normal">Connected</em>.
+        Installed but signed out is not enough, and it is the single most common reason
+        this does not work — see the troubleshooting note below.
+      </li>
+      <li>
+        <strong>Find your Tailscale address.</strong> It always starts with <code>100.</code>
+        — that range is reserved for exactly this. Three ways to see it:
+        the tray menu shows it under your machine name; the admin console lists it on the
+        <a href="https://login.tailscale.com/admin/machines">Machines</a> page; or run
+        <code>tailscale ip -4</code> in a terminal.
+      </li>
+    </ol>
+
+    <pre><span class="c"># Windows PowerShell, macOS or Linux terminal</span>
+tailscale ip -4
+<span class="c"># → 100.92.14.37</span>
+
+<span class="c"># everything Tailscale currently sees</span>
+tailscale status</pre>
+  </div>
+</section>
+
+<section>
+  <div class="wrap">
+    <p class="eyebrow">Part 2 · Connecting the other person</p>
+    <h2>Two ways, and they are not equivalent.</h2>
+    <p class="section-lede">
+      Installing Tailscale separately is not enough — two strangers' Tailscale networks
+      cannot see each other by default. You have to deliberately connect them, and there
+      are two mechanisms. Pick one.
+    </p>
+
+    <div class="two-col" style="margin-bottom: 40px;">
+      <div class="transport">
+        <span class="code">Recommended for a band</span>
+        <h3>Invite them into your network</h3>
+        <p>
+          They become a member of your tailnet. Both machines see each other fully, in
+          both directions, with nothing else to configure. Simplest to reason about, and
+          the right answer for people you record with regularly.
+        </p>
+        <p>
+          Costs one of your 6 free user seats, and they can reach anything your access
+          rules allow — so use it for people you'd trust on your home network.
+        </p>
+      </div>
+      <div class="transport">
+        <span class="code">Recommended for a one-off</span>
+        <h3>Share just the one machine</h3>
+        <p>
+          They stay in their own tailnet and receive access to exactly one machine —
+          yours. Nothing else of yours is visible, and it does not consume a user seat.
+        </p>
+        <p>
+          Requires that they already have their own Tailscale account, and adds one
+          direction-of-traffic caveat that matters here. Read the quarantine note below.
+        </p>
+      </div>
+    </div>
+
+    <h3 style="margin: 0 0 14px;">Route A — invite them into your tailnet</h3>
+    <ol class="steps">
+      <li>
+        Open the <a href="https://login.tailscale.com/admin/users">Users</a> page of the
+        Tailscale admin console. You need to be the Owner or an Admin of your tailnet,
+        which you are by default if you created it.
+      </li>
+      <li>
+        Select <strong>Invite external users</strong>, and enter their email address.
+        There is also an option to generate a plain invite link if you'd rather send it
+        yourself over chat.
+      </li>
+      <li>
+        <strong>They open the link and authenticate</strong> with their own SSO provider.
+        Once they do, they appear on your Users page and their devices join your tailnet.
+      </li>
+      <li>
+        <strong>Check they can see the host.</strong> On their machine,
+        <code>tailscale status</code> should now list your machine and its
+        <code>100.x</code> address.
+      </li>
+    </ol>
+
+    <h3 style="margin: 36px 0 14px;">Route B — share only the host machine</h3>
+    <ol class="steps">
+      <li>
+        Open the <a href="https://login.tailscale.com/admin/machines">Machines</a> page of
+        the admin console and find <strong>the machine that will host the session</strong>.
+        This matters — share the host, not the guest's machine.
+      </li>
+      <li>
+        Open that machine's <strong>⋯</strong> menu and choose <strong>Share</strong>.
+      </li>
+      <li>
+        Use <strong>Share by email</strong> to send an invitation, or
+        <strong>Copy invite link</strong> to send it yourself. A link is single-use unless
+        you toggle <strong>Reusable link</strong>. Unused invite links expire after 30 days.
+      </li>
+      <li>
+        <strong>They accept the invite.</strong> They must be the Owner or an Admin of
+        their own tailnet — in practice, they need to have signed up for Tailscale
+        themselves first. The shared machine then appears in their machine list.
+      </li>
+    </ol>
+
+    <div class="callout" style="margin-top: 34px;">
+      <p>
+        <strong>The quarantine rule, and why Route B still works.</strong> Tailscale
+        quarantines shared machines by default: a shared machine can <em style="color:var(--text); font-style:normal">answer</em>
+        incoming connections from the person you shared it with, but cannot
+        <em style="color:var(--text); font-style:normal">start</em> connections into their network.
+      </p>
+      <p>
+        That is precisely the shape of a SuperDAW session — the host listens, and peers
+        dial in — so sharing the host's machine works. Sharing the guest's machine
+        instead would not. If you ever need traffic both ways, Tailscale supports
+        mutually sharing a machine from each side.
+      </p>
+    </div>
+  </div>
+</section>
+
+<section>
+  <div class="wrap">
+    <p class="eyebrow">Part 3 · The session</p>
+    <h2>Start SuperDAW exactly as you normally would.</h2>
+    <p class="section-lede">
+      There is no Tailscale setting inside SuperDAW, and nothing to paste. It detects the
+      Tailscale adapter on its own.
+    </p>
+
+    <ol class="steps">
+      <li>
+        <strong>Check Tailscale is connected on both machines</strong> before opening
+        SuperDAW. This is the step people skip.
+      </li>
+      <li>
+        <strong>The host clicks Collab → Start.</strong> SuperDAW builds a join code from
+        its own address, and when a Tailscale adapter is present and carrying an address,
+        it picks that one over your ordinary Wi-Fi address automatically.
+      </li>
+      <li>
+        <strong>Send the join code.</strong> It looks like <code>CHE0W-9E276-JF5J0</code>
+        — fifteen characters in three groups. It is case-insensitive and deliberately
+        avoids ambiguous letters, so it survives being read aloud over a call.
+      </li>
+      <li>
+        <strong>They paste it into the launcher</strong> and join. The project streams
+        over, assets transfer in the background, and you are both editing.
+      </li>
+    </ol>
+
+    <div class="callout" style="margin-top: 34px; border-left-color: var(--amber);">
+      <p>
+        <strong>If Tailscale is installed but not connected, this fails quietly.</strong>
+        A disconnected Tailscale adapter still exists, holding a self-assigned
+        <code>169.254.x.x</code> address that routes nowhere. SuperDAW deliberately skips
+        those and falls back to your ordinary LAN address — so you get a join code that
+        looks perfectly valid, and simply cannot be reached from outside your house.
+      </p>
+      <p>
+        The tell is the address inside the code: a working remote session encodes a
+        <code>100.x</code> host. If your collaborator's join attempt just hangs, check the
+        tray first.
+      </p>
+    </div>
+  </div>
+</section>
+
+<section>
+  <div class="wrap">
+    <p class="eyebrow">When it doesn't work</p>
+    <h2>Troubleshooting, in order.</h2>
+
+    <ul class="free">
+      <li>
+        <strong>Is Tailscale actually connected?</strong>
+        On both machines. Check the tray, or run <code>tailscale status</code>. Ninety
+        percent of failures stop here.
+      </li>
+      <li>
+        <strong>Can the guest see the host at all?</strong>
+        Run <code>tailscale ping &lt;host-machine-name&gt;</code> from the guest. If that
+        fails, the problem is the Tailscale link, not SuperDAW — nothing in the DAW will
+        fix it.
+      </li>
+      <li>
+        <strong>Did you share the right machine?</strong>
+        On Route B, the host's machine is the one that must be shared. Sharing the
+        guest's machine leaves the connection pointing the wrong way through quarantine.
+      </li>
+      <li>
+        <strong>Is the code encoding a 100.x address?</strong>
+        If the host had Tailscale down when the session started, it encoded the wrong
+        address. Stop the session, connect Tailscale, and start it again to mint a fresh
+        code.
+      </li>
+      <li>
+        <strong>Firewall prompt still waiting?</strong>
+        Windows may ask whether to allow SuperDAW on the network the first time you host.
+        If it was dismissed, allow it in Windows Defender Firewall and restart the session.
+      </li>
+      <li>
+        <strong>Still stuck?</strong>
+        Open an <a href="https://github.com/Abzerofin/SuperDAW/issues">issue</a> with what
+        <code>tailscale status</code> prints on both ends. Remote-session reports are
+        genuinely useful — they are the hardest thing to test alone.
+      </li>
+    </ul>
+  </div>
+</section>
+
+<section>
+  <div class="wrap">
+    <p class="eyebrow">The honest summary</p>
+    <h2>This is a workaround.</h2>
+    <p class="section-lede">
+      It works, it is fast, and it is genuinely peer-to-peer. It is also three things
+      SuperDAW is otherwise designed to avoid.
     </p>
 
     <div class="grid" style="grid-template-columns: repeat(auto-fit, minmax(300px, 1fr));">
       <div class="card">
-        <h3 style="margin-top:0;">It's another tool to install</h3>
-        <p>One more dependency, one more thing to troubleshoot if it breaks. We want
-          SuperDAW to do this by itself.</p>
+        <h3 style="margin-top:0;">Another program to install</h3>
+        <p>One more dependency, one more thing that can break, on every machine in the session.</p>
       </div>
       <div class="card">
         <h3 style="margin-top:0;">It requires accounts</h3>
-        <p>You have to sign in somewhere, even on the free tier. SuperDAW's whole point
-          is no accounts at all.</p>
+        <p>Everyone signs in somewhere. SuperDAW's entire point is that it asks you for nothing.</p>
       </div>
       <div class="card">
-        <h3 style="margin-top:0;">Extra setup friction</h3>
-        <p>One more thing to explain to collaborators who've never heard of a VPN. Most
-          just want to share a code and make music.</p>
+        <h3 style="margin-top:0;">It is a lot to explain</h3>
+        <p>Most musicians want to paste a code and play — not read a page about mesh VPNs.</p>
       </div>
     </div>
+
+    <p style="color: var(--muted); max-width: 660px; margin: 34px 0 0;">
+      Native relay support — remote sessions with no VPN and no extra account — is being
+      built. Until it ships, this gets you the real thing today.
+    </p>
   </div>
 </section>
 
 <section>
   <div class="wrap" style="text-align:center;">
-    <h2 style="margin-bottom:16px;">When we ship the real thing</h2>
-    <p class="section-lede" style="margin: 0 auto 28px;">
-      The relay-based transport is on the roadmap. For now, Tailscale gets you remote
-      peer-to-peer sessions that work.
-    </p>
     <div class="cta">
-      <a class="btn btn-primary" href="https://tailscale.com/download">Get Tailscale</a>
+      <a class="btn btn-primary" href="https://tailscale.com/download">Download Tailscale</a>
       <a class="btn" href="https://github.com/Abzerofin/SuperDAW/releases">Download SuperDAW</a>
+      <a class="btn" href="index.html">Back to the overview</a>
     </div>
   </div>
 </section>
@@ -180,15 +410,15 @@
       <a href="https://github.com/Abzerofin/SuperDAW/blob/master/docs/NETWORKING.md">Networking</a>
     </div>
     <div class="fcol">
-      <span class="fhead">Support</span>
-      <a href="https://github.com/sponsors/Abzerofin">GitHub Sponsors</a>
-      <a href="https://ko-fi.com/superplant">Ko-fi</a>
-      <a href="https://github.com/Abzerofin/SuperDAW/blob/master/LICENSE">License</a>
+      <span class="fhead">Tailscale docs</span>
+      <a href="https://tailscale.com/kb/1084/sharing">Sharing a machine</a>
+      <a href="https://tailscale.com/docs/manage-users">Managing users</a>
+      <a href="https://tailscale.com/pricing">Plans &amp; pricing</a>
     </div>
     <div class="legal">
       SuperDAW — a collaboration-first professional DAW.<br>
       Free software under the GPL-3.0-or-later.<br>
-      Music you make with it is yours.
+      Not affiliated with Tailscale.
     </div>
   </div>
 </footer>

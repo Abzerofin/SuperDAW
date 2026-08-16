@@ -243,9 +243,13 @@ h3 { margin: 0 0 8px; font-size: 1.05rem; font-weight: 650; letter-spacing: -0.0
    grid-template-rows is only supported in recent Chromium, and silently fails
    to animate elsewhere. Every screenshot shares the 1424×835 source ratio, so
    the ceiling below clears the tallest rendered height at any card width. */
-.card.has-shot { cursor: pointer; }
+/* :focus-visible, NOT :focus-within — a mouse click focuses the card and the
+   focus outlives the pointer, which left cards stuck open after a click.
+   :focus-visible matches keyboard focus only, so the keyboard path still
+   works and clicking no longer pins a card open. */
+.card.has-shot { cursor: default; }
 .card.has-shot:hover,
-.card.has-shot:focus-within { border-color: var(--line-2); }
+.card.has-shot:focus-visible { border-color: var(--line-2); }
 
 .card .shot {
   margin: 0;               /* <figure> carries a default margin */
@@ -255,8 +259,7 @@ h3 { margin: 0 0 8px; font-size: 1.05rem; font-weight: 650; letter-spacing: -0.0
   transition: max-height 0.34s ease, opacity 0.24s ease, margin-top 0.34s ease;
 }
 .card.has-shot:hover .shot,
-.card.has-shot:focus-within .shot,
-.card.has-shot.open .shot {
+.card.has-shot:focus-visible .shot {
   max-height: 460px;
   opacity: 1;
   margin-top: 18px;
@@ -285,12 +288,12 @@ h3 { margin: 0 0 8px; font-size: 1.05rem; font-weight: 650; letter-spacing: -0.0
 }
 .card .shot-hint svg { width: 12px; height: 12px; }
 .card.has-shot:hover .shot-hint,
-.card.has-shot:focus-within .shot-hint { color: var(--orange); }
+.card.has-shot:focus-visible .shot-hint { color: var(--orange); }
 .card.has-shot:hover .shot-hint .lbl-show,
-.card.has-shot:focus-within .shot-hint .lbl-show { display: none; }
+.card.has-shot:focus-visible .shot-hint .lbl-show { display: none; }
 .card .shot-hint .lbl-hide { display: none; }
 .card.has-shot:hover .shot-hint .lbl-hide,
-.card.has-shot:focus-within .shot-hint .lbl-hide { display: inline; }
+.card.has-shot:focus-visible .shot-hint .lbl-hide { display: inline; }
 
 /* Touch devices get no hover: show every screenshot inline instead of
    hiding it behind an interaction that cannot happen. */
