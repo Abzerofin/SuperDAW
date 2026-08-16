@@ -41,9 +41,9 @@
     <img class="mark" src="logo.svg" alt="SuperDAW logo">
     <h1>Make music together,<br>in the same session.</h1>
     <p class="lede">
-      A professional DAW with real-time collaboration built in —
-      <strong>no accounts, no cloud, no AI</strong>. Your projects are ordinary files
-      on your own disk.
+      A professional DAW where more than one person can work on the same song at the
+      same time. <strong>No accounts, no cloud, no AI.</strong> Your projects are just
+      files sitting on your disk.
     </p>
 
     <div class="badges">
@@ -79,27 +79,27 @@
 
 <section>
   <div class="wrap">
-    <p class="eyebrow">What it refuses to be</p>
-    <h2>Three deliberate absences.</h2>
+    <p class="eyebrow">What it doesn't do</p>
+    <h2>Three things it won't do.</h2>
     <p class="section-lede">
-      Much of what makes SuperDAW different is what it leaves out. These are design
-      decisions, not gaps.
+      A lot of what makes SuperDAW worth using is stuff it leaves out. None of these are
+      missing features that'll turn up in a later version.
     </p>
     <div class="pillars">
       <div class="pillar">
         <p class="no">No</p>
         <h3>AI features</h3>
-        <p>Nothing generates or "improves" your music. The tool does what you tell it to, and nothing else.</p>
+        <p>Nothing here writes your music for you, or "improves" it. The program does what you tell it to and that's all it does.</p>
       </div>
       <div class="pillar">
         <p class="no">No</p>
         <h3>Accounts</h3>
-        <p>No sign-up, no login, no profile. Share a short code and your collaborators are in.</p>
+        <p>No sign-up, no login, no profile to fill in. You hand someone a code and they're in.</p>
       </div>
       <div class="pillar">
         <p class="no">No</p>
         <h3>Cloud dependency</h3>
-        <p>Projects are single <code>.sdaw</code> files on your disk. Nothing you need to open your work lives on a server.</p>
+        <p>Projects are single <code>.sdaw</code> files on your own disk. Nothing you need to open your own song lives on somebody else's server.</p>
       </div>
     </div>
   </div>
@@ -108,9 +108,9 @@
 <section id="features">
   <div class="wrap">
     <p class="eyebrow">Capabilities</p>
-    <h2>A full workstation, not a demo.</h2>
+    <h2>What's in it.</h2>
     <p class="section-lede">
-      Everything below is synced to your collaborators and undoable.
+      All of it syncs to everyone in the session, and all of it can be undone.
     </p>
 
     <div class="grid">
@@ -118,7 +118,7 @@
       <div class="card has-shot" tabindex="0">
         <div class="ico"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M17 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M23 21v-2a4 4 0 0 0-3-3.87"/><path d="M16 3.13a4 4 0 0 1 0 7.75"/></svg></div>
         <h3>Real-time collaboration</h3>
-        <p>Several people in one project at once, with live cursors and per-user undo. Edit offline and it resyncs on reconnect.</p>
+        <p>Several people in one project at once, with live cursors and undo that's per-person. Work offline and it catches up when you reconnect.</p>
         <span class="shot-hint">
           <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/><circle cx="12" cy="12" r="3"/></svg>
           <span class="lbl-show">Hover to see it</span><span class="lbl-hide">Session panel</span>
@@ -132,25 +132,25 @@
       <div class="card">
         <div class="ico"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="1 4 1 10 7 10"/><path d="M3.51 15a9 9 0 1 0 2.13-9.36L1 10"/></svg></div>
         <h3>Everything is undoable</h3>
-        <p>Every edit is one serializable operation, so there's no such thing as a change that syncs but can't be undone.</p>
+        <p>Every edit is a single operation underneath, so nothing can reach the other people in the session and then leave you unable to take it back.</p>
       </div>
 
       <div class="card">
         <div class="ico"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 18v-6a9 9 0 0 1 18 0v6"/><path d="M21 19a2 2 0 0 1-2 2h-1a2 2 0 0 1-2-2v-3a2 2 0 0 1 2-2h3zM3 19a2 2 0 0 0 2 2h1a2 2 0 0 0 2-2v-3a2 2 0 0 0-2-2H3z"/></svg></div>
         <h3>Native low-latency audio</h3>
-        <p>A dedicated WASAPI engine with automatic fallback, and monitoring handled in the same callback that renders output.</p>
+        <p>A WASAPI engine that falls back to Web Audio if anything goes wrong. What you hear while tracking comes out of the same callback that renders playback.</p>
       </div>
 
       <div class="card">
         <div class="ico"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="2" y="2" width="20" height="20" rx="2"/><path d="M8 2v20M16 2v20M2 8h20M2 16h20"/></svg></div>
         <h3>VST3 plugins, live</h3>
-        <p>Inserts run in the realtime callback with automatic plugin-delay compensation, so they stay aligned with every other track.</p>
+        <p>Plugins process inside the realtime callback and their latency gets compensated for, so a knob you turn is heard straight away and stays lined up with everything else.</p>
       </div>
 
       <div class="card has-shot" tabindex="0">
         <div class="ico"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="4" y1="21" x2="4" y2="14"/><line x1="4" y1="10" x2="4" y2="3"/><line x1="12" y1="21" x2="12" y2="12"/><line x1="12" y1="8" x2="12" y2="3"/><line x1="20" y1="21" x2="20" y2="16"/><line x1="20" y1="12" x2="20" y2="3"/><line x1="1" y1="14" x2="7" y2="14"/><line x1="9" y1="8" x2="15" y2="8"/><line x1="17" y1="16" x2="23" y2="16"/></svg></div>
         <h3>Instruments &amp; effects</h3>
-        <p>Eleven built-in effects — EQ, compressor, limiter, delay, reverb and more — plus an analog synth, sampler and drum kit.</p>
+        <p>Eleven effects (EQ, compressor, limiter, delay, reverb and the rest of the usual set) plus an analog synth, a sampler and a drum kit.</p>
         <span class="shot-hint">
           <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/><circle cx="12" cy="12" r="3"/></svg>
           <span class="lbl-show">Hover to see it</span><span class="lbl-hide">Insert chain</span>
@@ -164,7 +164,7 @@
       <div class="card has-shot" tabindex="0">
         <div class="ico"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="2" y="6" width="20" height="12" rx="2"/><path d="M6 6v7M10 6v7M14 6v7M18 6v7"/></svg></div>
         <h3>Piano roll &amp; MIDI</h3>
-        <p>Live keyboard input, recording and <code>.mid</code> import, on integer timing that stays deterministic across machines.</p>
+        <p>Play a keyboard in live, record it, or drop in a <code>.mid</code> file. Timing is counted in whole ticks, so two machines never drift apart.</p>
         <span class="shot-hint">
           <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/><circle cx="12" cy="12" r="3"/></svg>
           <span class="lbl-show">Hover to see it</span><span class="lbl-hide">Piano roll</span>
@@ -178,7 +178,7 @@
       <div class="card has-shot" tabindex="0">
         <div class="ico"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="4" y1="21" x2="4" y2="10"/><circle cx="4" cy="6" r="2.5"/><line x1="12" y1="21" x2="12" y2="14"/><circle cx="12" cy="10" r="2.5"/><line x1="20" y1="21" x2="20" y2="8"/><circle cx="20" cy="4" r="2.5"/></svg></div>
         <h3>Mixer &amp; automation</h3>
-        <p>Per-track fader, pan, mute and solo with a master bus, plus sample-accurate volume automation and track freeze.</p>
+        <p>Fader, pan, mute and solo on every track, a master bus, volume automation that's accurate to the sample, and freeze for when a chain gets heavy.</p>
         <span class="shot-hint">
           <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/><circle cx="12" cy="12" r="3"/></svg>
           <span class="lbl-show">Hover to see it</span><span class="lbl-hide">Mixer</span>
@@ -192,7 +192,7 @@
       <div class="card has-shot" tabindex="0">
         <div class="ico"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="7" height="7" rx="1"/><rect x="14" y="3" width="7" height="7" rx="1"/><rect x="3" y="14" width="7" height="7" rx="1"/><rect x="14" y="14" width="7" height="7" rx="1"/></svg></div>
         <h3>Performance pads</h3>
-        <p>An 8×8 launchpad played by mouse, keyboard or MIDI grid — and the whole session hears your hits.</p>
+        <p>An 8×8 launchpad you can play with the mouse, the computer keyboard or a MIDI grid. Everyone in the session hears what you play.</p>
         <span class="shot-hint">
           <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/><circle cx="12" cy="12" r="3"/></svg>
           <span class="lbl-show">Hover to see it</span><span class="lbl-hide">Pad grid</span>
@@ -206,13 +206,13 @@
       <div class="card">
         <div class="ico"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/></svg></div>
         <h3>Chat &amp; comments</h3>
-        <p>Project chat plus comment threads pinned to individual clips and tracks, saved inside the project file.</p>
+        <p>Chat, plus comments pinned to a particular clip or track. All of it saves inside the project file rather than on someone's server.</p>
       </div>
 
       <div class="card has-shot" tabindex="0">
         <div class="ico"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"/></svg></div>
         <h3>File Bay</h3>
-        <p>Folders and waveform thumbnails. Drag assets onto tracks, or drag files in from the OS to import.</p>
+        <p>Folders and waveform thumbnails. Drag things onto tracks, or drag files in from Explorer to import them.</p>
         <span class="shot-hint">
           <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/><circle cx="12" cy="12" r="3"/></svg>
           <span class="lbl-show">Hover to see it</span><span class="lbl-hide">File Bay</span>
@@ -226,13 +226,13 @@
       <div class="card">
         <div class="ico"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="9"/><polyline points="12 7 12 12 15.5 14"/></svg></div>
         <h3>Warp &amp; tempo</h3>
-        <p>Stretch a clip's timing without moving its pitch, or repitch it without changing its length.</p>
+        <p>Stretch a clip without moving its pitch, or move its pitch without stretching it.</p>
       </div>
 
       <div class="card">
         <div class="ico"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M20 21v-8H4v8"/><path d="M7 13V3h10v10"/><circle cx="12" cy="17" r="1.5"/></svg></div>
         <h3>Autosave &amp; recovery</h3>
-        <p>Periodic snapshots of unsaved work, and an interface error surfaces as an error — never as a lost project.</p>
+        <p>Unsaved work gets snapshotted as you go. If the interface hits a bug you get an error message, not an empty timeline.</p>
       </div>
 
     </div>
@@ -242,31 +242,31 @@
 <section id="collaboration">
   <div class="wrap">
     <p class="eyebrow">Collaboration</p>
-    <h2>LAN-first, peer-to-peer.</h2>
+    <h2>How people join.</h2>
     <p class="section-lede">
-      One person starts a session, shares a 15-character code, and everyone on the same
-      network joins directly — no server, no accounts, lowest possible latency. Your own
-      edits apply instantly.
+      One person starts the session and passes around a 15-character code. Everyone else
+      on the network connects straight to them, with no server sitting in between, so
+      it's about as fast as this gets. Your own edits happen the moment you make them.
     </p>
 
     <ol class="steps">
       <li><strong>Click Collab → Start.</strong> Your machine becomes the host.</li>
-      <li><strong>Share the join code.</strong> Short enough to paste in chat or read aloud on a call.</li>
-      <li><strong>They paste it in.</strong> Everyone connects straight to the host, edits sync live.</li>
+      <li><strong>Send the code.</strong> It's short enough to read out over a call.</li>
+      <li><strong>They paste it into the launcher.</strong> That's the whole setup.</li>
     </ol>
 
     <p style="color: var(--muted); max-width: 660px; margin: 30px 0 0;">
-      In a studio or rehearsal room this needs nothing at all — no VPN, no account, not
-      even an internet connection, just the network already in the room. It is as much a
-      tracking tool as a writing one: because every machine records its own inputs into
-      the same session, a room can capture more simultaneous microphones than any one
-      interface has channels for, with an engineer editing the takes as they land.
+      In a studio or a rehearsal room none of this needs setting up. No VPN, no account,
+      no internet connection even, just the network that's already in the building. It's
+      as much a tracking tool as a writing one: every machine records its own inputs into
+      the same session, so a room can put up more mics at once than any single interface
+      has inputs for, and somebody can be editing the takes while they land.
     </p>
 
     <p style="color: var(--muted); max-width: 660px; margin: 18px 0 0;">
-      <strong style="color:var(--text)">Working remotely?</strong> Until native relay support
-      ships, a mesh VPN like <a href="https://tailscale.com">Tailscale</a> puts distant
-      machines on one virtual network, and this same mode works across it unchanged.
+      <strong style="color:var(--text)">Working remotely?</strong> Until the built-in relay
+      is finished, a mesh VPN like <a href="https://tailscale.com">Tailscale</a> puts
+      everyone on one virtual network and the same thing works across it.
     </p>
 
     <div class="cta" style="justify-content:flex-start; margin: 24px 0 0;">
@@ -278,12 +278,12 @@
 <section>
   <div class="wrap">
     <p class="eyebrow">What's coming</p>
-    <h2>Full online collaboration.</h2>
+    <h2>Online sessions without the workaround.</h2>
     <p class="section-lede" style="margin-bottom:0;">
-      A relay-based transport is in development, so sessions between distant machines will
-      work with no VPN and no extra account — the same sync, dialed through a relay that
-      never understands your project. Sessions on a shared network already work today and
-      are unaffected by any of this.
+      I'm building a relay so remote sessions stop needing a VPN and a second account.
+      It'll be the same sync as now, just routed through a server that never sees what's
+      actually in your project. Sessions on a shared network already work and won't
+      change.
     </p>
   </div>
 </section>
@@ -291,9 +291,9 @@
 <section id="specs">
   <div class="wrap">
     <p class="eyebrow">Under the hood</p>
-    <h2>The technical picture.</h2>
+    <h2>Specs.</h2>
     <p class="section-lede">
-      Full architecture notes live in
+      If you want the reasoning behind any of this, it's written up in
       <a href="https://github.com/Abzerofin/SuperDAW/blob/master/docs/ARCHITECTURE.md">docs/ARCHITECTURE.md</a>.
     </p>
 
@@ -320,7 +320,7 @@
     <p class="eyebrow">Get it</p>
     <h2>Install it, or build it yourself.</h2>
     <p class="section-lede">
-      Installed copies update themselves from GitHub Releases.
+      Once it's installed it updates itself, so this is a one-time thing.
     </p>
 
     <div class="cta" style="justify-content:flex-start; margin: 0 0 40px;">
@@ -344,11 +344,11 @@ npm run test      <span class="c"># core test suite</span></pre>
     <p class="eyebrow">Licensing</p>
     <h2>Free software. Your music is yours.</h2>
     <p class="section-lede" style="margin-bottom:0;">
-      SuperDAW is GPL-3.0-or-later. The copyleft covers this program's source code —
-      <strong>not</strong> the projects, presets or recordings you make with it. When you
-      use third-party plugins you're responsible for their license terms, which are
-      covered in
-      <a href="https://github.com/Abzerofin/SuperDAW/blob/master/PLUGIN_LICENSE_TERMS.md">PLUGIN_LICENSE_TERMS.md</a>.
+      SuperDAW is GPL-3.0-or-later. That copyleft applies to the program's own source
+      code. It has nothing to say about the projects, presets or recordings you make with
+      it, which are yours with no strings attached. One thing worth knowing: if you use
+      third-party plugins, keeping to their license terms is on you. There's more detail
+      in <a href="https://github.com/Abzerofin/SuperDAW/blob/master/PLUGIN_LICENSE_TERMS.md">PLUGIN_LICENSE_TERMS.md</a>.
     </p>
   </div>
 </section>
@@ -358,8 +358,8 @@ npm run test      <span class="c"># core test suite</span></pre>
     <p class="eyebrow">Support the project</p>
     <h2>SuperDAW is free, and stays free.</h2>
     <p class="section-lede" style="margin: 0 auto 30px;">
-      No company, no investors, nothing to upsell you. If it's useful to you, you can
-      help keep it going.
+      There's no company behind it, no investors, and nothing anyone's trying to sell
+      you. If you get some use out of it, there are a few ways to help.
     </p>
     <div class="cta">
       <a class="btn btn-primary" href="donate.html">Ways to support</a>
