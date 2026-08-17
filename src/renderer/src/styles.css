@@ -1821,6 +1821,39 @@ body.middle-panning * {
   color: #fff;
 }
 
+/* Named arrangement markers: document-state flags on the ruler (unlike the
+   per-user edit marker above). The flag color is the marker's own document
+   color, delivered per flag via --marker-color. */
+.ruler-marker {
+  position: absolute;
+  bottom: 0;
+  display: flex;
+  align-items: stretch;
+  max-width: 140px;
+  border-left: 2px solid var(--marker-color);
+  cursor: pointer;
+  z-index: 3;
+  overflow: hidden;
+}
+
+.ruler-marker-label {
+  font-size: 9px;
+  line-height: 15px;
+  padding: 0 5px 0 3px;
+  color: var(--text);
+  background: color-mix(in srgb, var(--marker-color) 28%, transparent);
+  border-radius: 0 3px 0 0;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  pointer-events: none;
+  align-self: flex-end;
+}
+
+.ruler-marker:hover .ruler-marker-label {
+  background: color-mix(in srgb, var(--marker-color) 55%, transparent);
+}
+
 /* The bar that always closes the track list: drop target for OS files and
    the empty project's call to action. */
 .track-drop-bar {
@@ -4536,6 +4569,11 @@ body.middle-panning * {
   border: 1px solid var(--border);
   border-radius: 6px;
   box-shadow: 0 12px 32px rgba(0, 0, 0, 0.5);
+}
+
+/* The marker menu is the clip menu's little sibling: rename, color, delete. */
+.markermenu {
+  width: 208px;
 }
 
 .clipmenu-title {

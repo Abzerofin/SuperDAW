@@ -212,6 +212,26 @@ export function describe(state: ProjectState, op: Operation): string | null {
       const pad = state.pads[op.padId]
       return pad ? `Cleared pad ${pad.row + 1}·${pad.col + 1}` : null
     }
+    case 'marker/create':
+      return `Added marker "${op.marker.name}"`
+    case 'marker/delete': {
+      const marker = state.markers[op.markerId]
+      return marker ? `Deleted marker "${marker.name}"` : null
+    }
+    case 'marker/update': {
+      const marker = state.markers[op.markerId]
+      if (!marker) return null
+      if (op.name !== undefined && op.name !== marker.name) {
+        return `Renamed marker "${marker.name}" to "${op.name}"`
+      }
+      if (op.ticks !== undefined && op.ticks !== marker.ticks) {
+        return `Moved marker "${marker.name}"`
+      }
+      if (op.color !== undefined && op.color !== marker.color) {
+        return `Recolored marker "${marker.name}"`
+      }
+      return `Updated marker "${marker.name}"`
+    }
     case 'clip/create':
       return `Added clip "${op.clip.name}" to "${trackName(state, op.clip.trackId)}"`
     case 'clip/delete':

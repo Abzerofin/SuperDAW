@@ -22,6 +22,7 @@ import {
   splitSelectedClipAtEditPoint
 } from './clipActions'
 import { DEFAULT_QUANTIZE_TICKS, humanizeNotes, quantizeNotes } from './noteActions'
+import { addMarkerAtPlayhead } from './markerActions'
 import { panic } from './audition'
 
 /** Notes living on the selected clips (for timeline-level quantize/humanize). */
@@ -198,6 +199,11 @@ export function useGlobalShortcuts(): void {
           if (trackId) audioEngine.setTrackLoop(trackId, !audioEngine.isTrackLooping(trackId))
           return
         }
+        case 'marker.add':
+          e.preventDefault()
+          // Auto-repeat must not machine-gun markers onto one spot.
+          if (!e.repeat) addMarkerAtPlayhead()
+          return
         case 'notes.quantize':
           quantizeNotes(selectedClipNoteIds(), quantizeGridTicks())
           return

@@ -5,6 +5,7 @@ import {
   isNoteTrackKind,
   isTrackEffectivelyAudible,
   isTrackSelfOrDescendant,
+  markersInOrder,
   timelineClips,
   trackSubtreeOf,
   CREATABLE_TRACK_KINDS,
@@ -31,6 +32,7 @@ import { collab } from '@/state/collab'
 import { timelineViewport } from '@/state/timelineViewport'
 import { createTrack } from '@/lib/trackActions'
 import { capturePointer } from '@/lib/pointer'
+import { addMarkerAtTicks } from '@/lib/markerActions'
 import { contextMenuStyle } from '@/lib/contextMenu'
 import { useDismiss } from '@/lib/dismiss'
 import { onMiddleClick } from '@/lib/middleMouse'
@@ -57,6 +59,7 @@ import {
 import { TrackHeader } from './TrackHeader'
 import { ClipView } from './ClipView'
 import { ClipMenu } from './ClipMenu'
+import { MarkerMenu } from './MarkerMenu'
 import { AutomationLane } from './AutomationLane'
 import { PingOverlay, RemoteCursors } from './PresenceOverlay'
 import { CommentThread } from '../comments/CommentThread'
@@ -97,6 +100,17 @@ interface MarqueeState {
   additive: boolean
   /** Selection as it was when the drag began (the base for `additive`). */
   base: ClipId[]
+}
+
+/** An arrangement-marker flag being dragged along the ruler. */
+interface MarkerDragState {
+  markerId: string
+  /** Preview position, in ticks. */
+  ticks: number
+  origTicks: number
+  originX: number
+  /** Engages after a small horizontal threshold so clicks stay clicks. */
+  engaged: boolean
 }
 
 type LoopDragMode = 'new' | 'start' | 'end' | 'move'
@@ -265,6 +279,19 @@ export function TimelineView(): React.JSX.Element {
     setReorderState(value)
   }
   const [colorMenu, setColorMenu] = useState<{ clipId: ClipId; x: number; y: number } | null>(null)
+  // Right-click on an arrangement-marker flag: rename/recolor/delete.
+  const [markerMenu, setMarkerMenu] = useState<{ markerId: string; x: number; y: number } | null>(
+    null
+  )
+  // Marker drag along the ruler: ephemeral preview, ONE marker/update on
+  // release (one gesture, one op). Which marker is grabbed is component
+  // state — never the document's business.
+  const [markerDrag, setMarkerDragState] = useState<MarkerDragState | null>(null)
+  const markerDragRef = useRef<MarkerDragState | null>(null)
+  const setMarkerDrag = (value: MarkerDragState | null): void => {
+    markerDragRef.current = value
+    setMarkerDragState(value)
+  }
   // Right-click on empty editor space: a small "new track" menu.
   const [spaceMenu, setSpaceMenu] = useState<{ x: number; y: number } | null>(null)
   /** Files are hovering the trailing drop bar (highlight only). */
@@ -535,6 +562,7 @@ export function TimelineView(): React.JSX.Element {
 
   // A click anywhere outside (or Escape) closes the clip and space menus.
   useDismiss(colorMenu !== null, () => setColorMenu(null))
+  useDismiss(markerMenu !== null, () => setMarkerMenu(null))
   useDismiss(spaceMenu !== null, () => setSpaceMenu(null))
 
   // Outside chrome (the transport's ⇤ button) can ask the view to scroll.
@@ -1158,10 +1186,11 @@ export function TimelineView(): React.JSX.Element {
     if (e.button !== 0) return
     const rect = (e.currentTarget as HTMLElement).getBoundingClientRect()
     const ticks = Math.max(0, snapTicks((e.clientX - rect.left) / pxPerTick, gridTicks))
-    // Shift pins the edit marker instead of moving the playhead, so edits
-    // have a fixed target while the song keeps playing.
+    // Shift+click on the ruler drops a named arrangement marker — document
+    // state, so it lands for every collaborator. (The per-user EDIT marker
+    // is still pinned by Shift+clicking the track lanes below.)
     if (e.shiftKey) {
-      transport.setMarker(ticks)
+      addMarkerAtTicks(ticks)
       return
     }
     const inLoopStrip = e.clientY - rect.top < LOOP_STRIP_H
@@ -1187,6 +1216,48 @@ export function TimelineView(): React.JSX.Element {
 
   const onRulerPointerUp = (): void => {
     scrubbingRef.current = false
+  }
+
+  /**
+   * Arrangement-marker flags: press grabs the marker, a drag previews the
+   * move locally and commits ONE marker/update on release; a plain click
+   * jumps the playhead to the marker instead.
+   */
+  const onMarkerPointerDown = (e: React.PointerEvent, markerId: string): void => {
+    if (e.button !== 0) return
+    e.stopPropagation() // the ruler underneath must not start a scrub
+    const marker = state.markers[markerId]
+    if (!marker) return
+    capturePointer(e)
+    setMarkerDrag({
+      markerId,
+      ticks: marker.ticks,
+      origTicks: marker.ticks,
+      originX: e.clientX,
+      engaged: false
+    })
+  }
+
+  const onMarkerPointerMove = (e: React.PointerEvent): void => {
+    const drag = markerDragRef.current
+    if (!drag) return
+    if (!drag.engaged && Math.abs(e.clientX - drag.originX) < 3) return
+    const rect = gridRef.current?.getBoundingClientRect()
+    if (!rect) return
+    const ticks = Math.max(0, snapTicks((e.clientX - rect.left - HEADER_W) / pxPerTick, gridTicks))
+    setMarkerDrag({ ...drag, ticks, engaged: true })
+  }
+
+  const onMarkerPointerUp = (): void => {
+    const drag = markerDragRef.current
+    if (!drag) return
+    setMarkerDrag(null)
+    if (drag.engaged && drag.ticks !== drag.origTicks) {
+      projectStore.dispatch({ type: 'marker/update', markerId: drag.markerId, ticks: drag.ticks })
+      return
+    }
+    // A click: jump the playhead to the marker.
+    transport.setPosition(drag.origTicks)
   }
 
   /** Grab an existing region: its edges resize, its body moves it. */
@@ -1438,7 +1509,7 @@ export function TimelineView(): React.JSX.Element {
         <div
           className="timeline-ruler"
           style={{ gridRow: 1, gridColumn: 2 }}
-          title="Drag to scrub the playhead (snaps to the grid) · top strip drags a loop region · Shift+click pins the edit marker"
+          title="Drag to scrub the playhead (snaps to the grid) · top strip drags a loop region · Shift+click adds a marker"
           onPointerDown={onRulerPointerDown}
           onPointerMove={onRulerPointerMove}
           onPointerUp={onRulerPointerUp}
@@ -1450,6 +1521,33 @@ export function TimelineView(): React.JSX.Element {
             </span>
           ))}
           <div className="ruler-loop-strip" style={{ height: LOOP_STRIP_H }} />
+          {markersInOrder(state).map((marker) => (
+            <div
+              key={marker.id}
+              className="ruler-marker"
+              style={
+                {
+                  left:
+                    (markerDrag?.markerId === marker.id ? markerDrag.ticks : marker.ticks) *
+                    pxPerTick,
+                  top: LOOP_STRIP_H,
+                  '--marker-color': marker.color
+                } as React.CSSProperties
+              }
+              title={`${marker.name || 'Marker'} — click to jump there, drag to move, right-click to rename`}
+              onPointerDown={(e) => onMarkerPointerDown(e, marker.id)}
+              onPointerMove={onMarkerPointerMove}
+              onPointerUp={onMarkerPointerUp}
+              onPointerCancel={onMarkerPointerUp}
+              onContextMenu={(e) => {
+                e.preventDefault()
+                e.stopPropagation()
+                setMarkerMenu({ markerId: marker.id, x: e.clientX, y: e.clientY })
+              }}
+            >
+              <span className="ruler-marker-label">{marker.name}</span>
+            </div>
+          ))}
           <PlayheadCap pxPerTick={pxPerTick} gridTicks={gridTicks} gridRef={gridRef} />
           {shownLoop && (
             <div
@@ -1753,6 +1851,20 @@ export function TimelineView(): React.JSX.Element {
               x={colorMenu.x}
               y={colorMenu.y}
               onClose={() => setColorMenu(null)}
+            />
+          )
+        })()}
+
+      {markerMenu &&
+        (() => {
+          const marker = state.markers[markerMenu.markerId]
+          if (!marker) return null // deleted (maybe by a peer) while open
+          return (
+            <MarkerMenu
+              marker={marker}
+              x={markerMenu.x}
+              y={markerMenu.y}
+              onClose={() => setMarkerMenu(null)}
             />
           )
         })()}

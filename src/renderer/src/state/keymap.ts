@@ -33,6 +33,7 @@ export type ShortcutId =
   | 'clip.duplicate'
   | 'clip.split'
   | 'clip.comment'
+  | 'marker.add'
   | 'track.duplicate'
   | 'track.mute'
   | 'track.monitor'
@@ -74,6 +75,7 @@ export const SHORTCUT_DEFS: readonly ShortcutDef[] = [
   { id: 'track.duplicate', label: 'Duplicate track', category: 'Editing', combo: 'Shift+D', aliases: ['Ctrl+Shift+D'] },
   { id: 'clip.split', label: 'Split clip at playhead', category: 'Editing', combo: 'S', aliases: ['Ctrl+E'] },
   { id: 'selection.all', label: 'Select all clips (widen selection)', category: 'Editing', combo: 'Shift+A' },
+  { id: 'marker.add', label: 'Add marker at playhead', category: 'Editing', combo: 'Shift+M' },
   { id: 'selection.delete', label: 'Delete selected clips', category: 'Editing', combo: 'Delete', aliases: ['Backspace'] },
 
   { id: 'track.mute', label: 'Mute selected track', category: 'Tools', combo: 'M' },

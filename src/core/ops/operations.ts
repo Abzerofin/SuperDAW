@@ -1,6 +1,7 @@
 import type { TimeSignature } from '../model/timebase'
 import type { ProjectSettings } from '../model/projectSettings'
 import type {
+  ArrangementMarker,
   AutomationPoint,
   AutomationPointId,
   ChatMessage,
@@ -10,6 +11,7 @@ import type {
   CommentId,
   FileNode,
   FileNodeId,
+  MarkerId,
   Note,
   NoteId,
   PadId,
@@ -222,6 +224,23 @@ export type Operation =
    */
   | { type: 'pad/set'; pad: PerformancePad }
   | { type: 'pad/clear'; padId: PadId }
+  /**
+   * Create a named arrangement marker. The whole marker travels in the op
+   * (its id is minted by the creating peer via `newId`), so re-delivery is
+   * idempotent: an id already present leaves the state untouched — edits
+   * to an existing marker go through `marker/update`, never through a
+   * second create.
+   */
+  | { type: 'marker/create'; marker: ArrangementMarker }
+  | { type: 'marker/delete'; markerId: MarkerId }
+  /**
+   * Update a marker's name, position and/or color. ABSOLUTE values for
+   * exactly the fields the gesture touched — re-delivery is idempotent and
+   * concurrent edits from two peers converge per field last-write-wins.
+   * The invert carries the previous values of the same fields; the reducer
+   * drops the op when the marker no longer exists (convergence rule).
+   */
+  | { type: 'marker/update'; markerId: MarkerId; name?: string; ticks?: number; color?: string }
   /** `parentId` present = also re-parent in the same gesture (drag into a folder). */
   | { type: 'track/reorder'; trackId: TrackId; index: number; parentId?: TrackId | null }
   /**
