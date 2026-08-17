@@ -1,4 +1,4 @@
-import { defineConfig } from 'vitest/config'
+import { configDefaults, defineConfig } from 'vitest/config'
 import { resolve } from 'node:path'
 
 export default defineConfig({
@@ -16,6 +16,10 @@ export default defineConfig({
     // base64 chunking; a couple of those cases sit within a few hundred ms
     // of the 5 s default and flake on a loaded machine. They are correct,
     // just genuinely slow — give them headroom instead of a coin flip.
-    testTimeout: 20_000
+    testTimeout: 20_000,
+    // Agent worktrees live under .claude/worktrees and carry a full copy
+    // of the repo — without this, a main-repo run re-runs every worktree's
+    // whole suite too.
+    exclude: [...configDefaults.exclude, '**/.claude/**']
   }
 })
