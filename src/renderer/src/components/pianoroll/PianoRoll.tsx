@@ -10,7 +10,7 @@ import { transport } from '@/state/transport'
 import { editorUi } from '@/state/editorUi'
 import { keymap } from '@/state/keymap'
 import { capturePointer } from '@/lib/pointer'
-import { humanizeNotes, quantizeNotes } from '@/lib/noteActions'
+import { humanizeNotes, quantizeNotes, snapNotesToScale } from '@/lib/noteActions'
 import { createPattern } from '@/lib/patternActions'
 import { parseNumberIn } from '@/lib/valueParse'
 import {
@@ -20,6 +20,7 @@ import {
   chordPitchClasses,
   type ChordType
 } from '@/lib/chords'
+import { SCALE_TYPES, scaleLabel, scalePitchClasses, type ScaleType } from '@/lib/scales'
 import { EditableValue } from '../controls/EditableValue'
 
 const ROW_H = 12
@@ -117,6 +118,8 @@ export function PianoRoll({
   }
   /** The chord guide, if one is up: root pitch class + shape. Ephemeral. */
   const [chord, setChord] = useState<{ root: number; type: ChordType } | null>(null)
+  /** The scale guide, exactly like the chord guide: per-user, never synced. */
+  const [scale, setScale] = useState<{ root: number; type: ScaleType } | null>(null)
   const rootRef = useRef<HTMLDivElement>(null)
   const scrollRef = useRef<HTMLDivElement>(null)
   const laneRef = useRef<HTMLDivElement>(null)
@@ -258,6 +261,21 @@ export function PianoRoll({
       if (chordClasses.has(pitch % 12)) chordRows.push(pitch)
     }
   }
+
+  // The scale guide is the same idea an octave wider — fainter bands on
+  // every in-scale row. PRECEDENCE when both guides are up: the chord
+  // highlight wins on its keys; the scale simply skips them (in the lane
+  // and on the keyboard), so a chord tone never draws two marks.
+  const scaleClasses = scale ? scalePitchClasses(scale.root, scale.type.intervals) : null
+  const scaleRows: number[] = []
+  if (scaleClasses) {
+    for (let pitch = PITCH_MIN; pitch <= PITCH_MAX; pitch++) {
+      if (chordClasses?.has(pitch % 12)) continue
+      if (scaleClasses.has(pitch % 12)) scaleRows.push(pitch)
+    }
+  }
+  const scaleMarksKey = (pitch: number): boolean =>
+    scaleClasses !== null && scaleClasses.has(pitch % 12) && !chordClasses?.has(pitch % 12)
 
   // Each clip with a possible end-drag preview applied.
   const shownDuration = (c: Clip): number =>
@@ -601,6 +619,16 @@ export function PianoRoll({
       humanizeNotes(selected.size > 0 ? selected : laid.map(({ note }) => note.id))
       return
     }
+    // Snap to scale — quantize for pitch: the same target set, resolved
+    // against the scale guide up right now, ONE note/moveMany per press.
+    // Without a guide there is no key to snap to, so the press is inert.
+    if (id === 'notes.snapToScale') {
+      e.stopPropagation()
+      if (scaleClasses) {
+        snapNotesToScale(selected.size > 0 ? selected : laid.map(({ note }) => note.id), scaleClasses)
+      }
+      return
+    }
     if (e.key === 'Escape') editorUi.close()
   }
 
@@ -629,6 +657,7 @@ export function PianoRoll({
           )}
         </span>
         <ChordPicker chord={chord} onPick={setChord} />
+        <ScalePicker scale={scale} onPick={setScale} />
         {selectedNote && <VelocityControl key={selectedNote.id} note={selectedNote} />}
         {selected.size > 1 && <span className="proll-hint">{selected.size} notes selected</span>}
         <span className="proll-hint">
@@ -661,7 +690,9 @@ export function PianoRoll({
                   key={pitch}
                   className={`proll-key ${isBlackKey(pitch) ? 'proll-key-black' : ''} ${
                     chordClasses?.has(pitch % 12) ? 'proll-key-chord' : ''
-                  } ${chord && pitch % 12 === chord.root ? 'proll-key-chord-root' : ''}`}
+                  } ${chord && pitch % 12 === chord.root ? 'proll-key-chord-root' : ''} ${
+                    scaleMarksKey(pitch) ? 'proll-key-scale' : ''
+                  } ${scaleMarksKey(pitch) && scale && pitch % 12 === scale.root ? 'proll-key-scale-root' : ''}`}
                   // Click a key to hear the pitch through this track's
                   // instrument — same audition the step labels give.
                   onPointerDown={(e) => {
@@ -689,6 +720,17 @@ export function PianoRoll({
             onDoubleClick={addNote}
             onPointerDown={beginMarquee}
           >
+            {/* Scale guide: faint bands on every in-scale row. Rendered
+                before (so under) the chord bands — the chord wins. */}
+            {scaleRows.map((pitch) => (
+              <div
+                key={`scale:${pitch}`}
+                className={`proll-scale-row ${
+                  scale && pitch % 12 === scale.root ? 'proll-scale-row-root' : ''
+                }`}
+                style={{ top: pitchToY(pitch), height: ROW_H }}
+              />
+            ))}
             {/* Chord guide: the rows that belong to the chosen chord. */}
             {chordRows.map((pitch) => (
               <div
@@ -993,6 +1035,92 @@ function ChordPicker({
           <button
             className="proll-chord-clear"
             disabled={!chord}
+            onClick={() => {
+              onPick(null)
+              setOpen(false)
+            }}
+          >
+            Clear guide
+          </button>
+        </div>
+      )}
+    </div>
+  )
+}
+
+/**
+ * The scale menu: pick a root and a scale and the roll faintly lights
+ * every in-scale row — the backdrop the chord guide's brighter bands sit
+ * on. Like the chord guide it is per-user ephemeral UI (never an op,
+ * never synced); it also gives snap-to-scale (Shift+Q) its key.
+ */
+function ScalePicker({
+  scale,
+  onPick
+}: {
+  scale: { root: number; type: ScaleType } | null
+  onPick: (scale: { root: number; type: ScaleType } | null) => void
+}): React.JSX.Element {
+  const [open, setOpen] = useState(false)
+  const [root, setRoot] = useState(0)
+  const ref = useRef<HTMLDivElement>(null)
+
+  useEffect(() => {
+    if (!open) return
+    const onPointerDown = (e: PointerEvent): void => {
+      if (!ref.current?.contains(e.target as Node)) setOpen(false)
+    }
+    window.addEventListener('pointerdown', onPointerDown)
+    return () => window.removeEventListener('pointerdown', onPointerDown)
+  }, [open])
+
+  return (
+    <div className="collab-anchor" ref={ref}>
+      <button
+        className={`proll-chord-btn ${scale ? 'proll-chord-btn-on' : ''}`}
+        title={
+          scale
+            ? `Scale guide: ${scaleLabel(scale.root, scale.type)} — click to change or clear. Shift+Q snaps notes to it.`
+            : 'Highlight the keys of a scale across the roll (and give Shift+Q something to snap to)'
+        }
+        onClick={() => setOpen((v) => !v)}
+      >
+        {scale ? scaleLabel(scale.root, scale.type) : 'Scale'}
+      </button>
+      {open && (
+        <div className="menu-panel proll-chord-menu">
+          <div className="proll-chord-roots">
+            {NOTE_NAMES.map((name, pitchClass) => (
+              <button
+                key={name}
+                className={`proll-chord-root mono ${
+                  pitchClass === (scale?.root ?? root) ? 'proll-chord-root-on' : ''
+                }`}
+                onClick={() => {
+                  setRoot(pitchClass)
+                  // Re-root the scale already up — hunting for the key is
+                  // one click per try, same as the chord picker.
+                  if (scale) onPick({ root: pitchClass, type: scale.type })
+                }}
+              >
+                {name}
+              </button>
+            ))}
+          </div>
+          <div className="proll-chord-list">
+            {SCALE_TYPES.map((type) => (
+              <button
+                key={type.name}
+                className={`proll-chord-item ${scale?.type === type ? 'proll-chord-item-on' : ''}`}
+                onClick={() => onPick({ root: scale?.root ?? root, type })}
+              >
+                {type.name}
+              </button>
+            ))}
+          </div>
+          <button
+            className="proll-chord-clear"
+            disabled={!scale}
             onClick={() => {
               onPick(null)
               setOpen(false)
