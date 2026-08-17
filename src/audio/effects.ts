@@ -2,7 +2,8 @@ import type { EffectType } from '@core/model/effects'
 import { EFFECT_TYPES, LFO_WAVE_TYPES, PARAEQ_BANDS, PARAEQ_FILTER_TYPES } from '@core/model/effects'
 import { builtinEffectDescriptor } from '@core/plugins/builtin'
 import type { BackendNodeId, IAudioBackend } from './backend'
-import { impulseBufferId, makeImpulse } from './impulse'
+import { impulseBufferId, makeImpulse, makeProImpulse, proImpulseBufferId } from './impulse'
+import { makeShaperCurve, SATURATOR_TILT_HZ, saturatorTiltDb } from './saturation'
 import type { PluginAnalysis, PluginNodes, PluginProvider } from './pluginRegistry'
 
 /**
@@ -339,6 +340,130 @@ const BUILDERS: Record<EffectType, Builder> = {
       dispose() {
         for (const id of [input, mixed, dry, wet, convolver, out]) backend.disposeNode(id)
         for (const bufferId of registered) backend.releaseBuffer(bufferId)
+        disposeTap()
+      }
+    }
+  },
+
+  reverbpro(backend) {
+    // The basic reverb's topology plus a pre-delay line, with the tail's
+    // character (damping, size, width) baked into a richer generated IR:
+    // exponential decay, attack bloom, progressive HF rolloff and
+    // width-controlled channel decorrelation (see makeProImpulse).
+    const input = backend.createNode('gain')
+    const mixed = backend.createNode('gain')
+    const dry = backend.createNode('gain')
+    const wet = backend.createNode('gain')
+    const predelay = backend.createNode('delay', { maxDelay: 0.25 })
+    const convolver = backend.createNode('convolver')
+    let currentIrId: string | null = null
+    backend.connect(input, dry)
+    backend.connect(dry, mixed)
+    backend.connect(input, predelay)
+    backend.connect(predelay, convolver)
+    backend.connect(convolver, wet)
+    backend.connect(wet, mixed)
+    const { out, analysis, disposeTap } = tapOut(backend, mixed)
+    // Impulse buffers are shared across instances by their quantized param
+    // tuple — the tail is deterministic (seeded), so two reverbs at the
+    // same settings are the same data.
+    const registered: string[] = []
+    return {
+      input,
+      output: out,
+      analysis,
+      apply(p, when) {
+        const ir = {
+          decaySeconds: p.decay ?? 2.4,
+          damping: p.damping ?? 0.5,
+          size: p.size ?? 0.7,
+          width: p.width ?? 1
+        }
+        const sampleRate = backend.start().sampleRate
+        const bufferId = proImpulseBufferId(ir, sampleRate)
+        // Regenerate only when a shaping param crosses the id's two-decimal
+        // quantization — params commit one op on release, so this runs on
+        // commit (and on automation steps that actually move), never per
+        // frame.
+        if (bufferId !== currentIrId) {
+          currentIrId = bufferId
+          if (!backend.hasBuffer(bufferId)) {
+            backend.registerBuffer(bufferId, makeProImpulse(sampleRate, ir), sampleRate)
+            registered.push(bufferId)
+          }
+          backend.configureNode(convolver, { buffer: bufferId })
+        }
+        smooth(backend, predelay, 'delayTime', (p.predelay ?? 20) / 1000, when)
+        const mix = p.mix ?? 0.3
+        smooth(backend, wet, 'gain', mix, when)
+        smooth(backend, dry, 'gain', 1 - mix * 0.5, when)
+      },
+      dispose() {
+        for (const id of [input, mixed, dry, wet, predelay, convolver, out]) {
+          backend.disposeNode(id)
+        }
+        for (const bufferId of registered) backend.releaseBuffer(bufferId)
+        disposeTap()
+      }
+    }
+  },
+
+  saturator(backend) {
+    // Tape-style drive: emphasis shelf → tanh waveshaper (4× oversampled)
+    // → de-emphasis shelf, blended against the dry path, with an output
+    // trim. The shaper curve is gain-compensated pure math
+    // (audio/saturation.ts) regenerated only when the drive commits.
+    //
+    // WaveShaperNode has no backend primitive yet, so this builds behind
+    // the webAudio escape and returns null elsewhere — the engine bypasses
+    // it exactly like a missing plugin until the primitive lands (the same
+    // stance the module comment describes for pre-port effects).
+    const wa = backend.webAudio
+    if (!wa) return null
+    const input = backend.createNode('gain')
+    const mixed = backend.createNode('gain')
+    const dry = backend.createNode('gain')
+    const wet = backend.createNode('gain')
+    const trim = backend.createNode('gain')
+    const pre = backend.createNode('biquad', { type: 'highshelf' })
+    setNow(backend, pre, 'frequency', SATURATOR_TILT_HZ)
+    const post = backend.createNode('biquad', { type: 'highshelf' })
+    setNow(backend, post, 'frequency', SATURATOR_TILT_HZ)
+    const shaperNode = wa.ctx.createWaveShaper()
+    shaperNode.oversample = '4x'
+    const shaper = wa.adoptNode(shaperNode)
+    let currentDrive = Number.POSITIVE_INFINITY // first apply always sets the curve
+    backend.connect(input, dry)
+    backend.connect(dry, mixed)
+    backend.connect(input, pre)
+    backend.connect(pre, shaper)
+    backend.connect(shaper, post)
+    backend.connect(post, wet)
+    backend.connect(wet, mixed)
+    backend.connect(mixed, trim)
+    const { out, analysis, disposeTap } = tapOut(backend, trim)
+    return {
+      input,
+      output: out,
+      analysis,
+      apply(p, when) {
+        const drive = p.drive ?? 6
+        if (Math.abs(drive - currentDrive) > 0.01) {
+          currentDrive = drive
+          shaperNode.curve = makeShaperCurve(drive) as Float32Array<ArrayBuffer>
+        }
+        const tilt = saturatorTiltDb(p.tone ?? 0.5)
+        smooth(backend, pre, 'gain', tilt, when)
+        smooth(backend, post, 'gain', -tilt, when)
+        const mix = p.mix ?? 1
+        smooth(backend, wet, 'gain', mix, when)
+        smooth(backend, dry, 'gain', 1 - mix, when)
+        smooth(backend, trim, 'gain', dbToGain(p.trim ?? 0), when)
+      },
+      dispose() {
+        for (const id of [input, mixed, dry, wet, trim, pre, post, shaper, out]) {
+          backend.disposeNode(id)
+        }
         disposeTap()
       }
     }

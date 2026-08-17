@@ -11,6 +11,8 @@ export type EffectType =
   | 'limiter'
   | 'delay'
   | 'reverb'
+  | 'reverbpro'
+  | 'saturator'
   | 'lowpass'
   | 'highpass'
   | 'bandpass'
@@ -131,6 +133,26 @@ export const EFFECT_DEFS: Readonly<Record<EffectType, EffectDef>> = {
     params: {
       decay: p('Decay', 0.2, 8, 1.8, 's', 1),
       mix: p('Mix', 0, 1, 0.25, '', 2)
+    }
+  },
+  reverbpro: {
+    label: 'Reverb Pro',
+    params: {
+      decay: p('Decay', 0.2, 10, 2.4, 's', 1),
+      predelay: p('Pre-delay', 0, 200, 20, 'ms', 0),
+      damping: p('Damping', 0, 1, 0.5, '', 2),
+      size: p('Size', 0, 1, 0.7, '', 2),
+      width: p('Width', 0, 1, 1, '', 2),
+      mix: p('Mix', 0, 1, 0.3, '', 2)
+    }
+  },
+  saturator: {
+    label: 'Saturator',
+    params: {
+      drive: p('Drive', 0, 36, 6, 'dB', 1),
+      tone: p('Tone', 0, 1, 0.5, '', 2),
+      mix: p('Mix', 0, 1, 1, '', 2),
+      trim: p('Trim', -24, 12, 0, 'dB', 1)
     }
   },
   lowpass: {
