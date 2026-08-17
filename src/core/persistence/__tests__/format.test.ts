@@ -1,5 +1,5 @@
 ﻿import { describe as suite, expect, test } from 'vitest'
-import { createEmptyProject } from '../../model/types'
+import { createEmptyProject, MASTER_BUS_ID } from '../../model/types'
 import { DEFAULT_PROJECT_SETTINGS } from '../../model/projectSettings'
 import { apply } from '../../ops/apply'
 import {
@@ -444,6 +444,48 @@ suite('project file format', () => {
     expect(messy.stateBlob).toBeNull()
     expect('graphX' in messy).toBe(false)
     expect('graphY' in messy).toBe(false)
+  })
+
+  test('master-bus inserts survive save -> load; a track claiming the master id is dropped', () => {
+    let state = sampleState()
+    state = apply(state, {
+      type: 'plugin/add',
+      instance: {
+        id: 'mfx',
+        trackId: MASTER_BUS_ID,
+        descriptor: {
+          format: 'builtin',
+          uid: 'superdaw.limiter',
+          name: 'Limiter',
+          vendor: 'SuperDAW',
+          version: '1.0.0'
+        },
+        enabled: true,
+        rank: 1,
+        params: {},
+        stateBlob: null
+      }
+    })
+    expect(state.plugins['mfx']).toBeDefined() // premise: the add landed
+    const parsed = parseProjectJson(serializeProjectJson(state, []))
+    expect(parsed.state.plugins['mfx']?.trackId).toBe(MASTER_BUS_ID)
+
+    // A doctored file cannot capture the master chain by minting a track
+    // with the reserved id — the track is dropped, the insert stays on
+    // the (track-less) master bus.
+    const doctored = {
+      ...state,
+      tracks: {
+        ...state.tracks,
+        [MASTER_BUS_ID]: { ...Object.values(state.tracks)[0], id: MASTER_BUS_ID, name: 'Impostor' }
+      },
+      trackOrder: [...state.trackOrder, MASTER_BUS_ID]
+    }
+    const cleaned = parseProjectJson(
+      JSON.stringify({ formatVersion: 3, state: doctored, assets: [] })
+    )
+    expect(cleaned.state.tracks[MASTER_BUS_ID]).toBeUndefined()
+    expect(cleaned.state.plugins['mfx']?.trackId).toBe(MASTER_BUS_ID)
   })
 
   test('builtin params are clamped through core defs on load, exactly like plugin/add', () => {

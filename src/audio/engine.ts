@@ -3,6 +3,7 @@ import {
   automationValueAt,
   isNoteTrackKind,
   isTrackAudible,
+  MASTER_BUS_ID,
   pluginsOfTrack,
   routesOfTrack
 } from '@core/model/types'
@@ -260,6 +261,14 @@ export class AudioEngine {
   private backend: IAudioBackend | null = null
   private masterTap: TapId | null = null
   private meterBuf: Float32Array | null = null
+  /**
+   * Where every root track, folder bus and pad one-shot actually lands:
+   * the head of the MASTER insert chain (inserts whose trackId is
+   * MASTER_BUS_ID), which feeds masterNode (the masterVolume fader). With
+   * no master inserts it is a bare pass-through, so the graph is exactly
+   * what it was before master effects existed.
+   */
+  private masterBusInput: BackendNodeId | null = null
   /**
    * Per-channel master tap feeding the live LUFS readout. BS.1770 sums
    * each channel's energy, and the seam's tap (an AnalyserNode) downmixes
@@ -533,6 +542,7 @@ export class AudioEngine {
     this.masterTap = null
     this.meterBuf = null
     this.loudnessTap = null
+    this.masterBusInput = null
     this.backend = null
     this.backendFactory = factory
   }
@@ -558,6 +568,10 @@ export class AudioEngine {
     ])
     this.masterTap = backend.createTap(backend.masterNode(), MASTER_TAP_FRAMES)
     this.meterBuf = new Float32Array(MASTER_TAP_FRAMES)
+    // The master insert chain's head must exist before any busFor() call;
+    // syncPlugins below wires the actual inserts between it and masterNode.
+    this.masterBusInput = backend.createNode('gain')
+    backend.connect(this.masterBusInput, backend.masterNode())
     // One engine-wide end listener: each voice registered its own cleanup.
     backend.onVoiceEnded((id) => {
       const cleanup = this.voiceCleanups.get(id)
@@ -904,7 +918,8 @@ export class AudioEngine {
     if (!bufferId) return
     const gain = backend.createNode('gain')
     backend.scheduleParam(gain, 'gain', [{ kind: 'setValue', value: 0.9, time: 0 }])
-    backend.connect(gain, backend.masterNode())
+    // Through the master bus, so pad one-shots run the master insert chain.
+    backend.connect(gain, this.masterBusInput ?? backend.masterNode())
     const voice = backend.play({ bufferId, when: 0, destination: gain })
     if (voice === null) {
       backend.disposeNode(gain)
@@ -2643,12 +2658,12 @@ export class AudioEngine {
     return chain
   }
 
-  /** Where a track's output goes: its folder's chain input, or master. */
+  /** Where a track's output goes: its folder's chain input, or the master bus. */
   private busFor(parentId: TrackId | null): BackendNodeId {
     if (parentId !== null && this.store.state.tracks[parentId]) {
       return this.chain(parentId).input
     }
-    return this.backend!.masterNode()
+    return this.masterBusInput ?? this.backend!.masterNode()
   }
 
   /**
@@ -2660,7 +2675,7 @@ export class AudioEngine {
    */
   private syncPlugins(): void {
     if (!this.backend) return
-    this.syncPluginsFor(new Set(this.chains.keys()))
+    this.syncPluginsFor(new Set([...this.chains.keys(), MASTER_BUS_ID]))
   }
 
   /**
@@ -2690,12 +2705,46 @@ export class AudioEngine {
       }
     }
     for (const trackId of trackIds) {
+      if (trackId === MASTER_BUS_ID) {
+        this.wireMasterInserts()
+        continue
+      }
       const chain = this.chains.get(trackId)
       if (chain) this.wireInserts(trackId, chain)
     }
     // The insert set just changed, so the latency of at least one path
     // may have; the plan is cheap enough to redo whole.
     this.recomputePdc()
+  }
+
+  /**
+   * (Re)wire the MASTER insert chain: masterBusInput → enabled master
+   * inserts in rank order → masterNode. The mirror of wireInserts' linear
+   * path — master has no routing graph, no freeze and no automation lanes,
+   * so the graph/frozen branches have nothing to mirror. Node instances
+   * come from the same fxNodes reconciliation, so a master insert behaves
+   * identically to the same plugin on a track.
+   */
+  private wireMasterInserts(): void {
+    const backend = this.backend
+    const input = this.masterBusInput
+    if (!backend || input === null) return
+    const now = backend.now()
+    const inserts = pluginsOfTrack(this.store.state, MASTER_BUS_ID)
+    backend.disconnect(input)
+    for (const instance of inserts) {
+      const entry = this.fxNodes.get(instance.id)
+      if (entry) backend.disconnect(entry.output)
+    }
+    let prev: BackendNodeId = input
+    for (const instance of inserts) {
+      if (!instance.enabled) continue
+      const entry = this.liveNodesFor(instance, now)
+      if (!entry) continue // MISSING here: bypass until a provider appears
+      backend.connect(prev, entry.input)
+      prev = entry.output
+    }
+    backend.connect(prev, backend.masterNode())
   }
 
   private wireInserts(trackId: TrackId, chain: TrackChain): void {
@@ -2946,7 +2995,20 @@ export class AudioEngine {
         ])
       }
     }
-    this.pdcTotalSec = plan.totalSamples / rate
+    // Master inserts delay every path equally, so they need no compensator
+    // of their own — only the honest total, which lags the drawn playhead.
+    this.pdcTotalSec = plan.totalSamples / rate + this.masterInsertLatencySamples() / rate
+  }
+
+  /** Reported latency of the enabled master inserts (chain sum, like a track's). */
+  private masterInsertLatencySamples(): number {
+    let total = 0
+    for (const instance of pluginsOfTrack(this.store.state, MASTER_BUS_ID)) {
+      if (!instance.enabled) continue
+      const entry = this.fxNodes.get(instance.id)
+      total += Math.max(0, Math.round(entry?.latencySamples?.() ?? 0))
+    }
+    return total
   }
 
   private isAudible(trackId: TrackId): boolean {

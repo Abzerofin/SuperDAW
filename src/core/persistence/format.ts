@@ -6,7 +6,13 @@ import type {
   ProjectState,
   Track
 } from '../model/types'
-import { createEmptyProject, isNoteTrackKind, sanitizeMarker, sanitizePad } from '../model/types'
+import {
+  createEmptyProject,
+  isNoteTrackKind,
+  MASTER_BUS_ID,
+  sanitizeMarker,
+  sanitizePad
+} from '../model/types'
 import { routeIsValid } from '../model/routing'
 import { clampParam, synthDefaults, EFFECT_DEFS, type EffectType } from '../model/effects'
 import { normalizeProjectSettings } from '../model/projectSettings'
@@ -163,6 +169,9 @@ function normalizeState(state: ProjectState): ProjectState {
   const merged: ProjectState = { ...createEmptyProject(''), ...state }
   const tracks: Record<string, Track> = {}
   for (const [id, track] of Object.entries(merged.tracks)) {
+    // The master bus's reserved id (MASTER_BUS_ID) can never be a track:
+    // a doctored file claiming it would capture the master insert chain.
+    if (id === MASTER_BUS_ID) continue
     const { samplerAssetId: rawSampler, ...legacyRest } = track as Omit<
       Track,
       'volume' | 'pan' | 'synth'
@@ -364,7 +373,9 @@ function migratePlugins(
     if (instance.descriptor.format === 'builtin' && !paramDefsOf(instance.descriptor)) continue
     // An instance on a track that doesn't exist can never be heard or
     // edited — dangling state is dropped, exactly like a dangling route.
-    if (typeof instance.trackId !== 'string' || !tracks[instance.trackId]) continue
+    // The master bus is the one non-track target (MASTER_BUS_ID).
+    if (typeof instance.trackId !== 'string') continue
+    if (instance.trackId !== MASTER_BUS_ID && !tracks[instance.trackId]) continue
     const finite = (v: unknown): v is number => typeof v === 'number' && Number.isFinite(v)
     plugins[id] = {
       // The record key names the instance everywhere (ops target

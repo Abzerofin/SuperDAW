@@ -1,4 +1,5 @@
 import type { ProjectState } from '../model/types'
+import { MASTER_BUS_ID } from '../model/types'
 import { SYNTH_DEFS } from '../model/effects'
 import {
   patchKeys,
@@ -140,7 +141,7 @@ export function describe(state: ProjectState, op: Operation): string | null {
       )}"`
     }
     case 'plugin/reorder': {
-      if (!state.tracks[op.trackId]) return null
+      if (op.trackId !== MASTER_BUS_ID && !state.tracks[op.trackId]) return null
       return `Reordered effects on "${trackName(state, op.trackId)}"`
     }
     case 'plugin/setState': {
@@ -418,6 +419,7 @@ function panLabel(pan: number): string {
 }
 
 function trackName(state: ProjectState, trackId: string): string {
+  if (trackId === MASTER_BUS_ID) return 'Master'
   return state.tracks[trackId]?.name ?? 'unknown track'
 }
 

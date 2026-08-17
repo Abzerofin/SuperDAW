@@ -1,6 +1,6 @@
 ﻿import { describe as suite, expect, test } from 'vitest'
 import type { Clip, Comment, FileNode, PluginInstance, ProjectState, Track } from '../../model/types'
-import { createEmptyProject, padIdAt, pluginsOfTrack } from '../../model/types'
+import { createEmptyProject, MASTER_BUS_ID, padIdAt, pluginsOfTrack } from '../../model/types'
 import { synthDefaults, type EffectType } from '../../model/effects'
 import { builtinEffectDescriptor } from '../../plugins/builtin'
 import { describe as describeOp } from '../describe'
@@ -729,6 +729,76 @@ suite('plugin/reorder', () => {
   test('a missing track is dropped, not thrown', () => {
     const s = chainState()
     expect(apply(s, { type: 'plugin/reorder', trackId: 'ghost', order: ['fxA'] })).toBe(s)
+  })
+})
+
+suite('master-bus inserts', () => {
+  /** Two inserts on the master bus (MASTER_BUS_ID is not a track). */
+  function masterState(): ProjectState {
+    let s = baseState()
+    s = apply(s, { type: 'plugin/add', instance: plugin('mfx1', MASTER_BUS_ID, 'compressor', {}, 1) })
+    s = apply(s, { type: 'plugin/add', instance: plugin('mfx2', MASTER_BUS_ID, 'limiter', {}, 2) })
+    return s
+  }
+
+  test('plugin/add accepts the master bus without a track entry', () => {
+    const s = masterState()
+    expect(s.tracks[MASTER_BUS_ID]).toBeUndefined()
+    expect(pluginsOfTrack(s, MASTER_BUS_ID).map((p) => p.id)).toEqual(['mfx1', 'mfx2'])
+  })
+
+  test('apply(invert) round-trips a master plugin/add', () => {
+    const before = baseState()
+    const op: Operation = { type: 'plugin/add', instance: plugin('mfx1', MASTER_BUS_ID, 'reverb') }
+    const inverse = invert(before, op)
+    expect(inverse).not.toBeNull()
+    const after = apply(before, op)
+    expect(after).not.toBe(before)
+    expect(apply(after, inverse!)).toEqual(before)
+  })
+
+  test('apply(invert) round-trips a master plugin/remove', () => {
+    const before = masterState()
+    const op: Operation = { type: 'plugin/remove', instanceId: 'mfx1' }
+    const inverse = invert(before, op)
+    expect(inverse).not.toBeNull()
+    expect(apply(apply(before, op), inverse!)).toEqual(before)
+  })
+
+  test('plugin/reorder works on the master chain and round-trips', () => {
+    const before = masterState()
+    const op: Operation = { type: 'plugin/reorder', trackId: MASTER_BUS_ID, order: ['mfx2', 'mfx1'] }
+    const inverse = invert(before, op)
+    const after = apply(before, op)
+    expect(pluginsOfTrack(after, MASTER_BUS_ID).map((p) => p.id)).toEqual(['mfx2', 'mfx1'])
+    expect(apply(after, inverse!)).toEqual(before)
+  })
+
+  test('params on master inserts clamp exactly like a track insert', () => {
+    const s = apply(masterState(), {
+      type: 'plugin/setParam',
+      instanceId: 'mfx1',
+      param: 'threshold',
+      value: -10000
+    })
+    // The reducer clamps against the descriptor's defs, so the absurd
+    // input cannot survive verbatim — same rule as any track insert.
+    expect(s.plugins['mfx1'].params.threshold).toBeGreaterThan(-10000)
+    expect(Number.isFinite(s.plugins['mfx1'].params.threshold)).toBe(true)
+  })
+
+  test('a normal track id that does not exist is still refused', () => {
+    const s = baseState()
+    expect(apply(s, { type: 'plugin/add', instance: plugin('mfx1', 'ghost', 'reverb') })).toBe(s)
+  })
+
+  test('the activity feed names the master bus', () => {
+    const s = baseState()
+    const text = describeOp(s, {
+      type: 'plugin/add',
+      instance: plugin('mfx1', MASTER_BUS_ID, 'reverb')
+    })
+    expect(text).toContain('"Master"')
   })
 })
 

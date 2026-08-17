@@ -25,6 +25,7 @@ import {
   MIN_STRETCH,
   isClipLooped,
   markersEqual,
+  MASTER_BUS_ID,
   normalizeLoop,
   padsEqual,
   pluginsOfTrack,
@@ -417,7 +418,8 @@ export function apply(state: ProjectState, op: Operation): ProjectState {
 
     case 'plugin/add': {
       if (state.plugins[op.instance.id]) return state
-      if (!state.tracks[op.instance.trackId]) return state
+      // The master bus accepts inserts without being a track (MASTER_BUS_ID).
+      if (op.instance.trackId !== MASTER_BUS_ID && !state.tracks[op.instance.trackId]) return state
       const defs = paramDefsOf(op.instance.descriptor)
       // A builtin descriptor whose uid core doesn't know is unusable.
       if (op.instance.descriptor.format === 'builtin' && !defs) return state
@@ -578,7 +580,7 @@ export function apply(state: ProjectState, op: Operation): ProjectState {
     }
 
     case 'plugin/reorder': {
-      if (!state.tracks[op.trackId]) return state
+      if (op.trackId !== MASTER_BUS_ID && !state.tracks[op.trackId]) return state
       const chain = pluginsOfTrack(state, op.trackId)
       const byId = new Map(chain.map((p) => [p.id, p]))
       const ordered: PluginInstance[] = []

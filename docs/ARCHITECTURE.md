@@ -1169,14 +1169,44 @@ anyone raises the comfortable ~100-200-track ceiling.
     (inline, Enter/blur commits, Escape cancels) / clip-palette color /
     delete. Rebindable "Add marker at playhead" shortcut (Shift+M).
 
+36. ✅ **Mix milestone** — five features shipped as one wave. Live LUFS
+    (momentary + short-term, streaming BS.1770 sharing the offline
+    filter kernel, per-channel master tap behind the webAudio escape,
+    painted from the meter rAF bus in the transport bar). Per-strip mixer
+    metering (peak + RMS from the existing 256-frame taps in one pass,
+    1 s hold, latching over-0 dBFS clip lights — master's clears the
+    desk; IntersectionObserver culls off-screen strips). Scale guide +
+    snap-to-scale in the piano roll (`lib/scales.ts`, chord-guide
+    pattern; one absolute `note/moveMany` per press, Shift+Q; ties
+    resolve downward; chord highlight wins where both guides light a
+    key). Reverb Pro + Saturator builtins (seeded deterministic IR into
+    a convolver — decay/predelay/damping/size/width/mix; 4×-oversampled
+    gain-compensated tanh shaper with emphasis tilt — the Saturator is
+    Web-Audio-only until a waveshaper primitive lands and bypasses
+    cleanly elsewhere). And **master-bus inserts**: `MASTER_BUS_ID`
+    ('master') is accepted where plugin ops name a track — not a Track,
+    just a reserved insert target (reducer + loader allow it; a
+    doctored file minting a track with that id is dropped). Engine:
+    every root output, folder bus and pad one-shot lands on
+    `masterBusInput` → enabled master inserts in rank order →
+    masterNode (masterVolume) — same fxNodes reconciliation as tracks,
+    linear rack only (no graph/freeze/automation lanes on master), and
+    master insert latency joins the reported output total rather than
+    any compensator (it delays every path equally). Offline mixdown
+    mirrors the chain via the same `buildInserts`; exports name
+    bypassed master VST3s in the honesty notice. UI: the mixer's
+    master strip is selectable and its FX button targets the Effects
+    dock at the master rack (a stand-in Track shape — the rack needed
+    no second code path).
+
 Roadmap beyond: the native backend phases
 (docs/NATIVE_AUDIO_BACKEND.md), collaborator audio streaming +
 proxy renders for remote/missing plugins, autotune/pitch correction (dedicated
 AudioWorklet DSP milestone: pitch detection + PSOLA resynthesis),
-per-strip metering + live LUFS on the master, sustain-pedal (CC64) and
+sustain-pedal (CC64) and
 MIDI activity indicators, engine rewire batching for bulk import/template
 paths (the 400-track ceiling, STRESS_TEST_RESULTS.md), mid-take tempo-
 change/loop-wrap capture mapping, packaging polish (icon, signing,
-auto-update), master-bus effects, track height adjustment, relay
+auto-update), track height adjustment, relay
 deployment (TLS, public host) + relay accounts/persistence per
 docs/NETWORKING.md §15.

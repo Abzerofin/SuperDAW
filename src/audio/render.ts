@@ -6,6 +6,7 @@ import {
   clipsOfTrack,
   clipWarpFactor,
   isTrackAudible,
+  MASTER_BUS_ID,
   pluginsOfTrack,
   routesOfTrack
 } from '@core/model/types'
@@ -394,6 +395,11 @@ export async function renderMixdownChannels(
   const master = ctx.createGain()
   master.gain.value = state.masterVolume
   master.connect(ctx.destination)
+  // The master insert chain sits between the mix bus and the masterVolume
+  // fader, exactly as live (engine.wireMasterInserts). With no master
+  // inserts buildInserts returns the bus itself and nothing changes.
+  const masterBus = ctx.createGain()
+  buildInserts(ctx, state, MASTER_BUS_ID, masterBus).connect(master)
 
   // First pass: build every track's chain (folders included — they are buses).
   const inputs = new Map<TrackId, AudioNode>()
@@ -429,11 +435,11 @@ export async function renderMixdownChannels(
     inputs.set(trackId, input)
     panners.set(trackId, panner)
   }
-  // Second pass: route each panner to its folder bus (or master).
+  // Second pass: route each panner to its folder bus (or the master bus).
   for (const trackId of Object.keys(state.tracks)) {
     const parentId = state.tracks[trackId].parentId
     const parentInput = parentId !== null ? inputs.get(parentId) : undefined
-    panners.get(trackId)!.connect(parentInput ?? master)
+    panners.get(trackId)!.connect(parentInput ?? masterBus)
   }
 
   await prewarmWarpedClips(state, assets)

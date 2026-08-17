@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState, useSyncExternalStore } from 'react'
 import type { Track } from '@core/model/types'
-import { MAX_GAIN } from '@core/model/types'
+import { MASTER_BUS_ID, MAX_GAIN } from '@core/model/types'
 import { projectStore } from '@/state/projectStore'
 import { useProjectState } from '@/state/hooks'
 import { audioEngine } from '@/state/audioInstance'
@@ -131,9 +131,30 @@ function TrackStrip({ track }: { track: Track }): React.JSX.Element {
 }
 
 function MasterStrip({ volume }: { volume: number }): React.JSX.Element {
+  const isSelected = useSyncExternalStore(selection.subscribe, () =>
+    selection.isTrackSelected(MASTER_BUS_ID)
+  )
   return (
-    <div className="strip strip-master" style={{ '--track-color': 'var(--accent)' } as React.CSSProperties}>
-      <div className="strip-name">Master</div>
+    <div
+      className={`strip strip-master ${isSelected ? 'strip-selected' : ''}`}
+      style={{ '--track-color': 'var(--accent)' } as React.CSSProperties}
+      // Selecting the master targets the Effects dock at its insert chain
+      // (the shared mastering chain), exactly as selecting a track does.
+      onPointerDown={() => selection.selectTrack(MASTER_BUS_ID)}
+    >
+      <div className="strip-name" title="Master bus — the whole mix. FX opens its insert chain.">
+        Master
+      </div>
+      <button
+        className="corner-btn strip-fx"
+        title="Master effects (opens the Effects tab)"
+        onClick={() => {
+          selection.selectTrack(MASTER_BUS_ID)
+          panels.openPanel('effects')
+        }}
+      >
+        FX
+      </button>
       <div className="strip-pan-spacer" />
       <Fader
         gain={volume}

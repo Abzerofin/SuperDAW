@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from 'react'
 import type { PluginInstance, PluginInstanceId, Track } from '@core/model/types'
-import { isNoteTrackKind, pluginsOfTrack, routesOfTrack } from '@core/model/types'
+import { isNoteTrackKind, MASTER_BUS_ID, pluginsOfTrack, routesOfTrack } from '@core/model/types'
 import { synthDefaults } from '@core/model/effects'
 import { builtinTypeOf, isNormalizedParam, paramDefsOf, pluginDefaults } from '@core/plugins/builtin'
 import { pluginRegistry } from '@audio/pluginRegistry'
@@ -32,6 +32,12 @@ import { RoutingGraph } from './RoutingGraph'
 export function EffectsDock(): React.JSX.Element {
   const state = useProjectState()
   const selectedTrackId = useSelectedTrackId()
+  // The master bus is selectable (click its mixer strip) but is not a
+  // track — it borrows the rack through a stand-in Track shape. Inserts
+  // on it are real document state (trackId = MASTER_BUS_ID).
+  if (selectedTrackId === MASTER_BUS_ID) {
+    return <TrackEffects key={MASTER_BUS_ID} track={MASTER_RACK_TARGET} isMaster />
+  }
   const track = selectedTrackId ? state.tracks[selectedTrackId] : undefined
 
   if (!track) {
@@ -45,7 +51,33 @@ export function EffectsDock(): React.JSX.Element {
   return <TrackEffects key={track.id} track={track} />
 }
 
-function TrackEffects({ track }: { track: Track }): React.JSX.Element {
+/**
+ * The master bus wearing a Track's shape, so the rack (and the "+" plugin
+ * browser, which only reads id/kind) needs no second code path. Only
+ * `id`, `kind`, `name` and `color` are ever read in master mode.
+ */
+const MASTER_RACK_TARGET: Track = {
+  id: MASTER_BUS_ID,
+  kind: 'audio',
+  name: 'Master',
+  color: 'var(--accent)',
+  muted: false,
+  soloed: false,
+  volume: 1,
+  pan: 0,
+  synth: {},
+  parentId: null,
+  frozenAssetId: null
+}
+
+function TrackEffects({
+  track,
+  isMaster = false
+}: {
+  track: Track
+  /** Master-bus mode: linear rack only (no routing graph, no freeze/synth). */
+  isMaster?: boolean
+}): React.JSX.Element {
   const state = useProjectState()
   const chainRef = useRef<HTMLDivElement>(null)
   const inserts = pluginsOfTrack(state, track.id)
@@ -184,13 +216,15 @@ function TrackEffects({ track }: { track: Track }): React.JSX.Element {
         <span className="proll-dot" style={{ background: track.color }} />
         <span className="fx-dock-title">{track.name}</span>
         <span className="statusbar-dim">
-          {track.kind === 'folder'
-            ? 'bus effects'
-            : track.kind === 'drum'
-              ? 'kit & effects'
-              : track.kind === 'midi'
-                ? 'instrument & effects'
-                : 'effects'}
+          {isMaster
+            ? 'master bus effects — the whole mix runs through this chain'
+            : track.kind === 'folder'
+              ? 'bus effects'
+              : track.kind === 'drum'
+                ? 'kit & effects'
+                : track.kind === 'midi'
+                  ? 'instrument & effects'
+                  : 'effects'}
         </span>
         {track.frozenAssetId && (
           <span className="statusbar-dim">· frozen — inserts baked into the render</span>
@@ -200,22 +234,24 @@ function TrackEffects({ track }: { track: Track }): React.JSX.Element {
             · graph routing on — signal order lives in the Graph
           </span>
         )}
-        <div className="fx-view-toggle">
-          <button
-            className={`bay-btn ${view === 'rack' ? 'fx-view-active' : ''}`}
-            title="The ordered effect rack"
-            onClick={() => setView('rack')}
-          >
-            Rack
-          </button>
-          <button
-            className={`bay-btn ${view === 'graph' ? 'fx-view-active' : ''}`}
-            title="Node routing — branch and merge effect paths"
-            onClick={() => setView('graph')}
-          >
-            Graph
-          </button>
-        </div>
+        {!isMaster && (
+          <div className="fx-view-toggle">
+            <button
+              className={`bay-btn ${view === 'rack' ? 'fx-view-active' : ''}`}
+              title="The ordered effect rack"
+              onClick={() => setView('rack')}
+            >
+              Rack
+            </button>
+            <button
+              className={`bay-btn ${view === 'graph' ? 'fx-view-active' : ''}`}
+              title="Node routing — branch and merge effect paths"
+              onClick={() => setView('graph')}
+            >
+              Graph
+            </button>
+          </div>
+        )}
       </div>
       {view === 'graph' && <RoutingGraph track={track} />}
       {view === 'rack' && (

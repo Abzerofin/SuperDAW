@@ -256,6 +256,17 @@ export interface Track {
 export type PluginInstanceId = string
 
 /**
+ * The master bus's id where a track id is expected (`PluginInstance.trackId`,
+ * `plugin/reorder`). NOT a track: it has no entry in `state.tracks`, no
+ * clips, and its only fader is `masterVolume` — but inserts may target it,
+ * giving the project a shared mastering chain that syncs, undoes and
+ * persists like any other insert. Real ids are UUID-minted (`newId`), so
+ * no track can collide with this constant; the file loader drops tracks
+ * claiming it, the same way it drops other malformed track state.
+ */
+export const MASTER_BUS_ID = 'master'
+
+/**
  * One insert in a track's chain: a use of a plugin, identified by
  * descriptor metadata (never a filesystem path — see core/plugins).
  * Chains sort by `rank`. Whether the plugin is actually available is a

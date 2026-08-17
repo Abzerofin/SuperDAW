@@ -1,6 +1,11 @@
 import { Mp3Encoder } from '@breezystack/lamejs'
 import type { ProjectState, Route, TrackId } from '@core/model/types'
-import { isTrackEffectivelyAudible, pluginsOfTrack, routesOfTrack } from '@core/model/types'
+import {
+  isTrackEffectivelyAudible,
+  MASTER_BUS_ID,
+  pluginsOfTrack,
+  routesOfTrack
+} from '@core/model/types'
 import type { ProjectExportFormat } from '@core/model/projectSettings'
 import { encodeWavPcmAsync, type WavBitDepth } from '@audio/wav'
 import { renderMixdownChannels, renderTrackChannels, soloTrackState } from '@audio/render'
@@ -148,6 +153,9 @@ export interface Vst3BypassReport {
    * live playback, freeze (the graph fast path) and export all short
    * them, frozen or not, so freeze advice would be a lie. */
   graph: string[]
+  /** Enabled VST3s on the MASTER bus: no freeze exists there, so a Web
+   * Audio bounce always bypasses them. */
+  master: boolean
 }
 
 /**
@@ -163,6 +171,9 @@ export interface Vst3BypassReport {
 export function vst3BypassedTrackNames(state: ProjectState): Vst3BypassReport {
   const freezable: string[] = []
   const graph: string[] = []
+  const master = pluginsOfTrack(state, MASTER_BUS_ID).some(
+    (p) => p.enabled && pluginRegistry.status(p.descriptor) === 'offline'
+  )
   for (const trackId of state.trackOrder) {
     const track = state.tracks[trackId]
     if (!track) continue
@@ -182,18 +193,21 @@ export function vst3BypassedTrackNames(state: ProjectState): Vst3BypassReport {
       freezable.push(track.name.trim() || 'Track')
     }
   }
-  return { freezable, graph }
+  return { freezable, graph, master }
 }
 
 /** The one-shot warning folded into the export notice, or null. */
 export function vst3BypassWarning(state: ProjectState): string | null {
-  const { freezable, graph } = vst3BypassedTrackNames(state)
+  const { freezable, graph, master } = vst3BypassedTrackNames(state)
   const parts: string[] = []
   if (freezable.length > 0) {
     parts.push(`VST3 inserts bypassed on ${freezable.join(', ')} (freeze to include them)`)
   }
   if (graph.length > 0) {
     parts.push(`VST3 inserts in routing graphs are not rendered (${graph.join(', ')})`)
+  }
+  if (master) {
+    parts.push('VST3 inserts on the Master bus are bypassed in bounces')
   }
   return parts.length > 0 ? parts.join('; ') : null
 }
