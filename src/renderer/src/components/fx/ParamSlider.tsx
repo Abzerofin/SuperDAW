@@ -19,6 +19,8 @@ export function ParamSlider({
   def,
   value,
   percent = false,
+  mapped = null,
+  onContextMenu,
   onPreview,
   onCommit
 }: {
@@ -30,6 +32,10 @@ export function ParamSlider({
    * — only its presentation — because 0..1 is the plugin's contract.
    */
   percent?: boolean
+  /** Macro slot (0-based) this param is mapped to — shows the dot. Null = unmapped. */
+  mapped?: number | null
+  /** Right-click on the row (the Effects dock's macro-mapping menu). */
+  onContextMenu?: (e: React.MouseEvent) => void
   onPreview?: (value: number) => void
   onCommit: (value: number) => void
 }): React.JSX.Element {
@@ -47,8 +53,13 @@ export function ParamSlider({
   }
 
   return (
-    <div className="fx-param">
-      <span className="fx-param-label">{def.label}</span>
+    <div className="fx-param" onContextMenu={onContextMenu}>
+      <span className="fx-param-label">
+        {mapped !== null && (
+          <span className="fx-param-macro-dot" title={`Mapped to macro ${mapped + 1}`} />
+        )}
+        {def.label}
+      </span>
       <div
         className="fx-slider"
         style={{ width: SLIDER_W }}

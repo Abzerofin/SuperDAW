@@ -1,11 +1,15 @@
 import { useEffect, useRef, useState } from 'react'
+import { createPortal } from 'react-dom'
 import type { PluginInstance, PluginInstanceId, Track } from '@core/model/types'
 import { isNoteTrackKind, MASTER_BUS_ID, pluginsOfTrack, routesOfTrack } from '@core/model/types'
-import { synthDefaults } from '@core/model/effects'
+import { synthDefaults, type ParamDef } from '@core/model/effects'
+import { MAX_MACROS, defaultMacro } from '@core/model/macros'
 import { builtinTypeOf, isNormalizedParam, paramDefsOf, pluginDefaults } from '@core/plugins/builtin'
 import { pluginRegistry } from '@audio/pluginRegistry'
 import { projectStore } from '@/state/projectStore'
-import { useProjectState } from '@/state/hooks'
+import { useProjectSelector, useProjectState } from '@/state/hooks'
+import { contextMenuStyle } from '@/lib/contextMenu'
+import { useDismiss } from '@/lib/dismiss'
 import { usePluginRegistry } from '@/state/pluginRegistryHook'
 import { audioEngine } from '@/state/audioInstance'
 import { useSelectedTrackId } from '@/state/selection'
@@ -17,6 +21,7 @@ import { fxFloatUi, useFxFloatUi } from '@/state/fxFloatUi'
 import { AddPluginCard } from './AddPluginCard'
 import { historyUi } from '@/state/historyUi'
 import { InstrumentSection } from './InstrumentSection'
+import { MacroCard } from './MacroCard'
 import { PluginPlaceholder } from './PluginPlaceholder'
 import { EffectVisual } from './PluginVisuals'
 import { ParamSlider } from './ParamSlider'
@@ -264,6 +269,10 @@ function TrackEffects({
           ) : (
             <AddSynthCard track={track} />
           ))}
+        {/* Macros live on the Track (Track.macros); the master bus is not
+            a track (MASTER_BUS_ID has no entry in state.tracks), so its
+            rack has nowhere to store them — scoped to real tracks. */}
+        {!isMaster && <MacroCard track={track} />}
         {shown.map((instance) =>
           fxFloat.isFloating(instance.id) ? (
             // Undocked: a slim stand-in keeps the device's place in the
@@ -400,6 +409,28 @@ export function PluginSection({
   // In-flight slider previews, so the card's visualization tracks a drag
   // before the plugin/setParam op lands on release.
   const [previewParams, setPreviewParams] = useState<Record<string, number>>({})
+  // The owning track's macros, for the mapping dots and the map menu.
+  // Master-bus inserts have no Track to store macros on (MASTER_BUS_ID is
+  // not in state.tracks), so mapping is scoped to real tracks.
+  const onMaster = instance.trackId === MASTER_BUS_ID
+  const macros = useProjectSelector((s) => s.tracks[instance.trackId]?.macros)
+  // Right-click on a param row: the macro-mapping menu for that param.
+  const [macroMenu, setMacroMenu] = useState<{
+    param: string
+    def: ParamDef
+    x: number
+    y: number
+  } | null>(null)
+  /** The first macro slot this param is mapped to, or null. */
+  const macroIndexOf = (param: string): number | null => {
+    if (!macros) return null
+    for (let i = 0; i < macros.length; i++) {
+      if (macros[i].targets.some((t) => t.instanceId === instance.id && t.param === param)) {
+        return i
+      }
+    }
+    return null
+  }
   const status = pluginRegistry.status(instance.descriptor)
   // 'offline' plugins (VST3) are installed here but hosted out of process:
   // their params ARE editable, they just cannot be previewed live, so they
@@ -507,6 +538,16 @@ export function PluginSection({
           def={paramDef}
           value={instance.params[key] ?? paramDef.default}
           percent={isNormalizedParam(instance.descriptor, paramDef)}
+          mapped={macroIndexOf(key)}
+          onContextMenu={
+            onMaster
+              ? undefined
+              : (e) => {
+                  e.preventDefault()
+                  e.stopPropagation()
+                  setMacroMenu({ param: key, def: paramDef, x: e.clientX, y: e.clientY })
+                }
+          }
           // No live preview for out-of-process plugins: there are no nodes
           // in the graph to push a value into.
           onPreview={
@@ -534,7 +575,81 @@ export function PluginSection({
         />
       ))}
       {!collapsed && guiMode && <DockedEditor instance={instance} />}
+      {macroMenu && (
+        <MacroMapMenu
+          instance={instance}
+          param={macroMenu.param}
+          def={macroMenu.def}
+          x={macroMenu.x}
+          y={macroMenu.y}
+          onClose={() => setMacroMenu(null)}
+        />
+      )}
     </div>
+  )
+}
+
+/**
+ * The macro-mapping menu for one plugin parameter: map to / unmap from
+ * each of the track's four macros. Mapping captures the param's CURRENT
+ * full range as the target's [min, max] (v1 — editing a target's range
+ * means remapping; a range editor is future work).
+ */
+function MacroMapMenu({
+  instance,
+  param,
+  def,
+  x,
+  y,
+  onClose
+}: {
+  instance: PluginInstance
+  param: string
+  def: ParamDef
+  x: number
+  y: number
+  onClose: () => void
+}): React.JSX.Element {
+  useDismiss(true, onClose)
+  const macros = projectStore.state.tracks[instance.trackId]?.macros
+  return createPortal(
+    <div
+      className="menu-panel"
+      style={contextMenuStyle(x, y, 190, 132)}
+      onPointerDown={(e) => e.stopPropagation()}
+      onContextMenu={(e) => e.preventDefault()}
+    >
+      {Array.from({ length: MAX_MACROS }, (_, i) => {
+        const macro = macros?.[i] ?? defaultMacro(i)
+        const isMapped = macro.targets.some(
+          (t) => t.instanceId === instance.id && t.param === param
+        )
+        return (
+          <button
+            key={i}
+            className="menu-item"
+            onClick={() => {
+              onClose()
+              const rest = macro.targets.filter(
+                (t) => !(t.instanceId === instance.id && t.param === param)
+              )
+              const targets = isMapped
+                ? [...rest]
+                : [...rest, { instanceId: instance.id, param, min: def.min, max: def.max }]
+              projectStore.dispatch({
+                type: 'macro/configure',
+                trackId: instance.trackId,
+                index: i,
+                targets
+              })
+            }}
+          >
+            <span>{isMapped ? `Unmap from ${macro.name}` : `Map to ${macro.name}`}</span>
+          </button>
+        )
+      })}
+    </div>,
+    document.body
   )
 }
 

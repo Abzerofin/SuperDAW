@@ -35,6 +35,15 @@ import {
 import { SYNTH_DEFS, clampParam, type ParamDef } from '../model/effects'
 import { mergeSettings, sanitizeSettingsPatch } from '../model/projectSettings'
 import { paramDefsOf } from '../plugins/builtin'
+import {
+  MAX_MACROS,
+  canonicalMacros,
+  macrosEqual,
+  materializeMacros,
+  sanitizeMacroTarget,
+  type MacroTarget,
+  type TrackMacro
+} from '../model/macros'
 
 /** Insert notes, skipping ids that exist and notes whose clip is missing. */
 function withNotes(
@@ -747,6 +756,56 @@ export function apply(state: ProjectState, op: Operation): ProjectState {
       return { ...state, markers: { ...state.markers, [op.markerId]: next } }
     }
 
+    case 'macro/setValue': {
+      const track = state.tracks[op.trackId]
+      if (!track) return state
+      if (!Number.isInteger(op.index) || op.index < 0 || op.index >= MAX_MACROS) return state
+      if (!Number.isFinite(op.value)) return state
+      const value = clamp(op.value, 0, 1)
+      const macros = materializeMacros(track.macros, op.index)
+      macros[op.index] = { ...macros[op.index], value }
+      let next = withTrackMacros(state, op.trackId, canonicalMacros(macros))
+      // The carried DERIVED values (computed by buildMacroSetValue before
+      // dispatch) apply absolutely through the plugin/setParam path — same
+      // clamp, same unknown-param drop, and entries whose instance is gone
+      // skip individually, so re-delivery is idempotent and peers converge.
+      for (const entry of op.params) {
+        next = apply(next, {
+          type: 'plugin/setParam',
+          instanceId: entry.instanceId,
+          param: entry.param,
+          value: entry.value
+        })
+      }
+      return next
+    }
+
+    case 'macro/configure': {
+      const track = state.tracks[op.trackId]
+      if (!track) return state
+      if (!Number.isInteger(op.index) || op.index < 0 || op.index >= MAX_MACROS) return state
+      const macros = materializeMacros(track.macros, op.index)
+      let slot = macros[op.index]
+      if (typeof op.name === 'string' && op.name !== '') slot = { ...slot, name: op.name }
+      if (Array.isArray(op.targets)) {
+        // Each target re-earns its place (live instance ON this track,
+        // known param, finite range); invalid or duplicate ones drop
+        // individually so the rest of the retarget still lands.
+        const targets: MacroTarget[] = []
+        for (const raw of op.targets) {
+          const target = sanitizeMacroTarget(raw, op.trackId, state.plugins)
+          if (!target) continue
+          if (targets.some((t) => t.instanceId === target.instanceId && t.param === target.param)) {
+            continue
+          }
+          targets.push(target)
+        }
+        slot = { ...slot, targets }
+      }
+      macros[op.index] = slot
+      return withTrackMacros(state, op.trackId, canonicalMacros(macros))
+    }
+
     case 'track/rename':
       return updateTrack(state, op.trackId, (t) => ({ ...t, name: op.name }))
 
@@ -1251,6 +1310,23 @@ export function apply(state: ProjectState, op: Operation): ProjectState {
       }
     }
   }
+}
+
+/**
+ * Store a track's macros in canonical form: undefined removes the field
+ * entirely (never `macros: undefined`), so a fully-reset track is
+ * indistinguishable from one that never had macros. No-change = same state.
+ */
+function withTrackMacros(
+  state: ProjectState,
+  trackId: TrackId,
+  macros: readonly TrackMacro[] | undefined
+): ProjectState {
+  const track = state.tracks[trackId]
+  if (!track || macrosEqual(macros, track.macros)) return state
+  const { macros: _dropped, ...rest } = track
+  const updated: Track = macros ? { ...rest, macros } : rest
+  return { ...state, tracks: { ...state.tracks, [trackId]: updated } }
 }
 
 function updateTrack(

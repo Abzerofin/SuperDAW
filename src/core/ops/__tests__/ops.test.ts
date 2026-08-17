@@ -8,6 +8,7 @@ import type { Operation } from '../operations'
 import { apply } from '../apply'
 import { invert } from '../invert'
 import { buildDuplicateTrackOp } from '../duplicateTrack'
+import { buildMacroSetValue } from '../macros'
 import { ProjectStore } from '../../state/store'
 
 function track(id: string, name = id): Track {
@@ -1641,5 +1642,205 @@ suite('project/setTempo trim-point preservation', () => {
     expect(undone.clips['ca'].offset).toBe(100)
     expect(undone).toEqual(s)
   })
+})
+
+suite('track macros', () => {
+  /** baseState with macro 0 on t1 mapped to fxA's low (plain) and high (inverted). */
+  function macroState(): ProjectState {
+    return apply(baseState(), {
+      type: 'macro/configure',
+      trackId: 't1',
+      index: 0,
+      name: 'Sweep',
+      targets: [
+        { instanceId: 'fxA', param: 'low', min: -12, max: 12 },
+        { instanceId: 'fxA', param: 'high', min: 6, max: -6 } // min > max = inverted
+      ]
+    })
+  }
+
+  test('buildMacroSetValue maps 0..1 linearly onto [min,max], inverted when min > max', () => {
+    const s = macroState()
+    const mid = buildMacroSetValue(s, 't1', 0, 0.5)
+    expect(mid).not.toBeNull()
+    expect(mid!.params).toEqual([
+      { instanceId: 'fxA', param: 'low', value: 0 }, // -12 + 24·0.5
+      { instanceId: 'fxA', param: 'high', value: 0 } // 6 + (-12)·0.5
+    ])
+    const full = buildMacroSetValue(s, 't1', 0, 1)!
+    expect(full.params).toEqual([
+      { instanceId: 'fxA', param: 'low', value: 12 },
+      { instanceId: 'fxA', param: 'high', value: -6 }
+    ])
+    // The knob position itself clamps to 0..1.
+    expect(buildMacroSetValue(s, 't1', 0, 7)!.value).toBe(1)
+  })
+
+  test('builder clamps derived values through the descriptor defs like plugin/setParam', () => {
+    // A target range wider than the param's def range: the sweep saturates.
+    const s = apply(baseState(), {
+      type: 'macro/configure',
+      trackId: 't1',
+      index: 0,
+      targets: [{ instanceId: 'fxA', param: 'low', min: -100, max: 100 }]
+    })
+    expect(buildMacroSetValue(s, 't1', 0, 1)!.params[0].value).toBe(12) // eq3 low max
+    expect(buildMacroSetValue(s, 't1', 0, 0)!.params[0].value).toBe(-12)
+  })
+
+  test('the pad rule: plugin/remove leaves targets stale; build-time skips them; undo revives them', () => {
+    const s = macroState()
+    const removed = apply(s, { type: 'plugin/remove', instanceId: 'fxA' })
+    // No cascade: the mapping stays in the document…
+    expect(removed.tracks['t1'].macros![0].targets).toHaveLength(2)
+    // …but stops applying (dead targets skip; the op itself still exists).
+    const op = buildMacroSetValue(removed, 't1', 0, 1)
+    expect(op).not.toBeNull()
+    expect(op!.params).toEqual([])
+    // Undoing the remove brings the mapping back to life untouched.
+    const revived = apply(removed, invert(s, { type: 'plugin/remove', instanceId: 'fxA' })!)
+    expect(buildMacroSetValue(revived, 't1', 0, 1)!.params).toHaveLength(2)
+  })
+
+  test('builder returns null for unusable track/index/value', () => {
+    const s = macroState()
+    expect(buildMacroSetValue(s, 'ghost', 0, 0.5)).toBeNull()
+    expect(buildMacroSetValue(s, 't1', 4, 0.5)).toBeNull()
+    expect(buildMacroSetValue(s, 't1', -1, 0.5)).toBeNull()
+    expect(buildMacroSetValue(s, 't1', 0.5, 0.5)).toBeNull()
+    expect(buildMacroSetValue(s, 't1', 0, NaN)).toBeNull()
+  })
+
+  test('macro/setValue applies the knob AND the carried params absolutely, skipping dead entries', () => {
+    const s = macroState()
+    const applied = apply(s, {
+      type: 'macro/setValue',
+      trackId: 't1',
+      index: 0,
+      value: 0.75,
+      params: [
+        { instanceId: 'fxA', param: 'low', value: 6 },
+        { instanceId: 'ghost', param: 'low', value: 6 }, // instance gone — skipped
+        { instanceId: 'fxA', param: 'nope', value: 6 }, // unknown param — skipped
+        { instanceId: 'fxA', param: 'high', value: 99 } // clamped through defs
+      ]
+    })
+    expect(applied.tracks['t1'].macros![0].value).toBe(0.75)
+    expect(applied.plugins['fxA'].params.low).toBe(6)
+    expect(applied.plugins['fxA'].params.high).toBe(12)
+    expect('nope' in applied.plugins['fxA'].params).toBe(false)
+  })
+
+  test('re-delivery of both macro ops is a no-op (at-least-once safety)', () => {
+    const s = macroState()
+    const setOp = buildMacroSetValue(s, 't1', 0, 0.6)!
+    const once = apply(s, setOp)
+    expect(apply(once, setOp)).toBe(once)
+    const confOp: Operation = {
+      type: 'macro/configure',
+      trackId: 't1',
+      index: 1,
+      name: 'Space',
+      targets: [{ instanceId: 'fxA', param: 'mid', min: 0, max: 12 }]
+    }
+    const conf = apply(s, confOp)
+    expect(apply(conf, confOp)).toBe(conf)
+  })
+
+  test('macro/configure validates targets individually and dedupes', () => {
+    let s = baseState()
+    // An insert on ANOTHER track — mapping across tracks must drop.
+    s = apply(s, { type: 'plugin/add', instance: plugin('fxB', 't2', 'compressor') })
+    const applied = apply(s, {
+      type: 'macro/configure',
+      trackId: 't1',
+      index: 0,
+      targets: [
+        { instanceId: 'fxA', param: 'low', min: -12, max: 12 },
+        { instanceId: 'fxA', param: 'low', min: 0, max: 6 }, // duplicate — dropped
+        { instanceId: 'fxB', param: 'threshold', min: -60, max: 0 }, // other track — dropped
+        { instanceId: 'ghost', param: 'low', min: 0, max: 1 }, // no such instance — dropped
+        { instanceId: 'fxA', param: 'bogus', min: 0, max: 1 }, // unknown param — dropped
+        { instanceId: 'fxA', param: 'high', min: Infinity, max: 1 } // non-finite — dropped
+      ]
+    })
+    expect(applied.tracks['t1'].macros![0].targets).toEqual([
+      { instanceId: 'fxA', param: 'low', min: -12, max: 12 }
+    ])
+  })
+
+  test('out-of-range slots and missing tracks degrade to no-ops', () => {
+    const s = macroState()
+    expect(apply(s, { type: 'macro/setValue', trackId: 't1', index: 4, value: 1, params: [] })).toBe(s)
+    expect(apply(s, { type: 'macro/setValue', trackId: 'ghost', index: 0, value: 1, params: [] })).toBe(s)
+    expect(apply(s, { type: 'macro/configure', trackId: 't1', index: -1, name: 'x' })).toBe(s)
+  })
+
+  test('fully-reset macros leave the document canonical (field absent, like a track that never had any)', () => {
+    const s = macroState()
+    const cleared = apply(
+      apply(s, { type: 'macro/configure', trackId: 't1', index: 0, targets: [] }),
+      { type: 'macro/configure', trackId: 't1', index: 0, name: 'Macro 1' }
+    )
+    expect('macros' in cleared.tracks['t1']).toBe(false)
+    expect(cleared.tracks['t1']).toEqual(baseState().tracks['t1'])
+  })
+
+  // The same harness as the main invert suite, against macro-bearing state.
+  const macroRoundTrips: Array<{ label: string; before: () => ProjectState; op: Operation }> = [
+    {
+      label: 'macro/setValue (built, with targets)',
+      before: macroState,
+      op: buildMacroSetValue(macroState(), 't1', 0, 0.6)!
+    },
+    {
+      label: 'macro/setValue materializing a fresh slot',
+      before: macroState,
+      op: { type: 'macro/setValue', trackId: 't1', index: 1, value: 0.4, params: [] }
+    },
+    {
+      label: 'macro/setValue on a track with no macros at all',
+      before: baseState,
+      op: {
+        type: 'macro/setValue',
+        trackId: 't1',
+        index: 0,
+        value: 0.5,
+        params: [{ instanceId: 'fxA', param: 'low', value: 6 }]
+      }
+    },
+    {
+      label: 'macro/configure rename',
+      before: macroState,
+      op: { type: 'macro/configure', trackId: 't1', index: 0, name: 'Filter' }
+    },
+    {
+      label: 'macro/configure retarget to empty',
+      before: macroState,
+      op: { type: 'macro/configure', trackId: 't1', index: 0, targets: [] }
+    },
+    {
+      label: 'macro/configure materializing a later slot',
+      before: macroState,
+      op: {
+        type: 'macro/configure',
+        trackId: 't1',
+        index: 2,
+        name: 'Air',
+        targets: [{ instanceId: 'fxA', param: 'mid', min: 0, max: 12 }]
+      }
+    }
+  ]
+
+  for (const { label, before, op } of macroRoundTrips) {
+    test(`apply(invert) restores state for ${label}`, () => {
+      const start = before()
+      const inverse = invert(start, op)
+      expect(inverse).not.toBeNull()
+      const after = apply(start, op)
+      expect(after).not.toBe(start)
+      expect(apply(after, inverse!)).toEqual(start)
+    })
+  }
 })
 

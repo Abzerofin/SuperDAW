@@ -682,3 +682,131 @@ suite('project file format', () => {
     expect(() => parseProjectJson(text)).toThrow(/corrupted/)
   })
 })
+
+suite('track macros persistence', () => {
+  /** sampleState plus an eq3 insert on t1 and a mapped, renamed macro. */
+  function macroState() {
+    let state = sampleState()
+    state = apply(state, {
+      type: 'plugin/add',
+      instance: {
+        id: 'fx1',
+        trackId: 't1',
+        descriptor: {
+          format: 'builtin',
+          uid: 'superdaw.eq3',
+          name: 'EQ',
+          vendor: 'SuperDAW',
+          version: '1'
+        },
+        enabled: true,
+        rank: 1,
+        params: {},
+        stateBlob: null
+      }
+    })
+    state = apply(state, {
+      type: 'macro/configure',
+      trackId: 't1',
+      index: 0,
+      name: 'Sweep',
+      targets: [
+        { instanceId: 'fx1', param: 'low', min: -12, max: 12 },
+        { instanceId: 'fx1', param: 'high', min: 6, max: -6 } // inverted range
+      ]
+    })
+    state = apply(state, {
+      type: 'macro/setValue',
+      trackId: 't1',
+      index: 0,
+      value: 0.5,
+      params: [{ instanceId: 'fx1', param: 'low', value: 0 }]
+    })
+    return state
+  }
+
+  test('macros round-trip save -> load exactly; tracks without any stay bare', () => {
+    const state = macroState()
+    const parsed = parseProjectJson(serializeProjectJson(state, []))
+    expect(parsed.state.tracks['t1'].macros).toEqual(state.tracks['t1'].macros)
+    expect(parsed.state).toEqual(state)
+    // Absent means "no macros" and must not materialize as [] or null.
+    const bare = parseProjectJson(serializeProjectJson(sampleState(), []))
+    expect('macros' in bare.state.tracks['t1']).toBe(false)
+  })
+
+  test('doctored macros re-earn their place field by field on load', () => {
+    const state = macroState()
+    const doctored = {
+      ...state,
+      tracks: {
+        ...state.tracks,
+        t1: {
+          ...state.tracks['t1'],
+          macros: [
+            {
+              name: 42, // junk name -> default
+              value: 7, // clamps to 1
+              targets: [
+                { instanceId: 'fx1', param: 'low', min: -12, max: 12 }, // good
+                { instanceId: 'fx1', param: 'low', min: 0, max: 6 }, // duplicate — dropped
+                { instanceId: 'ghost', param: 'low', min: 0, max: 1 }, // dead — dropped
+                { instanceId: 'fx1', param: 'bogus', min: 0, max: 1 }, // unknown param — dropped
+                { instanceId: 'fx1', param: 'high', min: 'evil', max: 1 }, // junk range — dropped
+                'not even an object'
+              ]
+            },
+            'junk entry', // -> default slot
+            { name: 'Tail', value: 0.25, targets: 'junk' }, // junk targets -> []
+            { name: 'Macro 4', value: 0, targets: [] }, // trailing default — trimmed
+            { name: 'Fifth', value: 1, targets: [] } // beyond MAX_MACROS — dropped
+          ]
+        }
+      }
+    }
+    const parsed = parseProjectJson(
+      JSON.stringify({ formatVersion: 3, state: doctored, assets: [] })
+    )
+    expect(parsed.state.tracks['t1'].macros).toEqual([
+      {
+        name: 'Macro 1',
+        value: 1,
+        targets: [{ instanceId: 'fx1', param: 'low', min: -12, max: 12 }]
+      },
+      { name: 'Macro 2', value: 0, targets: [] },
+      { name: 'Tail', value: 0.25, targets: [] }
+    ])
+  })
+
+  test('junk macros fields collapse to absent, exactly like a pre-macro file', () => {
+    const state = macroState()
+    for (const junk of ['evil', 12, { not: 'an array' }, [], null]) {
+      const doctored = {
+        ...state,
+        tracks: { ...state.tracks, t1: { ...state.tracks['t1'], macros: junk } }
+      }
+      const parsed = parseProjectJson(
+        JSON.stringify({ formatVersion: 3, state: doctored, assets: [] })
+      )
+      expect('macros' in parsed.state.tracks['t1']).toBe(false)
+    }
+    // All-default slots trim to absent too (canonical form).
+    const allDefault = {
+      ...state,
+      tracks: {
+        ...state.tracks,
+        t1: {
+          ...state.tracks['t1'],
+          macros: [
+            { name: 'Macro 1', value: 0, targets: [] },
+            { name: 'Macro 2', value: 0, targets: [] }
+          ]
+        }
+      }
+    }
+    const parsed = parseProjectJson(
+      JSON.stringify({ formatVersion: 3, state: allDefault, assets: [] })
+    )
+    expect('macros' in parsed.state.tracks['t1']).toBe(false)
+  })
+})

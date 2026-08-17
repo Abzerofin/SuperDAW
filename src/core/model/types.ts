@@ -1,5 +1,6 @@
 import type { TimeSignature } from './timebase'
 import type { PluginDescriptor } from '../plugins/descriptor'
+import type { TrackMacro } from './macros'
 import { DEFAULT_PROJECT_SETTINGS, type ProjectSettings } from './projectSettings'
 
 export type TrackId = string
@@ -242,6 +243,16 @@ export interface Track {
    * reference (save GC, memory, collab transfer) like frozenAssetId.
    */
   readonly samplerAssetId?: string | null
+  /**
+   * Per-track MACRO CONTROLS (≤ 4): named knobs mapped onto insert-effect
+   * parameters (see core/model/macros). Optional and kept in CANONICAL
+   * form — absent = none, trailing default slots trimmed — so pre-macro
+   * documents need no migration and a fully-reset track round-trips to
+   * one that never had macros. Edited via `macro/setValue` and
+   * `macro/configure`; targets of deleted instances stay (the pad rule)
+   * and are skipped wherever macros are applied.
+   */
+  readonly macros?: readonly TrackMacro[]
   /**
    * Graph-editor positions of the In / Mix Out terminal nodes (absent =
    * automatic layout). Document data like PluginInstance.graphX, so a

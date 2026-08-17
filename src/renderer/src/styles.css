@@ -5884,3 +5884,60 @@ body.middle-panning * {
   font-size: 11px;
   color: var(--text-dim);
 }
+
+/* ---------- Track macros (Effects dock) ---------- */
+.fx-macros-card {
+  width: 176px;
+}
+
+.fx-macros {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 8px 4px;
+  padding: 8px 2px 4px;
+}
+
+.fx-macro {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  min-width: 0;
+  border-radius: 4px;
+}
+
+.fx-macro-name {
+  max-width: 100%;
+  font-size: 9px;
+  color: var(--text-dim);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  cursor: default;
+}
+
+.fx-macro-name-mapped {
+  color: var(--accent);
+}
+
+.fx-macro-name-input {
+  width: 68px;
+  font-size: 9px;
+  background: var(--bg-0);
+  color: var(--text);
+  border: 1px solid var(--accent);
+  border-radius: 3px;
+  padding: 0 3px;
+  outline: none;
+}
+
+/* Dot on a param slider's label marking it macro-mapped. */
+.fx-param-macro-dot {
+  display: inline-block;
+  width: 5px;
+  height: 5px;
+  border-radius: 50%;
+  background: var(--accent);
+  margin-right: 3px;
+  vertical-align: middle;
+  flex-shrink: 0;
+}

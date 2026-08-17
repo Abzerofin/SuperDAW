@@ -1,5 +1,6 @@
 import type { TimeSignature } from '../model/timebase'
 import type { ProjectSettings } from '../model/projectSettings'
+import type { MacroTarget } from '../model/macros'
 import type {
   ArrangementMarker,
   AutomationPoint,
@@ -417,6 +418,46 @@ export type Operation =
   | { type: 'file/move'; nodeId: FileNodeId; parentId: FileNodeId | null }
   /** Conversation: chat is append-only and NOT undoable (invert = null). */
   | { type: 'chat/post'; message: ChatMessage }
+  /**
+   * Turn a track's macro knob (core/model/macros). Like project/setTempo's
+   * `offsets`, the op carries its DERIVED effects: `params` lists the
+   * ABSOLUTE param values the sweep produces, computed before dispatch by
+   * `buildMacroSetValue` (each target mapped linearly onto its [min, max]
+   * and clamped through the descriptor's defs exactly as plugin/setParam
+   * clamps). The reducer applies the macro value AND the carried params
+   * absolutely, skipping entries whose instance/param no longer exists —
+   * so re-delivery is idempotent and peers converge whatever their local
+   * plugin availability. Invert = the same shape with the previous macro
+   * value and the previous param values. One knob gesture previews live
+   * through the engine and dispatches ONE of these on release.
+   */
+  | {
+      type: 'macro/setValue'
+      trackId: TrackId
+      /** Macro slot 0..3. */
+      index: number
+      /** Normalized knob position 0..1. */
+      value: number
+      params: Array<{ instanceId: PluginInstanceId; param: string; value: number }>
+    }
+  /**
+   * Rename and/or retarget one macro slot — absolute (the full new name /
+   * full new target list), so re-delivery is idempotent and the invert is
+   * simply the previous name/targets. Touching a slot materializes the
+   * macro array up to it (absent slots fill with defaults); the reducer
+   * validates each target (instance must live ON that track, param known
+   * to its defs, range finite — invalid ones drop individually) and then
+   * canonicalizes (see canonicalMacros), so fully-reset macros vanish
+   * from the document rather than lingering as defaults.
+   */
+  | {
+      type: 'macro/configure'
+      trackId: TrackId
+      /** Macro slot 0..3. */
+      index: number
+      name?: string
+      targets?: MacroTarget[]
+    }
   /** Plural so undoing a thread delete restores root + replies in one op. */
   | { type: 'comment/add'; comments: Comment[] }
   /** Deletes the comment and, for a thread root, all its replies. */

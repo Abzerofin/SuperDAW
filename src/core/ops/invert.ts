@@ -8,6 +8,7 @@ import {
   trackSubtreeOf
 } from '../model/types'
 import { SYNTH_DEFS } from '../model/effects'
+import { macroDefaultName } from '../model/macros'
 import {
   patchKeys,
   sanitizeSettingsPatch,
@@ -435,6 +436,44 @@ export function invert(state: ProjectState, op: Operation): Operation | null {
         ...(op.name !== undefined ? { name: existing.name } : {}),
         ...(op.ticks !== undefined ? { ticks: existing.ticks } : {}),
         ...(op.color !== undefined ? { color: existing.color } : {})
+      }
+    }
+
+    case 'macro/setValue': {
+      const track = state.tracks[op.trackId]
+      if (!track) return null
+      // The same op shape pointing back: the previous knob position and
+      // the previous ABSOLUTE value of every param the forward op carries
+      // (entries whose instance is already gone drop — nothing to restore).
+      const params = op.params
+        .filter((entry) => state.plugins[entry.instanceId])
+        .map((entry) => ({
+          instanceId: entry.instanceId,
+          param: entry.param,
+          value: state.plugins[entry.instanceId].params[entry.param] ?? 0
+        }))
+      return {
+        type: 'macro/setValue',
+        trackId: op.trackId,
+        index: op.index,
+        value: track.macros?.[op.index]?.value ?? 0,
+        params
+      }
+    }
+
+    case 'macro/configure': {
+      const track = state.tracks[op.trackId]
+      if (!track) return null
+      const slot = track.macros?.[op.index]
+      // Absolute restore of exactly the fields the forward op touches; a
+      // slot that never existed restores to its defaults, which the
+      // reducer's canonicalization then trims back to "absent".
+      return {
+        type: 'macro/configure',
+        trackId: op.trackId,
+        index: op.index,
+        ...(op.name !== undefined ? { name: slot?.name ?? macroDefaultName(op.index) } : {}),
+        ...(op.targets !== undefined ? { targets: [...(slot?.targets ?? [])] } : {})
       }
     }
 
