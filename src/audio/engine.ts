@@ -226,6 +226,11 @@ const TRACK_TAP_FRAMES = 256
  * (readMasterLoudness) never miss audio under normal painting cadence.
  */
 const LOUDNESS_TAP_FRAMES = 4096
+/**
+ * Master spectrum tap FFT length: ~11.7 Hz bins at 48 kHz, enough low-end
+ * detail for a log 20 Hz–20 kHz analyzer without smearing the picture.
+ */
+const SPECTRUM_TAP_FFT = 4096
 
 /**
  * One meter poll's worth of numbers, filled in place (see trackMeter).
@@ -286,6 +291,15 @@ export class AudioEngine {
     /** Context time of the previous read — the new-samples cursor. */
     lastSec: number
   } | null = null
+  /**
+   * Master spectrum tap feeding the transport bar's analyzer popover: one
+   * AnalyserNode on the same node the master meter taps (post master
+   * inserts, post masterVolume), riding the webAudio escape's UI-facing
+   * analyser surface like the loudness tap above. Built lazily on first
+   * ask, forgotten with the backend; null on backends without the escape,
+   * so the popover shows a note instead of a dead canvas.
+   */
+  private spectrumTap: AnalyserNode | null = null
   private chains = new Map<TrackId, TrackChain>()
   private fxNodes = new Map<PluginInstanceId, PluginNodes>()
   /**
@@ -551,6 +565,7 @@ export class AudioEngine {
     this.masterTap = null
     this.meterBuf = null
     this.loudnessTap = null
+    this.spectrumTap = null
     this.masterBusInput = null
     this.backend = null
     this.backendFactory = factory
@@ -1364,6 +1379,31 @@ export class AudioEngine {
       return tap.bufs[i].subarray(LOUDNESS_TAP_FRAMES - frames)
     })
     return { channels, sampleRate: ctx.sampleRate }
+  }
+
+  /**
+   * The master-bus AnalyserNode behind the transport bar's spectrum
+   * popover — post master inserts and masterVolume, the exact signal the
+   * master meter shows. Lazily created on first ask and never polled by
+   * the engine itself: the popover's own rAF loop reads it only while
+   * open, so a closed analyzer costs nothing. Asking never creates the
+   * backend; null when there is none yet or it cannot expose Web Audio
+   * nodes (native path), in which case the popover explains itself
+   * instead of drawing a dead canvas.
+   */
+  masterSpectrumAnalyser(): AnalyserNode | null {
+    const backend = this.backend
+    const escapes = backend?.webAudio
+    if (!backend || !escapes) return null
+    if (!this.spectrumTap) {
+      const analyser = escapes.ctx.createAnalyser()
+      analyser.fftSize = SPECTRUM_TAP_FFT
+      // Smoothed enough to read as a curve, quick enough to track the mix.
+      analyser.smoothingTimeConstant = 0.72
+      escapes.nodeOf(backend.masterNode()).connect(analyser)
+      this.spectrumTap = analyser
+    }
+    return this.spectrumTap
   }
 
   /**

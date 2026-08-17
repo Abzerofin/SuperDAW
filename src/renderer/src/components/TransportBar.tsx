@@ -33,6 +33,7 @@ import { changeTempo, tempoConformEntries } from '@/lib/tempoActions'
 import { useRecentProjects } from '@/state/recentProjects'
 import { APP_VERSION } from '@/lib/appVersion'
 import { CollabPanel } from './CollabPanel'
+import { SpectrumButton } from './SpectrumPopover'
 
 export function TransportBar(): React.JSX.Element {
   const panelState = usePanels()
@@ -67,6 +68,7 @@ export function TransportBar(): React.JSX.Element {
         <RulerSelect />
         <Meter />
         <LoudnessReadout />
+        <SpectrumButton />
       </div>
 
       <div className="transport-right">
