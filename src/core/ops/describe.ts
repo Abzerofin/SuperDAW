@@ -212,8 +212,26 @@ export function describe(state: ProjectState, op: Operation): string | null {
       const pad = state.pads[op.padId]
       return pad ? `Cleared pad ${pad.row + 1}·${pad.col + 1}` : null
     }
+    case 'take/activate': {
+      const chosen = op.clips.find((c) => c.active)
+      return chosen
+        ? `Chose take "${clipName(state, chosen.clipId)}"`
+        : 'Deactivated takes'
+    }
+    case 'take/setGroups': {
+      if (op.entries.length === 0) return null
+      const grouping = op.entries.filter((e) => e.groupId !== null)
+      if (grouping.length === 0) {
+        return op.entries.length === 1
+          ? `Ungrouped take "${clipName(state, op.entries[0].clipId)}"`
+          : `Ungrouped ${op.entries.length} takes`
+      }
+      return `Grouped ${grouping.length} clips as takes`
+    }
     case 'clip/create':
-      return `Added clip "${op.clip.name}" to "${trackName(state, op.clip.trackId)}"`
+      return op.takes && op.takes.length > 0
+        ? `Recorded take "${op.clip.name}" on "${trackName(state, op.clip.trackId)}"`
+        : `Added clip "${op.clip.name}" to "${trackName(state, op.clip.trackId)}"`
     case 'clip/delete':
       return `Deleted clip "${clipName(state, op.clipId)}"`
     case 'clip/move': {

@@ -297,6 +297,32 @@ suite('project file format', () => {
     expect('sourceClipId' in parsed.state.clips['c1']).toBe(false)
   })
 
+  test('take-group fields survive save -> load; junk collapses to an ordinary clip', () => {
+    const state = sampleState()
+    const active = { ...state.clips['c1'], id: 'ta', takeGroupId: 'tg1', takeActive: true }
+    const inactive = { ...state.clips['c1'], id: 'ti', takeGroupId: 'tg1' }
+    // Doctored: an active flag without membership, and junk-typed fields.
+    const junkActive = { ...state.clips['c1'], id: 'tj', takeActive: true }
+    const junkGroup = { ...state.clips['c1'], id: 'tk', takeGroupId: 7 as never, takeActive: 1 as never }
+    const saved = {
+      ...state,
+      clips: { ...state.clips, ta: active, ti: inactive, tj: junkActive, tk: junkGroup }
+    }
+    const parsed = parseProjectJson(
+      JSON.stringify({ formatVersion: 3, state: saved, assets: [] })
+    )
+    expect(parsed.state.clips['ta'].takeGroupId).toBe('tg1')
+    expect(parsed.state.clips['ta'].takeActive).toBe(true)
+    expect(parsed.state.clips['ti'].takeGroupId).toBe('tg1')
+    expect('takeActive' in parsed.state.clips['ti']).toBe(false)
+    // Junk collapses to absent — the canonical form the reducer keeps.
+    expect('takeActive' in parsed.state.clips['tj']).toBe(false)
+    expect('takeGroupId' in parsed.state.clips['tk']).toBe(false)
+    expect('takeActive' in parsed.state.clips['tk']).toBe(false)
+    // Plain clips round-trip identically (absent stays absent).
+    expect('takeGroupId' in parsed.state.clips['c1']).toBe(false)
+  })
+
   test('legacy boolean-loop clips migrate: enabled keeps its period, disabled becomes 0', () => {
     const state = sampleState()
     const withLoop = {

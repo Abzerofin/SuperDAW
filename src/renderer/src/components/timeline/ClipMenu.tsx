@@ -6,8 +6,16 @@ import {
   MIN_PITCH,
   MIN_STRETCH,
   clipPlaybackRate,
-  clipWarpFactor
+  clipWarpFactor,
+  takeGroupMembers
 } from '@core/model/types'
+import {
+  buildActivateTakeOp,
+  buildFlattenTakesOp,
+  buildGroupTakesOp,
+  buildUngroupTakesOp,
+  overlappingClips
+} from '@core/ops/takes'
 import { ticksPerSecond } from '@audio/scheduling'
 import { projectStore } from '@/state/projectStore'
 import { assetStore } from '@/state/audioInstance'
@@ -26,6 +34,7 @@ import {
 } from '@/lib/sliceActions'
 import { TRACK_COLORS } from '@/lib/colors'
 import { contextMenuStyle } from '@/lib/contextMenu'
+import { takeLanesUi, useTakeLanesUi } from '@/state/takeLanesUi'
 import { EditableValue } from '../controls/EditableValue'
 import { historyUi } from '@/state/historyUi'
 import { editorUi } from '@/state/editorUi'
@@ -58,6 +67,30 @@ export function ClipMenu({
   const isAudio = clip.assetId !== null
   const tempo = projectStore.state.tempo
   const collabState = useCollab()
+  const takeUi = useTakeLanesUi()
+  // Take-group actions: membership, or the candidates a "Group as takes"
+  // would gather (a same-track multi-selection, else the clips overlapping
+  // this one). All the ops are built by the pure core builders.
+  const takeMembers = clip.takeGroupId
+    ? takeGroupMembers(projectStore.state, clip.takeGroupId)
+    : []
+  const takeIndex = takeMembers.findIndex((m) => m.id === clip.id)
+  const groupCandidates = ((): string[] => {
+    if (clip.takeGroupId || clip.isPattern) return []
+    const selected = [...selection.selectedClipIds]
+    if (
+      selected.length > 1 &&
+      selected.includes(clip.id) &&
+      selected.every((id) => projectStore.state.clips[id]?.trackId === clip.trackId)
+    ) {
+      return selected
+    }
+    return [clip.id, ...overlappingClips(projectStore.state, clip).map((c) => c.id)]
+  })()
+  const dispatchAndClose = (op: ReturnType<typeof buildActivateTakeOp>): void => {
+    if (op) projectStore.dispatch(op)
+    onClose()
+  }
   // The asset can land while the menu is open — the Download item reacts.
   const asset = useSyncExternalStore(assetStore.subscribe, () =>
     clip.assetId ? assetStore.get(clip.assetId) : undefined
@@ -115,7 +148,7 @@ export function ClipMenu({
   return (
     <div
       className="clipmenu"
-      style={contextMenuStyle(x, y, 240, isAudio ? 560 : 320)}
+      style={contextMenuStyle(x, y, 240, isAudio ? 620 : 380)}
       onPointerDown={(e) => e.stopPropagation()}
       onContextMenu={(e) => e.preventDefault()}
     >
@@ -160,6 +193,70 @@ export function ClipMenu({
                 ? `Downloading… ${progress.total > 0 ? Math.round((progress.received / progress.total) * 100) : 0}%`
                 : 'Download audio'}
             </span>
+          </button>
+          <div className="menu-sep" />
+        </>
+      )}
+
+      {clip.takeGroupId && (
+        <>
+          <button
+            className="menu-item"
+            disabled={clip.takeActive === true}
+            title="Make this the take that sounds — the rest of its group goes silent"
+            onClick={() => dispatchAndClose(buildActivateTakeOp(projectStore.state, clip.id))}
+          >
+            <span>
+              Use this take{takeIndex >= 0 ? ` (T${takeIndex + 1}/${takeMembers.length})` : ''}
+            </span>
+          </button>
+          <button
+            className="menu-item"
+            title={
+              takeUi.isOpen(clip.trackId)
+                ? 'Collapse the take lanes back into the track row'
+                : 'Show each take of this track in its own lane — click a take to choose it'
+            }
+            onClick={() => {
+              takeLanesUi.toggle(clip.trackId)
+              onClose()
+            }}
+          >
+            <span>{takeUi.isOpen(clip.trackId) ? 'Hide take lanes' : 'Show take lanes'}</span>
+          </button>
+          <button
+            className="menu-item"
+            title="Keep this take, delete the group's other takes (one undo restores them all)"
+            onClick={() => dispatchAndClose(buildFlattenTakesOp(projectStore.state, clip.id))}
+          >
+            <span>Flatten takes (keep this take)</span>
+          </button>
+          <button
+            className="menu-item"
+            title="Dissolve the take group — every take becomes an ordinary clip and sounds again"
+            onClick={() =>
+              dispatchAndClose(
+                clip.takeGroupId
+                  ? buildUngroupTakesOp(projectStore.state, clip.takeGroupId)
+                  : null
+              )
+            }
+          >
+            <span>Ungroup takes</span>
+          </button>
+          <div className="menu-sep" />
+        </>
+      )}
+      {!clip.takeGroupId && groupCandidates.length > 1 && (
+        <>
+          <button
+            className="menu-item"
+            title="Treat these overlapping clips as alternative takes of one region — this clip stays audible, the others go silent until chosen"
+            onClick={() =>
+              dispatchAndClose(buildGroupTakesOp(projectStore.state, groupCandidates, clip.id))
+            }
+          >
+            <span>Group as takes ({groupCandidates.length})</span>
           </button>
           <div className="menu-sep" />
         </>

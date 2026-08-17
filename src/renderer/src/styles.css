@@ -5634,3 +5634,70 @@ body.middle-panning * {
 .pads-swatch-active {
   outline: 2px solid var(--text);
 }
+
+/* ---------- Take lanes (comping) ---------- */
+/* Additive block — appended for the take/comping feature. */
+
+/* The expanded take stack under a track row: one sub-lane per take. */
+.take-row {
+  background-color: var(--bg-0);
+  border-bottom: 1px solid var(--border);
+  position: relative;
+  background-image:
+    repeating-linear-gradient(to right, var(--grid-bar) 0 1px, transparent 1px var(--bar-px, 128px)),
+    repeating-linear-gradient(to right, var(--grid-beat) 0 1px, transparent 1px var(--beat-px, 32px));
+}
+
+.take-sublane {
+  position: relative;
+  border-bottom: 1px dashed var(--border);
+  background: rgba(0, 0, 0, 0.18);
+}
+
+.take-sublane:last-child {
+  border-bottom: none;
+}
+
+.take-sublane-label {
+  position: sticky;
+  left: 4px;
+  display: inline-block;
+  margin: 2px 0 0 4px;
+  font-size: 9px;
+  color: var(--text-dim);
+  pointer-events: none;
+  user-select: none;
+}
+
+/* An inactive (silent) take: present but visibly out of the mix. */
+.clip.clip-take-inactive {
+  opacity: 0.45;
+  filter: saturate(0.6);
+}
+
+.clip.clip-take-inactive.clip-selected {
+  opacity: 0.7;
+}
+
+/* The T2/3 membership badge — top-right, clear of the name row's left side
+ * and above the trim handle. A real button: clicking it folds/unfolds the
+ * track's take lanes. */
+.clip-take-badge {
+  position: absolute;
+  top: 2px;
+  right: 14px;
+  z-index: 2;
+  padding: 0 4px;
+  font-size: 9px;
+  line-height: 14px;
+  color: var(--text);
+  background: rgba(0, 0, 0, 0.45);
+  border: 1px solid var(--border);
+  border-radius: 3px;
+  cursor: pointer;
+}
+
+.clip-take-badge:hover {
+  border-color: var(--accent);
+  color: var(--accent);
+}

@@ -142,6 +142,24 @@ export interface Clip {
    */
   readonly warp?: boolean
   /**
+   * TAKE GROUP: clips on the SAME track sharing a `takeGroupId` are
+   * alternative takes of one region — recorded passes over the same bars,
+   * of which one is meant to sound (`takeActive`). The INTENT is exactly
+   * one active take per group; the reducer deliberately tolerates
+   * divergence (concurrent edits may briefly leave zero or several
+   * active) and playback resolves it deterministically: a group member
+   * plays iff `takeActive` is true, so several claimed actives all play
+   * until the next `take/activate` converges the group, and none silences
+   * it. Optional so every pre-existing document needs no migration
+   * (absent = not a take; null is tolerated as absent). Canonical form:
+   * `takeGroupId` present only as a non-empty string, `takeActive`
+   * present only when true — so ungrouping round-trips to a clip
+   * identical to one that was never grouped.
+   */
+  readonly takeGroupId?: string | null
+  /** The take of its group that actually sounds. See takeGroupId. */
+  readonly takeActive?: boolean
+  /**
    * This clip's length is NOT bound to measures — a drum solo or fill,
    * which runs for as long as the playing needs rather than a quarter,
    * half or whole measure like the lettered loops. Programming a step past
@@ -609,6 +627,47 @@ export function stampsOf(state: ProjectState, clipId: ClipId): Clip[] {
  */
 export function timelineClips(state: ProjectState): Clip[] {
   return Object.values(state.clips).filter((c) => !c.isPattern)
+}
+
+/**
+ * Whether take state lets this clip SOUND: not a take-group member, or the
+ * member marked active. Deliberately per-clip (no group scan): if
+ * concurrent edits leave several members claiming active, all of them play
+ * until the next take/activate converges the group — simple, convergent,
+ * and never silent by accident. Shared by the schedulers, song-end math
+ * and the UI so they can never disagree.
+ */
+export function isClipTakeAudible(clip: Clip): boolean {
+  return !clip.takeGroupId || clip.takeActive === true
+}
+
+/**
+ * The members of a take group, in a deterministic order (start, then id) —
+ * the order the take badges ("T2/3") and expanded take lanes present, so
+ * every collaborator numbers the takes identically.
+ */
+export function takeGroupMembers(state: ProjectState, groupId: string): Clip[] {
+  return Object.values(state.clips)
+    .filter((c) => c.takeGroupId === groupId)
+    .sort((a, b) => a.start - b.start || (a.id < b.id ? -1 : a.id > b.id ? 1 : 0))
+}
+
+/**
+ * A track's take groups, each with its members in badge order. The lane
+ * count of an expanded track is the largest group's size.
+ */
+export function takeGroupsOfTrack(state: ProjectState, trackId: TrackId): Map<string, Clip[]> {
+  const groups = new Map<string, Clip[]>()
+  for (const clip of Object.values(state.clips)) {
+    if (clip.trackId !== trackId || !clip.takeGroupId) continue
+    const list = groups.get(clip.takeGroupId)
+    if (list) list.push(clip)
+    else groups.set(clip.takeGroupId, [clip])
+  }
+  for (const list of groups.values()) {
+    list.sort((a, b) => a.start - b.start || (a.id < b.id ? -1 : a.id > b.id ? 1 : 0))
+  }
+  return groups
 }
 
 /**

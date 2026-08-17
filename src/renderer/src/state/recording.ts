@@ -3,6 +3,7 @@ import type { TrackId } from '@core/model/types'
 import { isNoteTrackKind } from '@core/model/types'
 import { newId } from '@core/model/ids'
 import { buildMidiTakeOp, type MidiTake } from '@core/ops/midiTake'
+import { takeCompForClip } from '@core/ops/takes'
 import { Recorder } from '@audio/recorder'
 import type { InputHandle } from '@audio/backendTypes'
 import { encodeWavPcm16Async } from '@audio/wav'
@@ -357,28 +358,34 @@ class RecordingStore {
           { id: newId('fil'), parentId: null, kind: 'audio', name: baseName, assetId: asset.id }
         ]
       })
+      // Comping — the SAME pure half the MIDI path runs (core/ops/takes):
+      // a take recorded over existing clips joins/forms the take group
+      // under it as the active take, deactivating the previous one, all
+      // inside the one clip/create so one undo restores everything.
+      const comped = takeCompForClip(projectStore.state, {
+        id: newId('clp'),
+        trackId: capture.trackId,
+        name: baseName,
+        start: startTicks,
+        duration: Math.max(
+          1,
+          Math.round(take.seconds * ticksPerSecond(projectStore.state.tempo))
+        ),
+        assetId: asset.id,
+        offset: 0,
+        color: null,
+        fadeIn: 0,
+        fadeOut: 0,
+        reverse: false,
+        pitch: 0,
+        stretch: 1,
+        loopLength: 0
+      })
       projectStore.dispatch({
         type: 'clip/create',
-        clip: {
-          id: newId('clp'),
-          trackId: capture.trackId,
-          name: baseName,
-          start: startTicks,
-          duration: Math.max(
-            1,
-            Math.round(take.seconds * ticksPerSecond(projectStore.state.tempo))
-          ),
-          assetId: asset.id,
-          offset: 0,
-          color: null,
-          fadeIn: 0,
-          fadeOut: 0,
-          reverse: false,
-          pitch: 0,
-          stretch: 1,
-          loopLength: 0
-        },
-        notes: []
+        clip: comped.clip,
+        notes: [],
+        ...(comped.takes.length > 0 ? { takes: comped.takes } : {})
       })
     }
   }

@@ -5,6 +5,7 @@ import { effectiveFades, ticksPerSecond } from '@audio/scheduling'
 import type { ProjectAsset } from '@audio/assets'
 import { assetStore } from '@/state/audioInstance'
 import { projectStore } from '@/state/projectStore'
+import { takeLanesUi } from '@/state/takeLanesUi'
 import { capturePointer } from '@/lib/pointer'
 import { useTheme } from '@/state/theme'
 
@@ -35,6 +36,17 @@ interface Props {
   notes: Note[]
   /** Fade handles are shown and draggable (audio clip on an unfrozen track). */
   fadesEditable: boolean
+  /** Take-group badge text ("T2/3"); null for ordinary clips. */
+  takeBadge?: string | null
+  /** An inactive (silent) take — drawn dimmed. */
+  takeInactive?: boolean
+  /**
+   * Expanded take lanes: extra px below the track lane's top where this
+   * clip's sub-lane starts (0 = the main lane), and the sub-lane's height
+   * (0 = use laneHeight). Scalars so React.memo stays effective.
+   */
+  subTop?: number
+  subHeight?: number
   // The callbacks receive the clip id so ONE stable handler serves every
   // clip — per-clip lambdas would defeat the React.memo below for the
   // whole project on every timeline render.
@@ -64,6 +76,10 @@ export const ClipView = memo(function ClipView({
   commentCount,
   notes,
   fadesEditable,
+  takeBadge = null,
+  takeInactive = false,
+  subTop = 0,
+  subHeight = 0,
   onPointerDown,
   onOpenComments,
   onContextMenu,
@@ -84,7 +100,9 @@ export const ClipView = memo(function ClipView({
   )
 
   const width = Math.max(4, duration * pxPerTick - 1)
-  const height = laneHeight - 8
+  // In an expanded take stack the clip renders inside its own sub-lane.
+  const rowHeight = subHeight > 0 ? subHeight : laneHeight
+  const height = rowHeight - 8
 
 
   // Fade handle drag: local preview, ONE clip/setFades op on release.
@@ -201,10 +219,10 @@ export const ClipView = memo(function ClipView({
     <div
       className={`clip ${selected ? 'clip-selected' : ''} ${preview ? 'clip-dragging' : ''} ${
         dimmed ? 'clip-dimmed' : ''
-      }`}
+      } ${takeInactive ? 'clip-take-inactive' : ''}`}
       style={{
         left: start * pxPerTick,
-        top: (laneTops[lane] ?? 0) + 4,
+        top: (laneTops[lane] ?? 0) + subTop + 4,
         width,
         height,
         '--clip-color': color
@@ -300,6 +318,23 @@ export const ClipView = memo(function ClipView({
             onPointerUp={endFadeDrag}
           />
         </>
+      )}
+      {takeBadge && (
+        <button
+          className="clip-take-badge mono"
+          title={
+            takeInactive
+              ? `Inactive take ${takeBadge} (silent) — click to expand/collapse the take lanes`
+              : `Active take ${takeBadge} — click to expand/collapse the take lanes`
+          }
+          onPointerDown={(e) => e.stopPropagation()}
+          onClick={(e) => {
+            e.stopPropagation()
+            takeLanesUi.toggle(clip.trackId)
+          }}
+        >
+          {takeBadge}
+        </button>
       )}
       <div className="clip-name">
         {clip.name}

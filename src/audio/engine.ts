@@ -182,7 +182,11 @@ function clipAudiblySame(a: Clip, b: Clip): boolean {
     a.stretch === b.stretch &&
     a.loopLength === b.loopLength &&
     a.fadeIn === b.fadeIn &&
-    a.fadeOut === b.fadeOut
+    a.fadeOut === b.fadeOut &&
+    // Take state decides whether the clip sounds at all — switching the
+    // active take mid-playback must re-queue the track.
+    (a.takeGroupId ?? null) === (b.takeGroupId ?? null) &&
+    (a.takeActive === true) === (b.takeActive === true)
   )
 }
 
