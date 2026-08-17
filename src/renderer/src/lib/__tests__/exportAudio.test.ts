@@ -1,11 +1,20 @@
 import { describe as suite, afterEach, expect, test } from 'vitest'
-import type { ProjectState, Track, TrackId } from '@core/model/types'
+import { unzipSync } from 'fflate'
+import type { ProjectState, Track, TrackId, TrackKind } from '@core/model/types'
 import { createEmptyProject } from '@core/model/types'
 import { apply } from '@core/ops/apply'
 import { builtinEffectDescriptor } from '@core/plugins/builtin'
 import type { PluginDescriptor } from '@core/plugins/descriptor'
 import { pluginRegistry } from '@audio/pluginRegistry'
-import { encodeMp3, vst3BypassedTrackNames, vst3BypassWarning } from '../exportAudio'
+import {
+  encodeMp3,
+  packStemsZip,
+  sanitizeStemFileName,
+  stemTrackIds,
+  uniqueStemFileNames,
+  vst3BypassedTrackNames,
+  vst3BypassWarning
+} from '../exportAudio'
 
 /**
  * The encoder is third-party; these pin OUR wrapping of it — block
@@ -201,5 +210,152 @@ suite('vst3BypassedTrackNames', () => {
     let s = withTrack(createEmptyProject('P'), 't1', 'Lead')
     s = withPlugin(s, 'fx1', 't1', VST)
     expect(vst3BypassedTrackNames(s)).toEqual({ freezable: [], graph: [] })
+  })
+})
+
+/**
+ * The stem set is pure over state: which tracks earn a file when "Export
+ * stems…" runs. Rendering itself (OfflineAudioContext) is untestable here;
+ * these pin the selection rule the render loop iterates.
+ */
+suite('stemTrackIds', () => {
+  function track(id: string, overrides: Partial<Track> = {}): Track {
+    return {
+      id,
+      kind: 'audio' as TrackKind,
+      name: id,
+      color: '#5b8def',
+      muted: false,
+      soloed: false,
+      parentId: null,
+      frozenAssetId: null,
+      volume: 1,
+      pan: 0,
+      synth: {},
+      ...overrides
+    }
+  }
+
+  function project(...tracks: Track[]): ProjectState {
+    let s = createEmptyProject('P')
+    for (const t of tracks) {
+      s = apply(s, {
+        type: 'track/create',
+        track: t,
+        index: 99,
+        clips: [],
+        automation: [],
+        notes: [],
+        plugins: []
+      })
+    }
+    return s
+  }
+
+  test('every audible non-folder track, in trackOrder', () => {
+    const s = project(track('drums'), track('bass'), track('keys', { kind: 'midi' }))
+    expect(stemTrackIds(s)).toEqual(['drums', 'bass', 'keys'])
+  })
+
+  test('folder buses are excluded — their audio is the sum of their children', () => {
+    const s = project(track('bus', { kind: 'folder' }), track('kick', { parentId: 'bus' }))
+    expect(stemTrackIds(s)).toEqual(['kick'])
+  })
+
+  test('muted tracks are excluded', () => {
+    const s = project(track('drums'), track('bass', { muted: true }))
+    expect(stemTrackIds(s)).toEqual(['drums'])
+  })
+
+  test('an active solo elsewhere silences the rest of the set', () => {
+    const s = project(track('drums', { soloed: true }), track('bass'))
+    expect(stemTrackIds(s)).toEqual(['drums'])
+  })
+
+  test('children of a muted folder are excluded — the bus fader is closed', () => {
+    const s = project(
+      track('bus', { kind: 'folder', muted: true }),
+      track('kick', { parentId: 'bus' }),
+      track('bass')
+    )
+    expect(stemTrackIds(s)).toEqual(['bass'])
+  })
+})
+
+suite('sanitizeStemFileName', () => {
+  test('passes ordinary names through untouched', () => {
+    expect(sanitizeStemFileName('Drums')).toBe('Drums')
+    expect(sanitizeStemFileName('Lead Synth 2')).toBe('Lead Synth 2')
+  })
+
+  test('collapses path separators and Windows-reserved punctuation', () => {
+    expect(sanitizeStemFileName('a/b\\c:d*e?f"g<h>i|j')).toBe('a_b_c_d_e_f_g_h_i_j')
+  })
+
+  test('strips control characters', () => {
+    expect(sanitizeStemFileName('Dr\tums\n')).toBe('Dr_ums')
+  })
+
+  test('trims trailing dots and spaces (Windows drops them silently)', () => {
+    expect(sanitizeStemFileName('Drums... ')).toBe('Drums')
+  })
+
+  test('empty and all-junk names fall back to Track', () => {
+    expect(sanitizeStemFileName('')).toBe('Track')
+    expect(sanitizeStemFileName('   ')).toBe('Track')
+    expect(sanitizeStemFileName('...')).toBe('Track')
+  })
+
+  test('reserved device names are defused', () => {
+    expect(sanitizeStemFileName('CON')).toBe('_CON')
+    expect(sanitizeStemFileName('nul')).toBe('_nul')
+    expect(sanitizeStemFileName('COM3')).toBe('_COM3')
+    expect(sanitizeStemFileName('Console')).toBe('Console') // only exact matches
+  })
+
+  test('keeps non-ASCII letters — only hostile characters are replaced', () => {
+    expect(sanitizeStemFileName('Пиано / Ambienté')).toBe('Пиано _ Ambienté')
+  })
+})
+
+suite('uniqueStemFileNames', () => {
+  test('unique names pass through unchanged', () => {
+    expect(uniqueStemFileNames(['Drums', 'Bass'])).toEqual(['Drums', 'Bass'])
+  })
+
+  test('collisions count up: Drums, Drums 2, Drums 3', () => {
+    expect(uniqueStemFileNames(['Drums', 'Drums', 'Drums'])).toEqual([
+      'Drums',
+      'Drums 2',
+      'Drums 3'
+    ])
+  })
+
+  test('case-insensitive — the target filesystems are', () => {
+    expect(uniqueStemFileNames(['Drums', 'DRUMS'])).toEqual(['Drums', 'DRUMS 2'])
+  })
+
+  test('a suffixed name colliding with a real name keeps counting', () => {
+    expect(uniqueStemFileNames(['Drums', 'Drums', 'Drums 2'])).toEqual([
+      'Drums',
+      'Drums 2',
+      'Drums 2 2'
+    ])
+  })
+})
+
+suite('packStemsZip', () => {
+  test('round-trips every stem byte-exactly (browser fallback packaging)', async () => {
+    const files = {
+      'Drums.wav': new Uint8Array([1, 2, 3, 4]),
+      'Bass.wav': new Uint8Array([5, 6, 7])
+    }
+    const zipped = await packStemsZip(files)
+    // A ZIP starts with the local-file-header signature PK\x03\x04.
+    expect([...zipped.slice(0, 2)]).toEqual([0x50, 0x4b])
+    const unzipped = unzipSync(zipped)
+    expect(Object.keys(unzipped).sort()).toEqual(['Bass.wav', 'Drums.wav'])
+    expect([...unzipped['Drums.wav']]).toEqual([1, 2, 3, 4])
+    expect([...unzipped['Bass.wav']]).toEqual([5, 6, 7])
   })
 })

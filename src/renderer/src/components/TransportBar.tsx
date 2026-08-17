@@ -19,7 +19,7 @@ import {
   openRecentProject,
   saveProject
 } from '@/lib/projectFile'
-import { exportMixdown } from '@/lib/exportAudio'
+import { exportMixdown, exportStems } from '@/lib/exportAudio'
 import { newProjectFromTemplate, saveProjectTemplate } from '@/lib/templateActions'
 import { appShell } from '@/state/appShell'
 import { settingsUi } from '@/state/settingsUi'
@@ -393,6 +393,7 @@ function FileMenu(): React.JSX.Element {
             null,
             () => void exportMixdown()
           )}
+          {item('Export stems…', null, () => void exportStems())}
           <div className="menu-sep" />
           {item('Close project', null, () => closeProject())}
           {item('Return to Home', null, () => appShell.goHome())}

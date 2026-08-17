@@ -16,7 +16,7 @@ import {
   openProject,
   saveProject
 } from '@/lib/projectFile'
-import { exportMixdown } from '@/lib/exportAudio'
+import { exportMixdown, exportStems } from '@/lib/exportAudio'
 import { newProjectFromTemplate, saveProjectTemplate } from '@/lib/templateActions'
 import { createTrack, loadTrackPreset } from '@/lib/trackActions'
 
@@ -91,6 +91,11 @@ export function CommandPalette(): React.JSX.Element | null {
       `Export ${state.settings.exportFormat.toUpperCase()}…`,
       () => void exportMixdown(),
       state.settings.exportFormat === 'wav' ? `${state.settings.exportBitDepth}-bit` : '192 kbps'
+    )
+    cmd(
+      'Export stems…',
+      () => void exportStems(),
+      `Every audible track to its own ${state.settings.exportFormat.toUpperCase()}`
     )
     cmd('Close project', () => closeProject())
     cmd('Return to Home', () => appShell.goHome())

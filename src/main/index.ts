@@ -146,6 +146,33 @@ function registerIpc(): void {
       return result.filePath
     }
   )
+
+  // Multi-file export (stems): ONE directory picker for the whole set,
+  // then one dialog-free write per file into it. Split into two handlers
+  // so a cancelled picker aborts before any rendering happens.
+  ipcMain.handle('file:pick-export-directory', async (event): Promise<string | null> => {
+    const win = BrowserWindow.fromWebContents(event.sender)
+    if (!win) return null
+    const result = await dialog.showOpenDialog(win, {
+      properties: ['openDirectory', 'createDirectory']
+    })
+    if (result.canceled || result.filePaths.length === 0) return null
+    return result.filePaths[0]
+  })
+
+  ipcMain.handle(
+    'file:export-into',
+    async (
+      _event,
+      args: { directory: string; name: string; data: Uint8Array }
+    ): Promise<string> => {
+      // The renderer sends sanitized leaf names; basename() enforces it, so
+      // even a hostile name cannot traverse out of the picked directory.
+      const filePath = join(args.directory, basename(args.name))
+      await writeFileAtomic(filePath, asBuffer(args.data))
+      return filePath
+    }
+  )
 }
 
 /** Renderer-reported unsaved-changes flag, per window. */

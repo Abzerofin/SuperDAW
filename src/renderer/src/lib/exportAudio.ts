@@ -1,4 +1,5 @@
 import { Mp3Encoder } from '@breezystack/lamejs'
+import { zip } from 'fflate'
 import type { ProjectState, Route, TrackId } from '@core/model/types'
 import { isTrackEffectivelyAudible, pluginsOfTrack, routesOfTrack } from '@core/model/types'
 import type { ProjectExportFormat } from '@core/model/projectSettings'
@@ -63,6 +64,17 @@ export function encodeMp3(channels: Float32Array[], sampleRate: number): Uint8Ar
   return out
 }
 
+/** Browser-build save: a plain download through a temporary anchor. */
+function downloadBytes(data: Uint8Array, name: string): void {
+  const url = URL.createObjectURL(new Blob([data.buffer as ArrayBuffer]))
+  const anchor = document.createElement('a')
+  anchor.href = url
+  anchor.download = name
+  anchor.click()
+  // Revoking immediately can race the download starting; see projectFile.
+  setTimeout(() => URL.revokeObjectURL(url), 60_000)
+}
+
 /** True when the bytes reached disk (Electron reports cancelled dialogs). */
 async function saveBytes(data: Uint8Array, name: string, ext: ExportFormat): Promise<boolean> {
   const bridge = window.superdaw
@@ -75,13 +87,7 @@ async function saveBytes(data: Uint8Array, name: string, ext: ExportFormat): Pro
     })
     return path !== null
   }
-  const url = URL.createObjectURL(new Blob([data.buffer as ArrayBuffer]))
-  const anchor = document.createElement('a')
-  anchor.href = url
-  anchor.download = name
-  anchor.click()
-  // Revoking immediately can race the download starting; see projectFile.
-  setTimeout(() => URL.revokeObjectURL(url), 60_000)
+  downloadBytes(data, name)
   return true
 }
 
@@ -187,7 +193,11 @@ export function vst3BypassedTrackNames(state: ProjectState): Vst3BypassReport {
 
 /** The one-shot warning folded into the export notice, or null. */
 export function vst3BypassWarning(state: ProjectState): string | null {
-  const { freezable, graph } = vst3BypassedTrackNames(state)
+  return formatVst3BypassWarning(vst3BypassedTrackNames(state))
+}
+
+/** Render a bypass report (possibly a union over several) as notice text. */
+export function formatVst3BypassWarning({ freezable, graph }: Vst3BypassReport): string | null {
   const parts: string[] = []
   if (freezable.length > 0) {
     parts.push(`VST3 inserts bypassed on ${freezable.join(', ')} (freeze to include them)`)
@@ -255,5 +265,161 @@ export async function exportTrackAudio(trackId: TrackId, format: ExportFormat): 
     const warning = vst3BypassWarning(soloTrackState(state, trackId))
     if (warning) statusNotice.show(`Exported ${base}.${format} — ${warning}`)
   }
+  return true
+}
+
+// ----- Stems: every track to its own file in one action -----
+
+/**
+ * The stem set: every non-folder track that actually sounds in the current
+ * mix. Folder buses are excluded — their audio is exactly the sum of their
+ * children, so exporting them too would double every child.
+ */
+export function stemTrackIds(state: ProjectState): TrackId[] {
+  return state.trackOrder.filter((id) => {
+    const track = state.tracks[id]
+    return track !== undefined && track.kind !== 'folder' && isTrackEffectivelyAudible(state, id)
+  })
+}
+
+/** Windows refuses these as bare file names regardless of extension. */
+const RESERVED_FILE_NAMES = /^(con|prn|aux|nul|com\d|lpt\d)$/i
+
+/**
+ * A track name as a safe cross-platform file name: path separators,
+ * Windows-reserved punctuation and control characters collapse to '_',
+ * trailing dots/spaces are trimmed (Windows strips them silently), and
+ * reserved device names (CON, NUL, …) get an underscore prefix. Empty in,
+ * 'Track' out — same fallback the bypass warning uses.
+ */
+export function sanitizeStemFileName(name: string): string {
+  const cleaned = name
+    .trim()
+    .replace(/[\\/:*?"<>|]/g, '_')
+    // eslint-disable-next-line no-control-regex
+    .replace(/[\u0000-\u001f]/g, '_')
+    .replace(/[. ]+$/, '')
+  if (cleaned.length === 0) return 'Track'
+  return RESERVED_FILE_NAMES.test(cleaned) ? `_${cleaned}` : cleaned
+}
+
+/**
+ * De-duplicate sanitized stem names in order: the second 'Drums' becomes
+ * 'Drums 2', the third 'Drums 3', … Case-insensitive because the target
+ * filesystems (Windows, macOS) are.
+ */
+export function uniqueStemFileNames(names: readonly string[]): string[] {
+  const used = new Set<string>()
+  return names.map((name) => {
+    let candidate = name
+    for (let n = 2; used.has(candidate.toLowerCase()); n++) candidate = `${name} ${n}`
+    used.add(candidate.toLowerCase())
+    return candidate
+  })
+}
+
+/**
+ * Pack encoded stems into one ZIP (the browser fallback for the missing
+ * directory picker). Level 0 and worker-backed for the same reasons as
+ * project saves: speed, and no main-thread CRC pass over big WAVs.
+ */
+export function packStemsZip(files: Record<string, Uint8Array>): Promise<Uint8Array> {
+  return new Promise((resolve, reject) => {
+    zip(files, { level: 0 }, (error, data) => {
+      if (error) reject(error)
+      else resolve(data)
+    })
+  })
+}
+
+/** True when every sample of every channel is exactly zero. */
+function isSilent(channels: Float32Array[]): boolean {
+  for (const channel of channels) {
+    for (let i = 0; i < channel.length; i++) {
+      if (channel[i] !== 0) return false
+    }
+  }
+  return true
+}
+
+/**
+ * Bounce every audible non-folder track to its own audio file in one
+ * action. Each stem uses renderTrackChannels semantics — the project
+ * soloed to that track, so folder buses, automation, masterVolume and the
+ * whole master path apply, exactly like the single-track export ("the
+ * track's contribution to the master"). Tracks that render null or pure
+ * silence are skipped.
+ *
+ * Electron: ONE directory picker up front, then `<track>.<ext>` files
+ * written into it. Browser: a single `<project> stems.zip` download.
+ * Renders run sequentially — each stem is a full offline mixdown, and
+ * parallel OfflineAudioContexts would only fight over the same cores.
+ *
+ * False = nothing to export. A cancelled picker aborts silently (true),
+ * matching the single-file dialogs.
+ */
+export async function exportStems(): Promise<boolean> {
+  const state = projectStore.state
+  const { exportFormat, exportBitDepth } = state.settings
+  const trackIds = stemTrackIds(state)
+  if (trackIds.length === 0) {
+    statusNotice.show('No audible tracks to export as stems')
+    return false
+  }
+
+  // The picker comes FIRST so cancelling costs nothing (no renders yet).
+  const bridge = window.superdaw
+  let directory: string | null = null
+  if (bridge) {
+    directory = await bridge.pickExportDirectory()
+    if (directory === null) return true
+  }
+
+  const names = uniqueStemFileNames(
+    trackIds.map((id) => sanitizeStemFileName(state.tracks[id]?.name ?? ''))
+  )
+  const sampleRate = audioEngine.decodeSampleRate()
+  const zipFiles: Record<string, Uint8Array> = {}
+  // Union of every rendered state's bypass report: ONE warning at the end
+  // names each affected track once, however many stems tripped it.
+  const bypass: Vst3BypassReport = { freezable: [], graph: [] }
+  const mergeUnique = (into: string[], add: string[]): void => {
+    for (const name of add) if (!into.includes(name)) into.push(name)
+  }
+  let exported = 0
+  for (let i = 0; i < trackIds.length; i++) {
+    const fileName = `${names[i]}.${exportFormat}`
+    statusNotice.show(`Exporting stem ${i + 1}/${trackIds.length}: ${fileName}…`)
+    // Sequential on purpose — see the doc comment.
+    const mixed = await renderTrackChannels(state, trackIds[i], assetStore, sampleRate)
+    if (!mixed || isSilent(mixed.channels)) continue
+    const report = vst3BypassedTrackNames(soloTrackState(state, trackIds[i]))
+    mergeUnique(bypass.freezable, report.freezable)
+    mergeUnique(bypass.graph, report.graph)
+    const data = await encode(mixed.channels, mixed.sampleRate, exportFormat, exportBitDepth)
+    if (bridge && directory !== null) {
+      await bridge.exportFileInto({ directory, name: fileName, data })
+    } else {
+      zipFiles[fileName] = data
+    }
+    exported++
+  }
+
+  if (exported === 0) {
+    statusNotice.show('No stems exported — every audible track rendered silence')
+    return false
+  }
+
+  let destination: string
+  if (bridge && directory !== null) {
+    destination = directory
+  } else {
+    destination = `${state.name.trim() || 'Untitled'} stems.zip`
+    downloadBytes(await packStemsZip(zipFiles), destination)
+  }
+  const warning = formatVst3BypassWarning(bypass)
+  statusNotice.show(
+    `Exported ${exported} stem${exported === 1 ? '' : 's'} to ${destination}${warning ? ` — ${warning}` : ''}`
+  )
   return true
 }

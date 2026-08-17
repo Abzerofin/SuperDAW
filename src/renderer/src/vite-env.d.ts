@@ -44,6 +44,8 @@ interface Window {
       filterName: string
       ext: string
     }): Promise<string | null>
+    pickExportDirectory(): Promise<string | null>
+    exportFileInto(args: { directory: string; name: string; data: Uint8Array }): Promise<string>
     setDirty(dirty: boolean): void
     onSaveRequest(handler: () => Promise<boolean>): () => void
     recoveryWriteDoc(args: { json: string; name: string; path: string | null }): Promise<void>
