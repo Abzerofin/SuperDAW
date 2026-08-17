@@ -375,6 +375,14 @@
   box-shadow: inset 0 1px 3px var(--a-shadow);
 }
 
+/* The strip meter is a recessed window like the fader slot. Well and
+ * shutter must stay the SAME colour — the shutter is what hides the
+ * gradient above the current level. */
+:root[data-shell='analog'] :is(.strip-meter-well, .strip-clip) {
+  border-radius: 2px;
+  box-shadow: inset 0 1px 3px var(--a-shadow);
+}
+
 /* A cap you could actually grip, with the centre line printed on it. */
 :root[data-shell='analog'] .fader-thumb {
   height: 12px;

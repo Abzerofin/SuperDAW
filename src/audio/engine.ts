@@ -225,6 +225,30 @@ const TRACK_TAP_FRAMES = 256
  */
 const LOUDNESS_TAP_FRAMES = 4096
 
+/**
+ * One meter poll's worth of numbers, filled in place (see trackMeter).
+ * `peak` is the largest absolute sample in the tap window and may exceed
+ * 1 on an over; `rms` is the window's root-mean-square (always ≤ peak).
+ */
+export interface MeterReading {
+  peak: number
+  rms: number
+}
+
+/** Peak and RMS of a tap window in one pass — no allocation, no clamp. */
+function scanMeter(buf: Float32Array, out: MeterReading): void {
+  let peak = 0
+  let sum = 0
+  for (let i = 0; i < buf.length; i++) {
+    const v = buf[i]
+    const a = v < 0 ? -v : v
+    if (a > peak) peak = a
+    sum += v * v
+  }
+  out.peak = peak
+  out.rms = buf.length > 0 ? Math.sqrt(sum / buf.length) : 0
+}
+
 export class AudioEngine {
   /**
    * The seam (docs/NATIVE_AUDIO_BACKEND.md §3): every node, voice, param
@@ -1316,6 +1340,39 @@ export class AudioEngine {
       return tap.bufs[i].subarray(LOUDNESS_TAP_FRAMES - frames)
     })
     return { channels, sampleRate: ctx.sampleRate }
+  }
+
+  /**
+   * Peak + RMS for one track's tap window, into a caller-owned reading so
+   * a meter polling every frame allocates nothing. Both values come from
+   * the SAME single pass over the same buffer trackLevel scans, and the
+   * peak is deliberately UNCLAMPED: the mixer's clip indicators latch on
+   * `peak > 1` (a true inter-window over of 0 dBFS), which a 0..1 clamp
+   * would erase. Zeroes when the engine is idle or the track has no chain.
+   */
+  trackMeter(trackId: TrackId, out: MeterReading): void {
+    const chain = this.chains.get(trackId)
+    if (!chain || !this.backend || !this.backend.readTap(chain.tap, chain.meterBuf)) {
+      out.peak = 0
+      out.rms = 0
+      return
+    }
+    scanMeter(chain.meterBuf, out)
+  }
+
+  /** Master-bus peak + RMS — same contract as trackMeter. */
+  masterMeter(out: MeterReading): void {
+    if (
+      this.masterTap === null ||
+      !this.meterBuf ||
+      !this.backend ||
+      !this.backend.readTap(this.masterTap, this.meterBuf)
+    ) {
+      out.peak = 0
+      out.rms = 0
+      return
+    }
+    scanMeter(this.meterBuf, out)
   }
 
   /**

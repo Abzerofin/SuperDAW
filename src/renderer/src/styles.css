@@ -2831,6 +2831,109 @@ body.middle-panning * {
   text-align: center;
 }
 
+/* Fader and channel meter side by side — classic console layout. */
+.fader-row {
+  display: flex;
+  gap: 8px;
+  align-items: flex-start;
+}
+
+/* ---------- Strip meter ----------
+ * A dB-scaled (−60..0) bar: a full-height green→amber→red gradient sits
+ * in the well and a background-coloured "shutter" covers it from the top
+ * down to the current peak — one height write per frame reveals the right
+ * zone colours. A narrower, brighter RMS core rides inside the peak bar.
+ * Everything is painted straight to the DOM by the shared meter bus. */
+.strip-meter {
+  width: 12px;
+  height: 110px; /* matches .fader so the scale lines up with the throw */
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+}
+
+/* Clip light: latches via .strip-clip-on when the signal exceeds 0 dBFS. */
+.strip-clip {
+  height: 7px;
+  flex-shrink: 0;
+  padding: 0;
+  border: 1px solid var(--border);
+  border-radius: 2px;
+  background: color-mix(in srgb, var(--danger) 12%, var(--bg-0));
+}
+
+.strip-clip-on {
+  background: var(--danger);
+  border-color: color-mix(in srgb, var(--danger) 60%, var(--border));
+}
+
+.strip-meter-well {
+  position: relative;
+  flex: 1;
+  min-height: 0;
+  background: var(--bg-0);
+  border: 1px solid var(--border);
+  border-radius: 3px;
+  overflow: hidden;
+}
+
+/* Zone colours, fixed to the well: green below −12 dB, amber to −3, red
+ * above — the stops live on the same −60..0 scale the bar percentage uses. */
+.strip-meter-grad {
+  position: absolute;
+  inset: 0;
+  background: linear-gradient(
+    to top,
+    color-mix(in srgb, var(--solo) 75%, transparent) 0%,
+    color-mix(in srgb, var(--solo) 75%, transparent) 79%,
+    color-mix(in srgb, var(--mute) 80%, transparent) 81%,
+    color-mix(in srgb, var(--mute) 80%, transparent) 94%,
+    var(--danger) 96%,
+    var(--danger) 100%
+  );
+}
+
+/* The RMS core: narrower and brighter than the peak bar around it. */
+.strip-meter-rms {
+  position: absolute;
+  left: 3px;
+  right: 3px;
+  bottom: 0;
+  height: 0;
+  background: color-mix(in srgb, var(--solo) 80%, white);
+}
+
+/* Covers the gradient above the current peak level. */
+.strip-meter-shutter {
+  position: absolute;
+  left: 0;
+  right: 0;
+  top: 0;
+  height: 100%;
+  background: var(--bg-0);
+}
+
+/* Faint scale marks (−6/−12/−24/−36/−48 dB), visible over bar and well. */
+.strip-meter-tick {
+  position: absolute;
+  left: 0;
+  right: 0;
+  height: 1px;
+  background: var(--grid-bar);
+  pointer-events: none;
+}
+
+/* Peak-hold remnant: holds the recent peak for a second, then vanishes. */
+.strip-meter-hold {
+  position: absolute;
+  left: 0;
+  right: 0;
+  height: 2px;
+  background: color-mix(in srgb, var(--solo) 85%, white);
+  opacity: 0;
+  pointer-events: none;
+}
+
 .knob-wrap {
   display: flex;
   flex-direction: column;
