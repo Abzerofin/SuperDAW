@@ -21,7 +21,11 @@ let worker: UtilityProcess | null = null
 
 function pluginIndex(): HostPluginIndex {
   const paths: Record<string, string> = {}
-  for (const plugin of currentPlugins()) paths[plugin.uid] = plugin.path
+  // vst3 only: the audio process's live host is vst3host — a CLAP path in
+  // this index would be loaded by the wrong ABI (CLAP is scan-only, C1).
+  for (const plugin of currentPlugins()) {
+    if (plugin.format === 'vst3') paths[plugin.uid] = plugin.path
+  }
   return { t: 'plugins', paths }
 }
 

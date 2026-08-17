@@ -13,7 +13,7 @@ import {
   scanStatus,
   setFolders,
   type ScanStatus,
-  type Vst3Plugin
+  type ScannedPlugin
 } from './pluginScan'
 
 /**
@@ -154,9 +154,11 @@ function loadAddon(): Vst3Addon | null {
  * enter the document. `ensureScanned` makes the first lookup of a session
  * wait for discovery instead of reporting everything as missing.
  */
-async function findPlugin(uid: string): Promise<Vst3Plugin | undefined> {
+async function findPlugin(uid: string): Promise<ScannedPlugin | undefined> {
   await ensureScanned()
-  return currentPlugins().find((p) => p.uid === uid)
+  // vst3 only: this module hosts VST3s; a CLAP sharing a uid string must
+  // never have its path handed to the VST3 loader.
+  return currentPlugins().find((p) => p.format === 'vst3' && p.uid === uid)
 }
 
 /**
@@ -490,9 +492,9 @@ export function registerVst3Ipc(): void {
     }
   )
 
-  ipcMain.handle('vst3:scan', async (): Promise<Vst3Plugin[]> => {
+  ipcMain.handle('vst3:scan', async (): Promise<ScannedPlugin[]> => {
     await ensureScanned()
-    return currentPlugins()
+    return currentPlugins().filter((p) => p.format === 'vst3')
   })
 
   // --- Plugin folder configuration and rescanning ---

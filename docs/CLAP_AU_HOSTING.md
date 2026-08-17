@@ -1,6 +1,7 @@
-# CLAP and AU hosting — design (not yet built)
+# CLAP and AU hosting — design (C1 shipped; C2+ not yet built)
 
-Status: **design document**. The document model already reserves both
+Status: **phase C1 is implemented** (scanner addon + browse/add
+plumbing, see the C1 section); C2–C4 remain design. The document model already reserves both
 formats (`PluginFormat = 'builtin' | 'vst2' | 'vst3' | 'clap' | 'au'` in
 `src/core/plugins/descriptor.ts`), so nothing in the op pipeline, sync
 protocol or `.sdaw` format changes when either lands — a CLAP descriptor
@@ -50,10 +51,28 @@ These were built for VST3 but are format-agnostic by construction:
   `pluginRegistry.status`, so a new 'offline'-capable format joins it by
   registering in the same index).
 
-## Phase C1 — scanner addon (`native/claphost`, scan only)
+## Phase C1 — scanner addon (`native/claphost`, scan only) — ✅ SHIPPED
 
-A minimal Node-API addon, loadable in the main process AND the
-sacrificial scan `utilityProcess`:
+The MIT CLAP headers are vendored at `native/clap/include` (with the
+LICENSE; unlike the vst3sdk they are small enough to commit, so builds
+need no fetch step). `native/claphost` is a minimal Node-API addon whose
+`inspect(path)` mirrors vst3host's result shape exactly, which is what
+lets ONE scan worker drive both formats: `pluginScanWorker` takes both
+addon paths and the parent names each bundle's format
+(`bundleFormat(path)` — the extension, the same rule discovery walks
+by). Discovery matches `.clap` beside `.vst3`, the default folder list
+gained the standard CLAP locations, and the cache/quarantine machinery
+is untouched — a crashing CLAP quarantines exactly like a crashing
+VST3. Scanned CLAPs surface in the "+" browser under a
+"placeholder until hosting lands" heading and add as `format: 'clap'`
+descriptors with no paramDefs (reading params would mean instantiating,
+which scan-only never does); they are deliberately NOT fed to the
+registry's external index, so their status stays honestly 'missing'
+rather than claiming the 'offline' (freeze-able) contract C2 will earn.
+A happy-path fixture (a real .clap built from the vendored headers) and
+the addon's error paths are covered by `src/main/__tests__/claphost.test.ts`
+plus the scanner-side unit tests. As designed below, everything else in
+the section already held.
 
 - `scan(path) → { plugins: [{ id, name, vendor, version, features }] }`:
   `LoadLibrary`/`dlopen` the `.clap`, resolve `clap_entry`, call

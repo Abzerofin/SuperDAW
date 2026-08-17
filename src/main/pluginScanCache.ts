@@ -16,6 +16,17 @@ export interface ScannedClass {
   subCategories: string
 }
 
+/** The plugin formats the scanner understands (docs/CLAP_AU_HOSTING.md). */
+export type ScannedFormat = 'vst3' | 'clap'
+
+/**
+ * A bundle's format is its extension — the same rule discovery walks by,
+ * so the two can never disagree about what a path is.
+ */
+export function bundleFormat(path: string): ScannedFormat {
+  return path.toLowerCase().endsWith('.clap') ? 'clap' : 'vst3'
+}
+
 /**
  * What makes a cached inspection stale. Size alone misses same-size edits
  * and mtime alone misses clock oddities, so both must match.

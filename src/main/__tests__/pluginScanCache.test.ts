@@ -1,5 +1,6 @@
 import { describe as suite, expect, test } from 'vitest'
 import {
+  bundleFormat,
   CACHE_VERSION,
   emptyCache,
   isFresh,
@@ -27,6 +28,17 @@ const cls = {
   version: '1.0',
   subCategories: 'Fx'
 }
+
+suite('bundleFormat', () => {
+  test('extension decides the format, case-insensitively', () => {
+    expect(bundleFormat('C:\\Plugins\\Diva.clap')).toBe('clap')
+    expect(bundleFormat('C:\\Plugins\\DIVA.CLAP')).toBe('clap')
+    expect(bundleFormat('C:\\Plugins\\Diva.vst3')).toBe('vst3')
+    // The scanner only ever feeds it discovered bundle paths, so anything
+    // non-.clap is by construction a .vst3 — the fallback reflects that.
+    expect(bundleFormat('C:\\Plugins\\weird')).toBe('vst3')
+  })
+})
 
 const entry = (mtimeMs: number, size: number): CacheEntry => ({
   stamp: { mtimeMs, size },

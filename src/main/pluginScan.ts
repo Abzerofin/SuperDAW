@@ -3,8 +3,9 @@ import { homedir } from 'node:os'
 import { join } from 'node:path'
 import { readdir, stat } from 'node:fs/promises'
 import { readAppData, setAppData } from './appData'
-import { resolveAddonPath } from './addonPath'
+import { resolveAddonPath, resolveClaphostPath } from './addonPath'
 import {
+  bundleFormat,
   emptyCache,
   isFresh,
   markUnderInspection,
@@ -16,6 +17,7 @@ import {
   type BundleStamp,
   type ScanCache,
   type ScannedClass,
+  type ScannedFormat,
   type QuarantineEntry
 } from './pluginScanCache'
 
@@ -44,7 +46,9 @@ const INSPECT_TIMEOUT_MS = 15_000
 /** Depth guard for the bundle walk; vendors nest a level or two, not ten. */
 const MAX_WALK_DEPTH = 4
 
-export interface Vst3Plugin {
+export interface ScannedPlugin {
+  /** Which host can run it — vst3 today; clap is scan/browse-only (C1). */
+  format: ScannedFormat
   path: string
   uid: string
   name: string
@@ -60,7 +64,7 @@ export interface PluginFailure {
 }
 
 export interface ScanStatus {
-  plugins: Vst3Plugin[]
+  plugins: ScannedPlugin[]
   folders: string[]
   failures: PluginFailure[]
   scanning: boolean
@@ -73,19 +77,30 @@ export function defaultPluginFolders(): string[] {
   const home = homedir()
   if (process.platform === 'win32') {
     const programFiles = process.env['ProgramFiles'] ?? 'C:\\Program Files'
+    const commonFiles = process.env['CommonProgramFiles'] ?? join(programFiles, 'Common Files')
     const localAppData = process.env['LOCALAPPDATA'] ?? join(home, 'AppData', 'Local')
     return normalizeFolders([
       join(programFiles, 'Common Files', 'VST3'),
-      join(localAppData, 'Programs', 'Common', 'VST3')
+      join(localAppData, 'Programs', 'Common', 'VST3'),
+      join(commonFiles, 'CLAP'),
+      join(localAppData, 'Programs', 'Common', 'CLAP')
     ])
   }
   if (process.platform === 'darwin') {
     return normalizeFolders([
       '/Library/Audio/Plug-Ins/VST3',
-      join(home, 'Library', 'Audio', 'Plug-Ins', 'VST3')
+      join(home, 'Library', 'Audio', 'Plug-Ins', 'VST3'),
+      '/Library/Audio/Plug-Ins/CLAP',
+      join(home, 'Library', 'Audio', 'Plug-Ins', 'CLAP')
     ])
   }
-  return normalizeFolders(['/usr/lib/vst3', '/usr/local/lib/vst3', join(home, '.vst3')])
+  return normalizeFolders([
+    '/usr/lib/vst3',
+    '/usr/local/lib/vst3',
+    join(home, '.vst3'),
+    '/usr/lib/clap',
+    join(home, '.clap')
+  ])
 }
 
 // ---------------------------------------------------------------------------
@@ -124,9 +139,10 @@ export async function clearQuarantine(): Promise<void> {
 // ---------------------------------------------------------------------------
 
 /**
- * Every `.vst3` bundle under the configured folders. A bundle is usually a
- * DIRECTORY, so the walk stops descending the moment it sees one — the
- * contents are the plugin's business, not more places to search.
+ * Every `.vst3` and `.clap` bundle under the configured folders. A bundle
+ * may be a DIRECTORY (VST3 on every platform, CLAP on macOS), so the walk
+ * stops descending the moment it sees one — the contents are the plugin's
+ * business, not more places to search.
  */
 async function discoverBundles(folders: readonly string[]): Promise<string[]> {
   const found: string[] = []
@@ -142,7 +158,8 @@ async function discoverBundles(folders: readonly string[]): Promise<string[]> {
     }
     for (const entry of entries) {
       const full = join(dir, entry.name)
-      if (entry.name.toLowerCase().endsWith('.vst3')) {
+      const lower = entry.name.toLowerCase()
+      if (lower.endsWith('.vst3') || lower.endsWith('.clap')) {
         const key = process.platform === 'win32' ? full.toLowerCase() : full
         if (!seen.has(key)) {
           seen.add(key)
@@ -205,7 +222,7 @@ type InspectOutcome =
  */
 async function inspectAll(
   paths: readonly string[],
-  addonPath: string,
+  addonPaths: { vst3: string | null; clap: string | null },
   onOutcome: (path: string, outcome: InspectOutcome) => void,
   onBefore?: (path: string) => Promise<void>
 ): Promise<void> {
@@ -215,7 +232,9 @@ async function inspectAll(
   while (index < paths.length) {
     let child: UtilityProcess
     try {
-      child = utilityProcess.fork(workerScript, [addonPath], { stdio: 'ignore' })
+      child = utilityProcess.fork(workerScript, [addonPaths.vst3 ?? '', addonPaths.clap ?? ''], {
+        stdio: 'ignore'
+      })
     } catch (error) {
       // Cannot even start a scanner: fail the remainder rather than spin.
       const reason = error instanceof Error ? error.message : String(error)
@@ -293,7 +312,7 @@ function inspectOne(
 
     child.on('message', onMessage)
     void deadPromise.then(() => finish({ kind: 'fatal', reason: 'scanner process crashed' }))
-    child.postMessage({ type: 'inspect', path })
+    child.postMessage({ type: 'inspect', path, format: bundleFormat(path) })
   })
 }
 
@@ -301,7 +320,7 @@ function inspectOne(
 // Scan orchestration
 // ---------------------------------------------------------------------------
 
-let plugins: Vst3Plugin[] = []
+let plugins: ScannedPlugin[] = []
 let failures: PluginFailure[] = []
 let lastScanMs: number | null = null
 let inFlight: Promise<void> | null = null
@@ -327,7 +346,7 @@ app.on('will-quit', (event) => {
 })
 
 /** The current index, synchronously. Empty until the first scan finishes. */
-export function currentPlugins(): Vst3Plugin[] {
+export function currentPlugins(): ScannedPlugin[] {
   return plugins
 }
 
@@ -358,8 +377,9 @@ export function rescan(forced: boolean): Promise<void> {
   return inFlight
 }
 
-function flatten(path: string, classes: readonly ScannedClass[]): Vst3Plugin[] {
+function flatten(path: string, classes: readonly ScannedClass[]): ScannedPlugin[] {
   return classes.map((cls) => ({
+    format: bundleFormat(path),
     path,
     uid: cls.uid,
     name: cls.name,
@@ -370,14 +390,14 @@ function flatten(path: string, classes: readonly ScannedClass[]): Vst3Plugin[] {
 }
 
 async function runScan(forced: boolean): Promise<void> {
-  const addonPath = resolveAddonPath()
+  const addonPaths = { vst3: resolveAddonPath(), clap: resolveClaphostPath() }
   const folders = await getFolders()
   const bundles = await discoverBundles(folders)
 
   const cache = forced ? emptyCache() : await readCache()
   const quarantine = await readQuarantine()
 
-  const found: Vst3Plugin[] = []
+  const found: ScannedPlugin[] = []
   const problems: PluginFailure[] = []
   const nextEntries: ScanCache['entries'] = {}
   const nextQuarantine: Record<string, QuarantineEntry> = {}
@@ -406,18 +426,26 @@ async function runScan(forced: boolean): Promise<void> {
   }
 
   if (toInspect.length > 0) {
-    if (!addonPath) {
-      for (const bundle of toInspect) {
+    // A bundle whose format's addon is missing fails honestly up front;
+    // the rest still get inspected (one absent addon must not blank the
+    // other format's scan).
+    const inspectable: string[] = []
+    for (const bundle of toInspect) {
+      const format = bundleFormat(bundle)
+      if (addonPaths[format] === null) {
         problems.push({
           path: bundle,
-          reason: 'vst3host addon not built (see native/README.md)',
+          reason: `${format === 'clap' ? 'claphost' : 'vst3host'} addon not built (see native/README.md)`,
           crashed: false
         })
+        continue
       }
-    } else {
+      inspectable.push(bundle)
+    }
+    if (inspectable.length > 0) {
       await inspectAll(
-        toInspect,
-        addonPath,
+        inspectable,
+        addonPaths,
         (path, outcome) => {
           if (outcome.kind === 'ok') {
             const stamp = stamps.get(path)

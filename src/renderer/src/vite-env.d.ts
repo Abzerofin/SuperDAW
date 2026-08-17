@@ -6,6 +6,7 @@ declare const __APP_VERSION__: string
 /** Result of a plugin scan (see src/main/pluginScan.ts). */
 interface PluginScanStatus {
   plugins: {
+    format: 'vst3' | 'clap'
     path: string
     uid: string
     name: string

@@ -16,6 +16,11 @@ export function resolveAudiohostPath(): string | null {
   return resolveResourcePath('native/audiohost/build/Release/audiohost.node')
 }
 
+/** The CLAP scanner addon (phase C1, docs/CLAP_AU_HOSTING.md). */
+export function resolveClaphostPath(): string | null {
+  return resolveResourcePath('native/claphost/build/Release/claphost.node')
+}
+
 /** The app/window icon — .ico on Windows for taskbar clarity, .png elsewhere. */
 export function resolveIconPath(): string | null {
   const name = process.platform === 'win32' ? 'resources/icon.ico' : 'resources/icon.png'

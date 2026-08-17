@@ -23,6 +23,15 @@ export interface ExternalPluginEntry {
   subCategories: string
 }
 
+/**
+ * Scanned CLAP plugins (phase C1, docs/CLAP_AU_HOSTING.md): browsable and
+ * addable, but NOT hostable yet — so they are deliberately kept OUT of the
+ * registry's external index. An added CLAP insert shows the ordinary
+ * missing-plugin placeholder and bypasses cleanly; claiming 'offline' for
+ * it would make freeze advice and the export honesty notice lie.
+ */
+const clapByKey = new Map<string, ExternalPluginEntry>()
+
 export interface PluginFailure {
   path: string
   reason: string
@@ -68,13 +77,13 @@ export function externalScanError(): string | null {
   return scanError
 }
 
-/** VST3 uids come off disk as-is; descriptors carry the same string. */
-function keyOf(uid: string): string {
-  return descriptorKey({ format: 'vst3', uid } as PluginDescriptor)
+/** Uids come off disk as-is; descriptors carry the same string. */
+function keyOf(format: 'vst3' | 'clap', uid: string): string {
+  return descriptorKey({ format, uid } as PluginDescriptor)
 }
 
 interface ScanStatus {
-  plugins: ExternalPluginEntry[]
+  plugins: (ExternalPluginEntry & { format?: 'vst3' | 'clap' })[]
   folders: string[]
   failures: PluginFailure[]
   scanning: boolean
@@ -84,8 +93,12 @@ interface ScanStatus {
 /** One place where a scan result becomes app state, whatever produced it. */
 function applyStatus(status: ScanStatus): void {
   byKey.clear()
+  clapByKey.clear()
   for (const plugin of status.plugins) {
-    byKey.set(keyOf(plugin.uid), {
+    // Older mains sent no format field; everything they scanned was VST3.
+    const format = plugin.format === 'clap' ? 'clap' : 'vst3'
+    const into = format === 'clap' ? clapByKey : byKey
+    into.set(keyOf(format, plugin.uid), {
       uid: plugin.uid,
       name: plugin.name,
       vendor: plugin.vendor,
@@ -98,7 +111,8 @@ function applyStatus(status: ScanStatus): void {
   scanning = status.scanning
   lastScanMs = status.lastScanMs
   // Teach the registry which descriptors this client can render out of
-  // process, so their status is 'offline' rather than 'missing'.
+  // process, so their status is 'offline' rather than 'missing'. VST3
+  // ONLY: scanned CLAPs cannot be processed yet (see clapByKey).
   pluginRegistry.setExternalIndex((descriptor) => byKey.has(descriptorKey(descriptor)))
   emit()
 }
@@ -226,6 +240,11 @@ export async function externalParamDefs(
 
 export function externalPlugins(): ExternalPluginEntry[] {
   return [...byKey.values()].sort((a, b) => a.name.localeCompare(b.name))
+}
+
+/** Scanned CLAP plugins — browsable/addable placeholders until C2+ lands. */
+export function clapPlugins(): ExternalPluginEntry[] {
+  return [...clapByKey.values()].sort((a, b) => a.name.localeCompare(b.name))
 }
 
 export function hasScanned(): boolean {

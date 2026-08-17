@@ -7,6 +7,7 @@ import { BUILTIN_EFFECT_DESCRIPTORS, pluginDefaults } from '@core/plugins/builti
 import { newId } from '@core/model/ids'
 import { projectStore } from '@/state/projectStore'
 import {
+  clapPlugins,
   externalHostAvailable,
   externalParamDefs,
   externalPlugins,
@@ -39,9 +40,13 @@ export function AddPluginCard({
   const [anchor, setAnchor] = useState<{ left: number; bottom: number } | null>(null)
   const open = anchor !== null
   const [external, setExternal] = useState(externalPlugins)
+  const [clap, setClap] = useState(clapPlugins)
 
   useEffect(() => {
-    const unsubscribe = subscribeExternalPlugins(() => setExternal(externalPlugins()))
+    const unsubscribe = subscribeExternalPlugins(() => {
+      setExternal(externalPlugins())
+      setClap(clapPlugins())
+    })
     if (!hasScanned()) void scanExternalPlugins()
     return unsubscribe
   }, [])
@@ -134,6 +139,21 @@ export function AddPluginCard({
     })
   }
 
+  const addClap = (plugin: ExternalPluginEntry): void => {
+    // No paramDefs: reading them would mean instantiating the plugin,
+    // which the scan-only phase deliberately never does (C1 in
+    // docs/CLAP_AU_HOSTING.md). The insert is a document-level reference
+    // that renders as a placeholder and bypasses until hosting lands —
+    // exactly how any missing plugin behaves.
+    addPlugin({
+      format: 'clap',
+      uid: plugin.uid,
+      name: plugin.name,
+      vendor: plugin.vendor,
+      version: plugin.version
+    })
+  }
+
   const q = query.trim().toLowerCase()
   const matches = (name: string, vendor = ''): boolean =>
     q === '' || name.toLowerCase().includes(q) || vendor.toLowerCase().includes(q)
@@ -143,6 +163,10 @@ export function AddPluginCard({
   // not where they belong.
   const vst3Effects = external.filter(
     (p) => p.subCategories.startsWith('Fx') && matches(p.name, p.vendor)
+  )
+  // CLAP features are lowercase tags; 'audio-effect' is the effect marker.
+  const clapEffects = clap.filter(
+    (p) => p.subCategories.includes('audio-effect') && matches(p.name, p.vendor)
   )
   const vst3Reason = !externalHostAvailable()
     ? 'VST3 · desktop app only (npm run dev)'
@@ -221,7 +245,26 @@ export function AddPluginCard({
                   <span className="statusbar-dim">{plugin.vendor}</span>
                 </button>
               ))}
-              {builtins.length === 0 && vst3Effects.length === 0 && (
+              {clapEffects.length > 0 && (
+                <div
+                  className="fx-browser-group statusbar-dim"
+                  title="Scanned CLAP plugins. Hosting is not built yet: an added CLAP insert is a placeholder that bypasses cleanly (docs/CLAP_AU_HOSTING.md)."
+                >
+                  CLAP · placeholder until hosting lands
+                </div>
+              )}
+              {clapEffects.map((plugin) => (
+                <button
+                  key={`clap:${plugin.uid}`}
+                  className="fx-browser-item"
+                  title={`${plugin.vendor} · ${plugin.version} · CLAP`}
+                  onClick={() => addClap(plugin)}
+                >
+                  <span>{plugin.name}</span>
+                  <span className="statusbar-dim">{plugin.vendor}</span>
+                </button>
+              ))}
+              {builtins.length === 0 && vst3Effects.length === 0 && clapEffects.length === 0 && (
                 <div className="bay-empty">No plugins match “{query}”</div>
               )}
             </div>

@@ -41,6 +41,10 @@
         "to": "native/audiohost/build/Release/audiohost.node"
       },
       {
+        "from": "native/claphost/build/Release/claphost.node",
+        "to": "native/claphost/build/Release/claphost.node"
+      },
+      {
         "from": "resources/icon.ico",
         "to": "resources/icon.ico"
       },
