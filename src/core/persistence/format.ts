@@ -16,6 +16,7 @@ import {
 import { routeIsValid } from '../model/routing'
 import { clampParam, synthDefaults, EFFECT_DEFS, type EffectType } from '../model/effects'
 import { normalizeProjectSettings } from '../model/projectSettings'
+import { sanitizeTrackMacros } from '../model/macros'
 import { builtinEffectDescriptor, paramDefsOf } from '../plugins/builtin'
 import { isPluginDescriptor, type PluginDescriptor } from '../plugins/descriptor'
 import type { OpEnvelope } from '../ops/operations'
@@ -241,11 +242,23 @@ function normalizeState(state: ProjectState): ProjectState {
     const marker = sanitizeMarker(raw)
     if (marker) markers[marker.id] = marker
   }
+  const plugins = migratePlugins(merged, tracks)
+  // Macros re-earn their place field by field, targets validated exactly
+  // as the reducer validates them (live instance on that track, known
+  // param, finite range) and the result canonicalized — junk collapses to
+  // "no macros", and a loaded document is indistinguishable from one
+  // built by ops. Needs the migrated plugins, hence this second pass.
+  for (const [id, track] of Object.entries(tracks)) {
+    if (!('macros' in track)) continue
+    const { macros: rawMacros, ...rest } = track as Track & { macros?: unknown }
+    const macros = sanitizeTrackMacros(rawMacros, id, plugins)
+    tracks[id] = macros ? { ...(rest as Track), macros } : (rest as Track)
+  }
   const full: ProjectState = {
     ...merged,
     tracks,
     clips,
-    plugins: migratePlugins(merged, tracks),
+    plugins,
     pads,
     markers,
     // Pre-settings files get defaults; stored values re-earn their place

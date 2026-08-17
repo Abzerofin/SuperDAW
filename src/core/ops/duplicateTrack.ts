@@ -31,7 +31,21 @@ export function buildDuplicateTrackOp(state: ProjectState, trackId: TrackId): Op
     id: trackIdMap.get(t.id)!,
     name: t.id === trackId ? `${t.name} Copy` : t.name,
     // Parents inside the subtree remap; the root keeps its original parent.
-    parentId: t.parentId !== null && trackIdMap.has(t.parentId) ? trackIdMap.get(t.parentId)! : t.parentId
+    parentId: t.parentId !== null && trackIdMap.has(t.parentId) ? trackIdMap.get(t.parentId)! : t.parentId,
+    // Macro targets follow their plugins onto the copies (called after
+    // pluginIdMap is built below); a target already dead stays as-is and
+    // keeps being skipped, exactly as on the original.
+    ...(t.macros
+      ? {
+          macros: t.macros.map((m) => ({
+            ...m,
+            targets: m.targets.map((target) => ({
+              ...target,
+              instanceId: pluginIdMap.get(target.instanceId) ?? target.instanceId
+            }))
+          }))
+        }
+      : {})
   })
 
   const clips: ReturnType<typeof clipsOfTrack> = []

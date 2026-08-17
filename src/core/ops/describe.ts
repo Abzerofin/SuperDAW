@@ -7,6 +7,7 @@ import {
   type ProjectSettings
 } from '../model/projectSettings'
 import { paramDefsOf } from '../plugins/builtin'
+import { macroDefaultName } from '../model/macros'
 import type { Operation } from './operations'
 
 /**
@@ -256,6 +257,25 @@ export function describe(state: ProjectState, op: Operation): string | null {
           : `Ungrouped ${op.entries.length} takes`
       }
       return `Grouped ${grouping.length} clips as takes`
+    }
+    case 'macro/setValue': {
+      const macro = state.tracks[op.trackId]?.macros?.[op.index]
+      const name = macro?.name ?? macroDefaultName(op.index)
+      const percent = Math.round(Math.min(1, Math.max(0, op.value)) * 100)
+      return `Set ${name} on "${trackName(state, op.trackId)}" to ${percent}%`
+    }
+    case 'macro/configure': {
+      const macro = state.tracks[op.trackId]?.macros?.[op.index]
+      const name = op.name ?? macro?.name ?? macroDefaultName(op.index)
+      if (op.targets !== undefined) {
+        return op.targets.length === 0
+          ? `Cleared ${name}'s mappings on "${trackName(state, op.trackId)}"`
+          : `Mapped ${name} on "${trackName(state, op.trackId)}" to ${op.targets.length} parameter${op.targets.length === 1 ? '' : 's'}`
+      }
+      if (op.name !== undefined) {
+        return `Renamed a macro on "${trackName(state, op.trackId)}" to "${op.name}"`
+      }
+      return null
     }
     case 'clip/create':
       return op.takes && op.takes.length > 0
