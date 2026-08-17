@@ -39,6 +39,7 @@ export type ShortcutId =
   | 'track.loop'
   | 'notes.quantize'
   | 'notes.humanize'
+  | 'notes.snapToScale'
   | 'selection.all'
   | 'selection.delete'
 
@@ -80,6 +81,7 @@ export const SHORTCUT_DEFS: readonly ShortcutDef[] = [
   { id: 'track.loop', label: 'Loop selected track (audition)', category: 'Tools', combo: 'L' },
   { id: 'notes.quantize', label: 'Quantize selected notes', category: 'Tools', combo: 'Q' },
   { id: 'notes.humanize', label: 'Humanize selected notes', category: 'Tools', combo: 'H' },
+  { id: 'notes.snapToScale', label: 'Snap selected notes to scale', category: 'Tools', combo: 'Shift+Q' },
   { id: 'clip.comment', label: 'Comment on selected clip', category: 'Tools', combo: 'C' }
 ]
 

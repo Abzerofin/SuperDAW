@@ -2464,6 +2464,22 @@ body.middle-panning * {
   background: color-mix(in srgb, var(--accent) 26%, transparent);
 }
 
+/* ---------- Piano roll: scale guide ---------- */
+/* Deliberately fainter than the chord guide: the scale is the backdrop, a
+   chord is the focus. Where both guides are up the chord wins its keys —
+   the JSX skips scale bands/marks on chord tones, so nothing stacks. */
+.proll-scale-row {
+  position: absolute;
+  left: 0;
+  right: 0;
+  pointer-events: none;
+  background: color-mix(in srgb, var(--accent) 6%, transparent);
+}
+
+.proll-scale-row-root {
+  background: color-mix(in srgb, var(--accent) 12%, transparent);
+}
+
 .proll-hint {
   flex: 1;
   font-size: 10px;
@@ -2586,6 +2602,16 @@ body.middle-panning * {
 
 .proll-key-chord-root {
   box-shadow: inset 8px 0 0 var(--accent);
+}
+
+/* Scale-guide keys: a thinner, dimmer bar than the chord marks (the JSX
+   never puts both on one key — chord wins). */
+.proll-key-scale {
+  box-shadow: inset 2px 0 0 color-mix(in srgb, var(--accent) 45%, transparent);
+}
+
+.proll-key-scale-root {
+  box-shadow: inset 4px 0 0 color-mix(in srgb, var(--accent) 65%, transparent);
 }
 
 .proll-key-label {
