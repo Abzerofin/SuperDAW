@@ -1,6 +1,8 @@
 import { useEffect, useReducer, useRef, useState, useSyncExternalStore } from 'react'
 import { formatClock, formatPosition, type TimeSignature } from '@core/model/timebase'
 import { ticksPerSecond } from '@audio/scheduling'
+import { LiveLoudnessMeter, formatLufs } from '@audio/loudness'
+import { meterBus } from '@/lib/meterBus'
 import { useProjectState, useCanUndo, useCanRedo } from '@/state/hooks'
 import { projectStore } from '@/state/projectStore'
 import { transport } from '@/state/transport'
@@ -64,6 +66,7 @@ export function TransportBar(): React.JSX.Element {
         <GridSelect />
         <RulerSelect />
         <Meter />
+        <LoudnessReadout />
       </div>
 
       <div className="transport-right">
@@ -701,6 +704,127 @@ function Meter(): React.JSX.Element {
   }, [])
 
   return <canvas ref={canvasRef} className="meter" width={72} height={8} title="Master level" />
+}
+
+/** "−12.3" with a real minus sign; the windows show dashes until filled. */
+function lufsDigits(value: number | null): string {
+  if (value === null) return '–.–'
+  const rounded = Math.round(value * 10) / 10
+  return `${rounded < 0 ? '−' : ''}${Math.abs(rounded).toFixed(1)}`
+}
+
+/**
+ * Live loudness beside the master meter: momentary (M, 400 ms) and
+ * short-term (S, 3 s) LUFS per BS.1770, plus Δ = short-term minus the
+ * project's loudness target when one is set (amber once meaningfully
+ * over). Per-user ephemeral readout — nothing here touches the project
+ * document. Painted straight to the DOM from the shared meter loop, so it
+ * costs nothing while stopped (the loop idles, the digits rest as
+ * dashes); if the backend cannot supply master samples (native path) the
+ * whole readout stays hidden rather than showing garbage.
+ */
+function LoudnessReadout(): React.JSX.Element {
+  const rootRef = useRef<HTMLDivElement>(null)
+  const mRef = useRef<HTMLSpanElement>(null)
+  const sRef = useRef<HTMLSpanElement>(null)
+  const deltaRef = useRef<HTMLSpanElement>(null)
+
+  useEffect(() => {
+    let meter: LiveLoudnessMeter | null = null
+    let meterRate = 0
+    let shown = false
+    let lastM = ''
+    let lastS = ''
+    let lastDelta = ''
+    let lastOver = false
+    let lastTitle = ''
+
+    const paint = (m: string, s: string, delta: string, over: boolean): void => {
+      if (mRef.current && lastM !== m) {
+        lastM = m
+        mRef.current.textContent = m
+      }
+      if (sRef.current && lastS !== s) {
+        lastS = s
+        sRef.current.textContent = s
+      }
+      if (deltaRef.current && lastDelta !== delta) {
+        lastDelta = delta
+        deltaRef.current.textContent = delta
+      }
+      if (deltaRef.current && lastOver !== over) {
+        lastOver = over
+        deltaRef.current.classList.toggle('loudness-over', over)
+      }
+    }
+
+    const draw = (): boolean => {
+      const root = rootRef.current
+      if (!root) return false
+      if (!transport.isPlaying) {
+        // Stopped: drop the window (stale audio must not bleed into the
+        // next run) and rest the digits. One paint, then the loop idles.
+        if (meter) {
+          meter = null
+          paint('–.–', '–.–', '', false)
+        }
+        return false
+      }
+      const feed = audioEngine.readMasterLoudness()
+      if (!feed) {
+        if (shown) {
+          shown = false
+          root.style.display = 'none'
+        }
+        return false
+      }
+      if (!shown) {
+        shown = true
+        root.style.display = ''
+      }
+      if (!meter || meterRate !== feed.sampleRate) {
+        meterRate = feed.sampleRate
+        meter = new LiveLoudnessMeter(feed.sampleRate, 2)
+      }
+      meter.process(feed.channels)
+      const momentary = meter.momentaryLufs()
+      const shortTerm = meter.shortTermLufs()
+      const target = projectStore.state.settings.loudnessTargetLufs
+      let delta = ''
+      let over = false
+      if (target !== null && shortTerm !== null) {
+        const diff = Math.round((shortTerm - target) * 10) / 10
+        delta = `Δ${diff > 0 ? '+' : diff < 0 ? '−' : '±'}${Math.abs(diff).toFixed(1)}`
+        over = diff > 0.5
+      }
+      paint(lufsDigits(momentary), lufsDigits(shortTerm), delta, over)
+      const title =
+        target === null
+          ? 'Live loudness (BS.1770): M momentary (400 ms), S short-term (3 s). No loudness target set — Settings ▸ Project.'
+          : `Live loudness (BS.1770): M momentary (400 ms), S short-term (3 s). Δ is short-term against the ${formatLufs(target)} target.`
+      if (lastTitle !== title) {
+        lastTitle = title
+        root.title = title
+      }
+      return true
+    }
+    return meterBus.register(draw)
+  }, [])
+
+  return (
+    <div ref={rootRef} className="loudness-readout mono" style={{ display: 'none' }}>
+      <span className="loudness-label">M</span>
+      <span ref={mRef} className="loudness-value">
+        –.–
+      </span>
+      <span className="loudness-label">S</span>
+      <span ref={sRef} className="loudness-value">
+        –.–
+      </span>
+      <span className="loudness-label">LUFS</span>
+      <span ref={deltaRef} className="loudness-delta" />
+    </div>
+  )
 }
 
 /**
