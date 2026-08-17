@@ -1,7 +1,7 @@
 import type { Clip, ProjectState } from '@core/model/types'
 import { clipPlaybackRate, clipWarpFactor } from '@core/model/types'
 import { ticksPerSecond } from '@audio/scheduling'
-import { onsetsForPeaks } from '@audio/onsets'
+import { assetOnsetSeconds } from '@audio/loopMeta'
 import { assetStore } from '@/state/audioInstance'
 
 /**
@@ -17,11 +17,15 @@ import { assetStore } from '@/state/audioInstance'
 /** How many of the dragged clip's onsets take part in matching. */
 const MAX_DRAG_ONSETS = 8
 
-/** Transient onset times (buffer seconds) of an asset, cached per peaks array. */
+/**
+ * Slice/onset times (buffer seconds) of an asset: the file's own cue
+ * markers when it carries a usable set, else detected transients (cached
+ * per peaks array). One seam with the engine and offline render.
+ */
 export function assetOnsets(assetId: string): number[] {
   const asset = assetStore.get(assetId)
-  if (!asset?.peaks) return []
-  return onsetsForPeaks(asset.peaks, asset.peaksPerSecond)
+  if (!asset) return []
+  return assetOnsetSeconds(asset)
 }
 
 /**
