@@ -1231,7 +1231,8 @@ anyone raises the comfortable ~100-200-track ceiling.
     upstream of the master chain).
 
 Roadmap beyond: the native backend phases
-(docs/NATIVE_AUDIO_BACKEND.md), collaborator audio streaming +
+(docs/NATIVE_AUDIO_BACKEND.md), CLAP hosting phases C1–C4 and the
+platform-gated AU story (docs/CLAP_AU_HOSTING.md), collaborator audio streaming +
 proxy renders for remote/missing plugins, autotune/pitch correction (dedicated
 AudioWorklet DSP milestone: pitch detection + PSOLA resynthesis),
 sustain-pedal (CC64) and
