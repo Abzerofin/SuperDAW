@@ -252,6 +252,37 @@ input {
   align-self: center;
 }
 
+/* Live LUFS readout beside the master meter. Hidden until the backend can
+   supply master samples; digits rest as dashes while stopped. Painted
+   direct to the DOM by the shared meter loop — see LoudnessReadout. */
+.loudness-readout {
+  display: flex;
+  align-items: baseline;
+  gap: 4px;
+  font-size: 11px;
+  color: var(--text);
+  white-space: nowrap;
+}
+
+.loudness-label {
+  color: var(--text-dim);
+  font-size: 9px;
+}
+
+.loudness-value {
+  min-width: 34px;
+  text-align: right;
+}
+
+.loudness-delta {
+  color: var(--text-dim);
+  min-width: 34px;
+}
+
+.loudness-delta.loudness-over {
+  color: var(--mute);
+}
+
 /* ---------- Timeline ---------- */
 .timeline {
   flex: 1;

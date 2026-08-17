@@ -218,6 +218,12 @@ interface TrackChain {
 const MASTER_TAP_FRAMES = 2048
 /** Track-meter tap length — a 4× cheaper scan than the old 1024. */
 const TRACK_TAP_FRAMES = 256
+/**
+ * Loudness-tap ring length: ~85 ms at 48 kHz, comfortably more than one
+ * display frame even at 30 fps, so consecutive reads of new-samples-only
+ * (readMasterLoudness) never miss audio under normal painting cadence.
+ */
+const LOUDNESS_TAP_FRAMES = 4096
 
 export class AudioEngine {
   /**
@@ -230,6 +236,22 @@ export class AudioEngine {
   private backend: IAudioBackend | null = null
   private masterTap: TapId | null = null
   private meterBuf: Float32Array | null = null
+  /**
+   * Per-channel master tap feeding the live LUFS readout. BS.1770 sums
+   * each channel's energy, and the seam's tap (an AnalyserNode) downmixes
+   * to mono — which would read ~3 LU low on correlated stereo — so this
+   * rides the webAudio escape's UI-facing analyser surface (like the wire
+   * oscilloscopes): a splitter into one analyser per channel, built
+   * lazily on first read, forgotten with the backend. On backends without
+   * the escape the readout simply hides (readMasterLoudness → null).
+   */
+  private loudnessTap: {
+    split: ChannelSplitterNode
+    analysers: AnalyserNode[]
+    bufs: Float32Array[]
+    /** Context time of the previous read — the new-samples cursor. */
+    lastSec: number
+  } | null = null
   private chains = new Map<TrackId, TrackChain>()
   private fxNodes = new Map<PluginInstanceId, PluginNodes>()
   /**
@@ -486,6 +508,7 @@ export class AudioEngine {
     this.warpedKeysByAsset.clear()
     this.masterTap = null
     this.meterBuf = null
+    this.loudnessTap = null
     this.backend = null
     this.backendFactory = factory
   }
@@ -1246,6 +1269,53 @@ export class AudioEngine {
       if (v > peak) peak = v
     }
     return Math.min(1, peak)
+  }
+
+  /**
+   * The master samples that arrived since the previous call, per channel
+   * — the live LUFS readout's feed. Reading never creates the backend
+   * (metering stays free on idle projects); null when there is no backend
+   * yet or it cannot expose raw samples (native path), in which case the
+   * readout hides rather than showing garbage. Single consumer: the
+   * new-samples cursor is one context-time watermark, and the returned
+   * arrays are views into internal buffers, valid until the next call.
+   * Reads further apart than the tap ring (~85 ms) lose the overflow —
+   * acceptable for a meter, never wrong-valued.
+   */
+  readMasterLoudness(): { channels: readonly Float32Array[]; sampleRate: number } | null {
+    const backend = this.backend
+    const escapes = backend?.webAudio
+    if (!backend || !escapes) return null
+    const ctx = escapes.ctx
+    if (!this.loudnessTap) {
+      const split = ctx.createChannelSplitter(2)
+      escapes.nodeOf(backend.masterNode()).connect(split)
+      const analysers = [0, 1].map((channel) => {
+        const analyser = ctx.createAnalyser()
+        analyser.fftSize = LOUDNESS_TAP_FRAMES
+        split.connect(analyser, channel)
+        return analyser
+      })
+      this.loudnessTap = {
+        split,
+        analysers,
+        bufs: analysers.map(() => new Float32Array(LOUDNESS_TAP_FRAMES)),
+        lastSec: ctx.currentTime
+      }
+    }
+    const tap = this.loudnessTap
+    const now = ctx.currentTime
+    const frames = Math.min(
+      LOUDNESS_TAP_FRAMES,
+      Math.max(0, Math.round((now - tap.lastSec) * ctx.sampleRate))
+    )
+    tap.lastSec = now
+    const channels = tap.analysers.map((analyser, i) => {
+      analyser.getFloatTimeDomainData(tap.bufs[i] as Float32Array<ArrayBuffer>)
+      // The analyser ring holds the LATEST window; the new samples are its tail.
+      return tap.bufs[i].subarray(LOUDNESS_TAP_FRAMES - frames)
+    })
+    return { channels, sampleRate: ctx.sampleRate }
   }
 
   /**

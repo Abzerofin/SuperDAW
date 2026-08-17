@@ -61,6 +61,51 @@ function channelWeight(index: number): number {
   return index >= 3 ? 1.41 : 1
 }
 
+/** Mean-square energy → LUFS (the spec's −0.691 offset included). */
+function lufsOf(energy: number): number {
+  return -0.691 + 10 * Math.log10(energy)
+}
+
+/**
+ * The K-weighting kernel in streaming form: run `data[from..to)` through
+ * both filter stages (direct form II transposed — `state` holds the four
+ * delay slots starting at `base`, and keeps them across calls) and return
+ * the sum of squared output samples. Both the offline integrated
+ * measurement and the live meter run their samples through this one
+ * function, so a realtime reading and a bounce report can never disagree
+ * on the filter.
+ */
+function kWeightSumSquares(
+  data: Float32Array,
+  from: number,
+  to: number,
+  shelf: BiquadCoeffs,
+  hp: BiquadCoeffs,
+  state: Float64Array,
+  base: number
+): number {
+  let s1a = state[base]
+  let s1b = state[base + 1]
+  let s2a = state[base + 2]
+  let s2b = state[base + 3]
+  let sum = 0
+  for (let i = from; i < to; i++) {
+    const x = data[i]
+    const y1 = shelf.b0 * x + s1a
+    s1a = shelf.b1 * x - shelf.a1 * y1 + s1b
+    s1b = shelf.b2 * x - shelf.a2 * y1
+    const y2 = hp.b0 * y1 + s2a
+    s2a = hp.b1 * y1 - hp.a1 * y2 + s2b
+    s2b = hp.b2 * y1 - hp.a2 * y2
+    sum += y2 * y2
+  }
+  state[base] = s1a
+  state[base + 1] = s1b
+  state[base + 2] = s2a
+  state[base + 3] = s2b
+  return sum
+}
+
 /**
  * Integrated loudness of raw channel data, in LUFS. Null when the signal
  * is shorter than one 400 ms gating block or nothing survives the
@@ -82,27 +127,13 @@ export function measureIntegratedLufs(
   const weighted = new Float64Array(binCount) // channel-weighted energy sums
   const shelf = shelfCoeffs(sampleRate)
   const hp = highpassCoeffs(sampleRate)
+  const state = new Float64Array(4)
   for (let ch = 0; ch < channels.length; ch++) {
     const data = channels[ch]
     const weight = channelWeight(ch)
-    // Direct form II transposed state, one pair per stage.
-    let s1a = 0
-    let s1b = 0
-    let s2a = 0
-    let s2b = 0
+    state.fill(0)
     for (let bin = 0; bin < binCount; bin++) {
-      let sum = 0
-      const end = (bin + 1) * hop
-      for (let i = bin * hop; i < end; i++) {
-        const x = data[i]
-        const y1 = shelf.b0 * x + s1a
-        s1a = shelf.b1 * x - shelf.a1 * y1 + s1b
-        s1b = shelf.b2 * x - shelf.a2 * y1
-        const y2 = hp.b0 * y1 + s2a
-        s2a = hp.b1 * y1 - hp.a1 * y2 + s2b
-        s2b = hp.b2 * y1 - hp.a2 * y2
-        sum += y2 * y2
-      }
+      const sum = kWeightSumSquares(data, bin * hop, (bin + 1) * hop, shelf, hp, state, 0)
       weighted[bin] += (weight * sum) / hop
     }
   }
@@ -115,21 +146,122 @@ export function measureIntegratedLufs(
     for (let i = 0; i < blockHops; i++) sum += weighted[block + i]
     blockEnergy[block] = sum / blockHops
   }
-  const loudnessOf = (energy: number): number => -0.691 + 10 * Math.log10(energy)
-
   const absoluteGate = -70
   let passing: number[] = []
   for (const energy of blockEnergy) {
-    if (energy > 0 && loudnessOf(energy) > absoluteGate) passing.push(energy)
+    if (energy > 0 && lufsOf(energy) > absoluteGate) passing.push(energy)
   }
   if (passing.length === 0) return null
 
   const mean = (values: readonly number[]): number =>
     values.reduce((a, b) => a + b, 0) / values.length
-  const relativeGate = loudnessOf(mean(passing)) - 10
-  passing = passing.filter((energy) => loudnessOf(energy) > relativeGate)
+  const relativeGate = lufsOf(mean(passing)) - 10
+  passing = passing.filter((energy) => lufsOf(energy) > relativeGate)
   if (passing.length === 0) return null
-  return loudnessOf(mean(passing))
+  return lufsOf(mean(passing))
+}
+
+/** Bins per momentary window: 4 × 100 ms = the spec's 400 ms. */
+const MOMENTARY_BINS = 4
+/** Bins per short-term window: 30 × 100 ms = EBU R128's 3 s. */
+const SHORT_TERM_BINS = 30
+
+/**
+ * Streaming momentary / short-term loudness — EBU R128's "M" (400 ms) and
+ * "S" (3 s), both ungated per the spec. The exact K-weighting and 100 ms
+ * binning of the integrated measurement above, but incremental: feed it
+ * whatever chunk sizes a realtime tap delivers and read the windows
+ * whenever a frame paints. Pure math, no Web Audio — the calibration facts
+ * hold (a 0 dBFS 997 Hz sine in one channel reads −3.01 LUFS momentary
+ * once the window fills). Windows report null until they have filled, and
+ * on pure silence (zero energy), so a UI can show a placeholder instead
+ * of −Infinity.
+ */
+export class LiveLoudnessMeter {
+  private readonly hop: number
+  private readonly shelf: BiquadCoeffs
+  private readonly hp: BiquadCoeffs
+  /** Four DF2T delay slots per channel, [channel * 4 ..]. */
+  private readonly state: Float64Array
+  /** Ring of completed 100 ms bin energies (channel-weighted mean squares). */
+  private readonly bins = new Float64Array(SHORT_TERM_BINS)
+  /** Completed bins so far, monotonic — also the ring's write cursor. */
+  private binsDone = 0
+  private currentSum = 0
+  private currentFill = 0
+
+  constructor(
+    sampleRate: number,
+    private readonly maxChannels: number
+  ) {
+    this.hop = sampleRate > 0 ? Math.round(0.1 * sampleRate) : 0
+    this.shelf = shelfCoeffs(sampleRate)
+    this.hp = highpassCoeffs(sampleRate)
+    this.state = new Float64Array(Math.max(1, maxChannels) * 4)
+  }
+
+  /**
+   * Feed one chunk. Every channel must carry the same frame count (extra
+   * channels beyond the constructor's count are ignored); chunks may be
+   * any length, including empty — bin boundaries land wherever they land.
+   */
+  process(channels: readonly Float32Array[]): void {
+    if (this.hop <= 0) return
+    const frames = channels[0]?.length ?? 0
+    const count = Math.min(channels.length, this.maxChannels)
+    let offset = 0
+    while (offset < frames) {
+      const n = Math.min(frames - offset, this.hop - this.currentFill)
+      for (let ch = 0; ch < count; ch++) {
+        const sum = kWeightSumSquares(
+          channels[ch],
+          offset,
+          offset + n,
+          this.shelf,
+          this.hp,
+          this.state,
+          ch * 4
+        )
+        this.currentSum += (channelWeight(ch) * sum) / this.hop
+      }
+      this.currentFill += n
+      offset += n
+      if (this.currentFill === this.hop) {
+        this.bins[this.binsDone % SHORT_TERM_BINS] = this.currentSum
+        this.binsDone++
+        this.currentSum = 0
+        this.currentFill = 0
+      }
+    }
+  }
+
+  /** Mean energy of the last `binCount` completed bins, as LUFS. */
+  private windowLufs(binCount: number): number | null {
+    if (this.binsDone < binCount) return null
+    let energy = 0
+    for (let i = this.binsDone - binCount; i < this.binsDone; i++) {
+      energy += this.bins[i % SHORT_TERM_BINS]
+    }
+    energy /= binCount
+    return energy > 0 ? lufsOf(energy) : null
+  }
+
+  momentaryLufs(): number | null {
+    return this.windowLufs(MOMENTARY_BINS)
+  }
+
+  shortTermLufs(): number | null {
+    return this.windowLufs(SHORT_TERM_BINS)
+  }
+
+  /** Back to empty — filter state, windows and the partial bin all clear. */
+  reset(): void {
+    this.state.fill(0)
+    this.bins.fill(0)
+    this.binsDone = 0
+    this.currentSum = 0
+    this.currentFill = 0
+  }
 }
 
 /** "−14.0 LUFS" — one decimal, real minus sign, for status lines. */
