@@ -59,6 +59,14 @@ const api = {
     ext: string
   }): Promise<string | null> => ipcRenderer.invoke('file:export', args),
 
+  /** One directory picker for a multi-file export (stems). Null = cancelled. */
+  pickExportDirectory: (): Promise<string | null> =>
+    ipcRenderer.invoke('file:pick-export-directory'),
+
+  /** Write one already-encoded file into a picked directory (no dialog). */
+  exportFileInto: (args: { directory: string; name: string; data: Uint8Array }): Promise<string> =>
+    ipcRenderer.invoke('file:export-into', args),
+
   /** Keep the main process informed for the unsaved-changes close guard. */
   setDirty: (dirty: boolean): void => {
     ipcRenderer.send('project:set-dirty', dirty)
