@@ -12,6 +12,7 @@ import { selectTrackRange } from '@/lib/trackActions'
 import { EditableValue } from '../controls/EditableValue'
 import { TrackMenu } from '../timeline/TrackMenu'
 import { Knob } from './Knob'
+import { StripMeter } from './StripMeter'
 
 function panLabel(pan: number): string {
   if (Math.abs(pan) < 0.01) return 'C'
@@ -101,6 +102,7 @@ function TrackStrip({ track }: { track: Track }): React.JSX.Element {
       />
       <Fader
         gain={track.volume}
+        meter={<StripMeter trackId={track.id} />}
         onPreview={(volume) => audioEngine.previewTrackVolume(track.id, volume)}
         onCommit={(volume) =>
           projectStore.dispatch({ type: 'track/setVolume', trackId: track.id, volume })
@@ -135,6 +137,7 @@ function MasterStrip({ volume }: { volume: number }): React.JSX.Element {
       <div className="strip-pan-spacer" />
       <Fader
         gain={volume}
+        meter={<StripMeter trackId={null} />}
         onPreview={(v) => audioEngine.previewMasterVolume(v)}
         onCommit={(v) => projectStore.dispatch({ type: 'project/setMasterVolume', volume: v })}
       />
@@ -147,10 +150,13 @@ const FADER_H = 110
 
 function Fader({
   gain,
+  meter,
   onPreview,
   onCommit
 }: {
   gain: number
+  /** The strip's level meter, laid out console-style beside the fader. */
+  meter?: React.ReactNode
   onPreview: (gain: number) => void
   onCommit: (gain: number) => void
 }): React.JSX.Element {
@@ -182,16 +188,19 @@ function Fader({
 
   return (
     <div className="fader-wrap">
-      <div
-        className="fader"
-        onPointerDown={begin}
-        onPointerMove={move}
-        onPointerUp={end}
-        onDoubleClick={() => onCommit(1)}
-        title="Drag to set volume (Shift = fine) · double-click for 0 dB"
-      >
-        <div className="fader-fill" style={{ height: `${(shown / MAX_GAIN) * 100}%` }} />
-        <div className="fader-thumb" style={{ bottom: `${(shown / MAX_GAIN) * 100}%` }} />
+      <div className="fader-row">
+        <div
+          className="fader"
+          onPointerDown={begin}
+          onPointerMove={move}
+          onPointerUp={end}
+          onDoubleClick={() => onCommit(1)}
+          title="Drag to set volume (Shift = fine) · double-click for 0 dB"
+        >
+          <div className="fader-fill" style={{ height: `${(shown / MAX_GAIN) * 100}%` }} />
+          <div className="fader-thumb" style={{ bottom: `${(shown / MAX_GAIN) * 100}%` }} />
+        </div>
+        {meter}
       </div>
       <EditableValue
         className="fader-db"
