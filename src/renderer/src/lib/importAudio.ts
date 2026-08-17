@@ -4,8 +4,11 @@ import { barsToTicks, ticksPerBar } from '@core/model/timebase'
 import { parseSmf } from '@core/midi/smf'
 import { ticksPerSecond } from '@audio/scheduling'
 import { digestOf, type ProjectAsset } from '@audio/assets'
+import { conformLoopToTempo, loopMetaForBytes, type LoopConform } from '@audio/loopMeta'
 import { audioEngine, assetStore } from '@/state/audioInstance'
 import { projectStore } from '@/state/projectStore'
+import { preferences } from '@/state/preferences'
+import { statusNotice } from '@/state/statusNotice'
 import { createTrack } from './trackActions'
 
 /** How many files decode at once. Decoding is off-thread; reads parallelize. */
@@ -13,6 +16,24 @@ const IMPORT_CONCURRENCY = 4
 
 const AUDIO_EXTENSIONS = /\.(wav|mp3|flac|ogg|m4a|aac|aiff?)$/i
 const MIDI_EXTENSIONS = /\.(mid|midi)$/i
+
+/**
+ * REX loops (ReCycle). The container's audio is compressed with a
+ * proprietary, undocumented codec — decoding it needs the licensed REX
+ * SDK, which cannot ship here (see docs/LOOP_FORMATS.md). Recognized so a
+ * drop gets one honest notice instead of a silent skip or a failed decode.
+ */
+const REX_EXTENSIONS = /\.(rx2|rex|rcy)$/i
+
+/** One status-bar notice for any REX files in a drop; they import as nothing. */
+function noticeRexFiles(files: readonly File[]): void {
+  const rex = files.filter((file) => REX_EXTENSIONS.test(file.name))
+  if (rex.length === 0) return
+  const label = rex.length === 1 ? `"${rex[0].name}"` : `${rex.length} REX files`
+  statusNotice.show(
+    `${label} skipped — REX loops need conversion (export as WAV/AIFF from ReCycle or Reason; see docs/LOOP_FORMATS.md).`
+  )
+}
 
 export function isAudioFile(file: File): boolean {
   return file.type.startsWith('audio/') || AUDIO_EXTENSIONS.test(file.name)
@@ -117,15 +138,47 @@ function defaultFadeFor(kind: 'audio' | 'midi', durationTicks: number): number {
   return Math.max(0, Math.min(wanted, Math.floor(durationTicks / 2)))
 }
 
+/**
+ * Loop-conform info for an asset against the CURRENT project tempo, from
+ * the WAV's ACID chunk (nothing proprietary is ever stored — this is
+ * re-derived from the encoded bytes whenever needed). Null = not a
+ * conformable loop.
+ */
+function loopConformFor(asset: ProjectAsset): LoopConform | null {
+  if (asset.kind !== 'audio' || asset.seconds === null) return null
+  const meta = loopMetaForBytes(asset.encoded, asset.ext)
+  return conformLoopToTempo(meta, asset.seconds, projectStore.state.tempo)
+}
+
+/** A tempo-bearing loop clip an import just created (for the notice/ask flow). */
+interface LoopImportEntry {
+  readonly clipId: string
+  readonly name: string
+  readonly fileTempo: number
+  /** True when the clip was created already conformed (preference 'always'). */
+  readonly conformed: boolean
+}
+
 /** A clip (with MIDI notes) placing an asset on a track. */
 function clipFor(
   asset: ProjectAsset,
   track: Track,
   startTicks: number
-): { clip: Clip; notes: Note[] } {
+): { clip: Clip; notes: Note[]; loop: LoopImportEntry | null } {
   const clipId = newId('clp')
   const { notes, totalTicks } = midiNotesFor(asset, clipId)
-  const duration = clipDurationTicks(asset, totalTicks)
+  const conform = track.kind === 'audio' ? loopConformFor(asset) : null
+  // A loop already AT the project tempo just gets its duration snapped to
+  // its beat count — no audible change, perfect tiling, nothing to ask.
+  // Otherwise the tempo-conform preference decides: 'always' bakes the
+  // stretch into the created clip (same tape-style conform as
+  // project/setTempo), 'ask' imports plain and offers a one-click
+  // status-bar action, 'never' imports plain.
+  const applied =
+    conform !== null && (conform.stretch === 1 || preferences.tempoConform === 'always')
+      ? conform
+      : null
+  const duration = applied !== null ? applied.durationTicks : clipDurationTicks(asset, totalTicks)
   const fade = defaultFadeFor(asset.kind, duration)
   return {
     clip: {
@@ -141,11 +194,82 @@ function clipFor(
       fadeOut: fade,
       reverse: false,
       pitch: 0,
-      stretch: 1,
+      stretch: applied !== null ? applied.stretch : 1,
       loopLength: 0
     },
-    notes
+    notes,
+    loop:
+      conform !== null && conform.stretch !== 1
+        ? {
+            clipId,
+            name: baseName(asset.name),
+            fileTempo: conform.fileTempo,
+            conformed: applied !== null
+          }
+        : null
   }
+}
+
+/**
+ * Stretch already-imported loop clips onto the project tempo — the
+ * "Stretch to fit" notice action. Everything is re-derived at click time
+ * (current tempo, current clip positions), and skips clips that vanished
+ * meanwhile. ONE clip/resizeMany: one click, one op, one undo.
+ */
+function conformImportedLoops(clipIds: readonly string[]): void {
+  const state = projectStore.state
+  const edits: Array<{
+    clipId: string
+    start: number
+    duration: number
+    offset: number
+    stretch: number
+  }> = []
+  for (const clipId of clipIds) {
+    const clip = state.clips[clipId]
+    if (!clip || clip.assetId === null) continue
+    const asset = assetStore.get(clip.assetId)
+    if (!asset) continue
+    const conform = loopConformFor(asset)
+    if (!conform) continue
+    edits.push({
+      clipId,
+      start: clip.start,
+      duration: conform.durationTicks,
+      offset: clip.offset,
+      stretch: conform.stretch
+    })
+  }
+  if (edits.length > 0) projectStore.dispatch({ type: 'clip/resizeMany', edits })
+}
+
+/**
+ * One notice per import batch about tempo-bearing loops. Under 'always'
+ * the clips were created conformed and the notice just says so; under
+ * 'ask' the notice carries the actual question as a one-click action
+ * (mirroring the tempo field's conform ask, without a popup mid-drop).
+ */
+function noticeLoopImports(loops: readonly LoopImportEntry[]): void {
+  if (loops.length === 0) return
+  const tempo = projectStore.state.tempo
+  const conformed = loops.filter((l) => l.conformed)
+  if (conformed.length > 0) {
+    statusNotice.show(
+      conformed.length === 1
+        ? `Stretched "${conformed[0].name}" (${conformed[0].fileTempo} BPM loop) to ${tempo} BPM.`
+        : `Stretched ${conformed.length} loops to ${tempo} BPM.`
+    )
+    return
+  }
+  if (preferences.tempoConform !== 'ask') return
+  const pending = loops.filter((l) => !l.conformed)
+  if (pending.length === 0) return
+  statusNotice.show(
+    pending.length === 1
+      ? `"${pending[0].name}" is a ${pending[0].fileTempo} BPM loop — project is ${tempo} BPM.`
+      : `${pending.length} imported loops carry their own tempo — project is ${tempo} BPM.`,
+    { label: 'Stretch to fit', run: () => conformImportedLoops(pending.map((p) => p.clipId)) }
+  )
 }
 
 /** Notes for a MIDI asset, remapped onto a fresh clip id. */
@@ -205,6 +329,7 @@ export async function importFilesToBay(
   files: readonly File[],
   folderId: FileNodeId | null
 ): Promise<void> {
+  noticeRexFiles(files)
   const failed: string[] = []
   const assets = (await importAssetBatch(files, failed)).filter(
     (a): a is ProjectAsset => a !== null
@@ -228,6 +353,7 @@ export async function importFilesToTrack(
   track: Track,
   startTicks: number
 ): Promise<void> {
+  noticeRexFiles(files)
   const failed: string[] = []
   const accepted = files.filter((file) =>
     track.kind === 'audio' ? isAudioFile(file) : isMidiFile(file)
@@ -241,10 +367,12 @@ export async function importFilesToTrack(
   let cursor = Math.max(0, startTicks)
   const clips: Clip[] = []
   const notes: Note[] = []
+  const loops: LoopImportEntry[] = []
   for (const asset of assets) {
     const placed = clipFor(asset, track, cursor)
     clips.push(placed.clip)
     notes.push(...placed.notes)
+    if (placed.loop) loops.push(placed.loop)
     cursor += placed.clip.duration
   }
   if (clips.length === 1) {
@@ -252,6 +380,7 @@ export async function importFilesToTrack(
   } else if (clips.length > 1) {
     projectStore.dispatch({ type: 'clip/createMany', clips, notes })
   }
+  noticeLoopImports(loops)
   reportFailedImports(failed)
 }
 
@@ -261,6 +390,7 @@ export async function importFilesToTrack(
  * with the clip at the song start.
  */
 export async function importFilesAsNewTracks(files: readonly File[]): Promise<void> {
+  noticeRexFiles(files)
   const failed: string[] = []
   const accepted = files.filter((file) => isMidiFile(file) || isAudioFile(file))
   const assets = await importAssetBatch(accepted, failed)
@@ -273,6 +403,7 @@ export async function importFilesAsNewTracks(files: readonly File[]): Promise<vo
 
   const clips: Clip[] = []
   const notes: Note[] = []
+  const loops: LoopImportEntry[] = []
   for (let i = 0; i < accepted.length; i++) {
     const asset = assets[i]
     if (!asset) continue
@@ -281,12 +412,14 @@ export async function importFilesAsNewTracks(files: readonly File[]): Promise<vo
     const placed = clipFor(asset, track, 0)
     clips.push(placed.clip)
     notes.push(...placed.notes)
+    if (placed.loop) loops.push(placed.loop)
   }
   if (clips.length === 1) {
     projectStore.dispatch({ type: 'clip/create', clip: clips[0], notes })
   } else if (clips.length > 1) {
     projectStore.dispatch({ type: 'clip/createMany', clips, notes })
   }
+  noticeLoopImports(loops)
   reportFailedImports(failed)
 }
 
@@ -363,28 +496,13 @@ export function createClipFromBayAsset(
 ): void {
   const asset = assetStore.get(payload.assetId)
   if (!asset || asset.kind !== track.kind) return
-  const clipId = newId('clp')
-  const { notes, totalTicks } = midiNotesFor(asset, clipId)
-  const duration = clipDurationTicks(asset, totalTicks)
-  const fade = defaultFadeFor(asset.kind, duration)
+  // Same path as an OS-file drop, so ACID loop metadata gets the same
+  // conform treatment; the bay entry's (possibly renamed) name wins.
+  const placed = clipFor(asset, track, Math.max(0, startTicks))
   projectStore.dispatch({
     type: 'clip/create',
-    clip: {
-      id: clipId,
-      trackId: track.id,
-      name: payload.name,
-      start: Math.max(0, startTicks),
-      duration,
-      assetId: asset.id,
-      offset: 0,
-      color: null,
-      fadeIn: fade,
-      fadeOut: fade,
-      reverse: false,
-      pitch: 0,
-      stretch: 1,
-      loopLength: 0
-    },
-    notes
+    clip: { ...placed.clip, name: payload.name },
+    notes: placed.notes
   })
+  noticeLoopImports(placed.loop ? [{ ...placed.loop, name: payload.name }] : [])
 }

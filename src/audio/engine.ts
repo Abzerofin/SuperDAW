@@ -28,7 +28,7 @@ import { externalInsertProvider } from './externalInsert'
 import { clipFadeEvents } from './fades'
 import { buildInstrumentVoice, buildLiveInstrumentVoice, type InstrumentSample } from './instruments'
 import { LivePreview } from './livePreview'
-import { onsetsForPeaks } from './onsets'
+import { assetOnsetSeconds } from './loopMeta'
 import { computePdc, pdcDelaysOf } from './pdc'
 import {
   pluginRegistry,
@@ -2470,7 +2470,9 @@ export class AudioEngine {
     return {
       bufferId,
       durationSec: asset.buffer.duration,
-      onsets: onsetsForPeaks(asset.peaks, asset.peaksPerSecond)
+      // File cue markers (authorial slice map) when present, else detected
+      // transients — the shared seam keeps index-based slices consistent.
+      onsets: assetOnsetSeconds(asset)
     }
   }
 

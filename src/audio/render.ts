@@ -16,7 +16,7 @@ import { paramDefsOf } from '@core/plugins/builtin'
 import { WebAudioBackend } from './backend'
 import { applyClipFades } from './fades'
 import { buildInstrumentVoice, type InstrumentSample } from './instruments'
-import { onsetsForPeaks } from './onsets'
+import { assetOnsetSeconds } from './loopMeta'
 import { pluginRegistry } from './pluginRegistry'
 import { scheduleClips, scheduleNotes, ticksPerSecond } from './scheduling'
 import { encodeWavPcm16 } from './wav'
@@ -39,6 +39,9 @@ interface AssetSourceLike {
     /** Peak envelope — the sampler's slice boundaries derive from it. */
     peaks?: Float32Array | null
     peaksPerSecond?: number
+    /** Encoded bytes + extension — file cue markers override detected onsets. */
+    encoded?: Uint8Array
+    ext?: string
   } | undefined
   getSeconds(id: string): number | null
   /** Mirrored copy for reversed clips (cached per asset by the store). */
@@ -90,7 +93,8 @@ function samplerSampleFor(
   return {
     bufferId: assetId,
     durationSec: asset.buffer.duration,
-    onsets: onsetsForPeaks(asset.peaks ?? null, asset.peaksPerSecond ?? 0)
+    // Same seam as the live engine: cue markers first, detected onsets else.
+    onsets: assetOnsetSeconds(asset)
   }
 }
 

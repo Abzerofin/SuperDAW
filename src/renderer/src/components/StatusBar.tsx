@@ -11,7 +11,7 @@ import { useAudioDevices } from '@/state/audioDevices'
 import { useCollab } from '@/state/collab'
 import { audioEngine, assetStore } from '@/state/audioInstance'
 import { healthSampler } from '@/state/health'
-import { statusNotice, useStatusNotice } from '@/state/statusNotice'
+import { statusNotice, useStatusNotice, useStatusNoticeAction } from '@/state/statusNotice'
 
 export function StatusBar(): React.JSX.Element {
   const state = useProjectState()
@@ -170,14 +170,32 @@ function HealthStatus({ state }: { state: ProjectState }): React.JSX.Element {
   )
 }
 
-/** One-shot app notice (export loudness reports etc.) — same contract. */
+/**
+ * One-shot app notice (export loudness reports etc.) — same contract. A
+ * notice may carry ONE action (e.g. "Stretch to fit" after a loop import);
+ * running it dismisses the notice, and so does clicking the text.
+ */
 function AppNotice(): React.JSX.Element | null {
   const notice = useStatusNotice()
+  const action = useStatusNoticeAction()
   if (!notice) return null
   return (
-    <button className="statusbar-notice" title="Dismiss" onClick={() => statusNotice.dismiss()}>
-      {notice}
-    </button>
+    <span className="statusbar-notice-group">
+      <button className="statusbar-notice" title="Dismiss" onClick={() => statusNotice.dismiss()}>
+        {notice}
+      </button>
+      {action && (
+        <button
+          className="statusbar-notice-action"
+          onClick={() => {
+            action.run()
+            statusNotice.dismiss()
+          }}
+        >
+          {action.label}
+        </button>
+      )}
+    </span>
   )
 }
 

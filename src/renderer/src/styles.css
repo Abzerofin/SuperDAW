@@ -3824,6 +3824,26 @@ body.middle-panning * {
   color: var(--text);
 }
 
+.statusbar-notice-group {
+  display: inline-flex;
+  align-items: center;
+  min-width: 0;
+}
+
+.statusbar-notice-action {
+  color: var(--accent);
+  font-size: 11px;
+  padding: 1px 8px;
+  border: 1px solid var(--border);
+  border-radius: 3px;
+  white-space: nowrap;
+  flex: none;
+}
+
+.statusbar-notice-action:hover {
+  border-color: var(--accent);
+}
+
 /* ---------- Home screen ---------- */
 .home {
   height: 100%;
