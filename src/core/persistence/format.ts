@@ -200,8 +200,10 @@ function normalizeState(state: ProjectState): ProjectState {
     const {
       loop: legacyLoopFlag,
       warp: rawWarp,
+      takeGroupId: rawTakeGroup,
+      takeActive: rawTakeActive,
       ...rest
-    } = clip as Clip & { loop?: boolean; warp?: unknown }
+    } = clip as Clip & { loop?: boolean; warp?: unknown; takeGroupId?: unknown; takeActive?: unknown }
     const legacy = rest as Omit<
       Clip,
       'fadeIn' | 'fadeOut' | 'reverse' | 'pitch' | 'stretch' | 'loopLength' | 'warp'
@@ -216,7 +218,13 @@ function normalizeState(state: ProjectState): ProjectState {
       stretch: legacy.stretch ?? 1,
       loopLength: legacyLoopFlag === false ? 0 : (legacy.loopLength ?? 0),
       // Additive: pre-warp files have none; junk collapses to tape mode.
-      ...(rawWarp === true ? { warp: true } : {})
+      ...(rawWarp === true ? { warp: true } : {}),
+      // Take fields, canonical: membership only as a non-empty string,
+      // the active flag only as `true` on a member — junk collapses to
+      // absent (an ordinary clip), so a round-trip is identity.
+      ...(typeof rawTakeGroup === 'string' && rawTakeGroup !== ''
+        ? { takeGroupId: rawTakeGroup, ...(rawTakeActive === true ? { takeActive: true } : {}) }
+        : {})
     }
   }
   // Pads re-earn their place through the reducer's own sanitizer —

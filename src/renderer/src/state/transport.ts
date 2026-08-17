@@ -1,5 +1,5 @@
 import { PPQ } from '@core/model/timebase'
-import { isTrackEffectivelyAudible } from '@core/model/types'
+import { isClipTakeAudible, isTrackEffectivelyAudible } from '@core/model/types'
 import { projectStore } from './projectStore'
 
 /**
@@ -53,8 +53,9 @@ function songEndTicks(): number {
     // it once per track rather than once per clip.
     const audible = new Map<string, boolean>()
     let end = 0
-    // Patterns are bank material, not arrangement: they never extend the song.
-    for (const clip of Object.values(clips).filter((c) => !c.isPattern)) {
+    // Patterns are bank material, not arrangement: they never extend the
+    // song — and inactive takes are silent, so they never extend it either.
+    for (const clip of Object.values(clips).filter((c) => !c.isPattern && isClipTakeAudible(c))) {
       let ok = audible.get(clip.trackId)
       if (ok === undefined) {
         ok = isTrackEffectivelyAudible(state, clip.trackId)

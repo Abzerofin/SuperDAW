@@ -23,7 +23,10 @@ function snapshotSelected(): { clip: Clip; notes: Note[] } | null {
 
 /** Create a copy of `source` at (trackId, start) with fresh ids; selects it. */
 function createCopy(source: { clip: Clip; notes: Note[] }, trackId: string, start: number): void {
-  const clip: Clip = { ...source.clip, id: newId('clp'), trackId, start: Math.max(0, start) }
+  // A pasted/duplicated clip is new material at a new spot, not another
+  // take of the source's region — membership never travels with a copy.
+  const { takeGroupId: _tg, takeActive: _ta, ...rest } = source.clip
+  const clip: Clip = { ...rest, id: newId('clp'), trackId, start: Math.max(0, start) }
   const notes: Note[] = source.notes.map((n) => ({ ...n, id: newId('not'), clipId: clip.id }))
   projectStore.dispatch({ type: 'clip/create', clip, notes })
   selection.select(clip.id, clip.trackId)

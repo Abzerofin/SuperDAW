@@ -25,6 +25,21 @@ import type {
 } from '../model/types'
 
 /**
+ * ABSOLUTE take-group fields for one existing clip: `groupId: null` clears
+ * membership entirely (takeActive goes with it), a string stamps the clip
+ * into that group with the given active flag. Absolute values are what
+ * make every carrier idempotent under at-least-once delivery and
+ * last-write-wins under concurrency, and make inverts exact (the previous
+ * fields of the same clips). Entries whose clip no longer exists are
+ * dropped individually (convergence).
+ */
+export interface TakeFieldEntry {
+  readonly clipId: ClipId
+  readonly groupId: string | null
+  readonly active: boolean
+}
+
+/**
  * Every mutation of project state is expressed as one of these operations.
  * Operations are plain serializable data: the same objects drive local edits,
  * undo/redo, the activity feed, and (later) real-time network sync. Nothing
@@ -268,13 +283,44 @@ export type Operation =
       folderId: TrackId
       restore: Array<{ trackId: TrackId; parentId: TrackId | null; index: number }>
     }
-  /** `notes` seeds MIDI content (import, undo-restore); empty for new clips. */
-  | { type: 'clip/create'; clip: Clip; notes: Note[] }
-  | { type: 'clip/delete'; clipId: ClipId }
-  /** Delete a multi-clip selection as one undoable step. */
-  | { type: 'clip/deleteMany'; clipIds: ClipId[] }
+  /**
+   * Choose which take of a group sounds: ABSOLUTE active flags for every
+   * member, in ONE op — so one click is one operation, re-delivery is
+   * idempotent, and two peers clicking different takes converge whole-group
+   * last-write-wins (the later op names every member's flag). Entries whose
+   * clip is gone or has left the group are skipped individually; the invert
+   * is the same shape with the previous flags.
+   */
+  | { type: 'take/activate'; groupId: string; clips: Array<{ clipId: ClipId; active: boolean }> }
+  /**
+   * Stamp take-group membership onto existing clips — the manual "Group as
+   * takes" / "Ungroup" gestures and every take invert. Fully absolute per
+   * clip (see TakeFieldEntry), so grouping, ungrouping and restoring mixed
+   * previous memberships are all this one op and all exactly invertible.
+   * The reducer keeps groups on one track: an entry that would stamp a
+   * clip into a group living on another track is dropped.
+   */
+  | { type: 'take/setGroups'; entries: TakeFieldEntry[] }
+  /**
+   * `notes` seeds MIDI content (import, undo-restore); empty for new clips.
+   * `takes` (also on the other three clip create/delete ops) stamps
+   * absolute take fields onto OTHER existing clips in the same op — the
+   * recording commit: the new clip joins/forms a take group as THE active
+   * take while the previous active deactivates, one gesture, one op, one
+   * undo. The invert carries the previous fields back the same way
+   * (mirroring how plugin/add's severedRoutes pair with plugin/remove's
+   * restoreRoutes).
+   */
+  | { type: 'clip/create'; clip: Clip; notes: Note[]; takes?: TakeFieldEntry[] }
+  | { type: 'clip/delete'; clipId: ClipId; takes?: TakeFieldEntry[] }
+  /**
+   * Delete a multi-clip selection as one undoable step. With `takes`, also
+   * the flatten gesture: delete a group's inactive takes and clear the
+   * kept clip's membership in the same op.
+   */
+  | { type: 'clip/deleteMany'; clipIds: ClipId[]; takes?: TakeFieldEntry[] }
   /** Restore several clips with their notes — the inverse of the above. */
-  | { type: 'clip/createMany'; clips: Clip[]; notes: Note[] }
+  | { type: 'clip/createMany'; clips: Clip[]; notes: Note[]; takes?: TakeFieldEntry[] }
   | { type: 'clip/move'; clipId: ClipId; trackId: TrackId; start: number }
   /**
    * `loopLength` present = the gesture also set the loop period (the loop
@@ -390,6 +436,14 @@ export type Operation =
       leftDuration?: number
       rightFades?: readonly [fadeIn: number, fadeOut: number]
       leftFadeOut?: number
+      /**
+       * Take fields for the reconstructed right clip — carried by
+       * clip/merge's invert (the absorbed clip may have held different
+       * take fields than the left one). Interactive splits omit it: the
+       * right half then inherits the left's membership, so cutting a take
+       * yields two takes of the same group.
+       */
+      rightTake?: { groupId: string | null; active: boolean }
     }
   /** Extend `clipId` over `rightClipId` and absorb its notes (undo of split). */
   | { type: 'clip/merge'; clipId: ClipId; rightClipId: ClipId }

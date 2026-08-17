@@ -46,12 +46,24 @@ export function buildDuplicateTrackOp(state: ProjectState, trackId: TrackId): Op
    * it came from.
    */
   const clipIdMap = new Map<string, string>()
+  /**
+   * Take groups remap like clip ids: the copy keeps its comping (same
+   * members, same active take) under FRESH group ids, because a group id
+   * shared across two tracks would breach the one-track-per-group rule.
+   */
+  const takeGroupMap = new Map<string, string>()
   for (const t of subtree) {
     const newTrackId = trackIdMap.get(t.id)!
     for (const clip of clipsOfTrack(state, t.id)) {
       const newClipId = newId('clp')
       clipIdMap.set(clip.id, newClipId)
-      clips.push({ ...clip, id: newClipId, trackId: newTrackId })
+      let cloned = { ...clip, id: newClipId, trackId: newTrackId }
+      if (clip.takeGroupId) {
+        let mapped = takeGroupMap.get(clip.takeGroupId)
+        if (!mapped) takeGroupMap.set(clip.takeGroupId, (mapped = newId('tkg')))
+        cloned = { ...cloned, takeGroupId: mapped }
+      }
+      clips.push(cloned)
       for (const note of Object.values(state.notes)) {
         if (note.clipId !== clip.id) continue
         notes.push({ ...note, id: newId('nte'), clipId: newClipId })

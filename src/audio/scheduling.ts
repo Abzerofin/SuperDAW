@@ -4,6 +4,7 @@ import {
   clipPlaybackRate,
   clipWarpFactor,
   isClipLooped,
+  isClipTakeAudible,
   isNoteTrackKind,
   noteSourceOf,
   timelineClips
@@ -154,6 +155,11 @@ export function scheduleClips(
 
   for (const clip of timelineClips(state)) {
     if (clip.assetId === null) continue
+    // Inactive takes are silent. Per-clip on purpose: if concurrent edits
+    // leave several members of a group claiming active, ALL of them play
+    // until the next take/activate converges the group — simple, never
+    // silent by accident, and identical on every peer.
+    if (!isClipTakeAudible(clip)) continue
     const track = state.tracks[clip.trackId]
     if (!track || track.frozenAssetId !== null) continue // frozen: render replaces live clips
     const sourceSec = assetSeconds(clip.assetId)
@@ -227,12 +233,16 @@ export interface TrackLoopSpan {
   readonly end: number
 }
 
-/** The region a track loop repeats: the extent of the track's clips. */
+/**
+ * The region a track loop repeats: the extent of the track's AUDIBLE
+ * clips. Inactive takes are silent, so they must not stretch the loop
+ * over material nobody hears — the same rule songEndTicks applies.
+ */
 export function trackLoopSpan(state: ProjectState, trackId: string): TrackLoopSpan | null {
   let start = Number.POSITIVE_INFINITY
   let end = 0
   for (const clip of timelineClips(state)) {
-    if (clip.trackId !== trackId) continue
+    if (clip.trackId !== trackId || !isClipTakeAudible(clip)) continue
     start = Math.min(start, clip.start)
     end = Math.max(end, clip.start + clip.duration)
   }
@@ -334,6 +344,9 @@ export function scheduleNotes(
 
   for (const clip of timelineClips(state)) {
     if (clip.assetId !== null) continue // an audio clip has no notes
+    // Inactive takes are silent — same rule as scheduleClips, so audio
+    // and MIDI takes comp identically.
+    if (!isClipTakeAudible(clip)) continue
     const track = state.tracks[clip.trackId]
     if (!track || !isNoteTrackKind(track.kind)) continue
     if (track.frozenAssetId !== null) continue // frozen: the render replaces the synth

@@ -13,6 +13,7 @@ import {
   MIN_STRETCH,
   TRACK_KIND_LABELS
 } from '@core/model/types'
+import { buildActivateTakeOp } from '@core/ops/takes'
 import { PPQ, barsToTicks, snapTicks, ticksPerBar } from '@core/model/timebase'
 import { newId } from '@core/model/ids'
 import { projectStore } from '@/state/projectStore'
@@ -42,6 +43,7 @@ import { automationUi, useAutomationUi } from '@/state/automationUi'
 import { editorUi } from '@/state/editorUi'
 import { useRecording } from '@/state/recording'
 import { folderUi, useFolderUi } from '@/state/folderUi'
+import { takeLanesUi, useTakeLanesUi } from '@/state/takeLanesUi'
 import { trackViewUi, useTrackViewUi } from '@/state/trackViewUi'
 import { useRulerMode } from '@/state/rulerUi'
 import { audioEngine } from '@/state/audioInstance'
@@ -52,6 +54,7 @@ import {
   LANE_H,
   COMPACT_LANE_H,
   AUTO_H,
+  TAKE_LANE_H,
   DROP_BAR_H,
   MIN_PX_PER_BEAT,
   MAX_PX_PER_BEAT
@@ -336,6 +339,7 @@ export function TimelineView(): React.JSX.Element {
 
   const autoUi = useAutomationUi()
   const foldUi = useFolderUi()
+  const takeUi = useTakeLanesUi()
   // Compact mode shrinks every row and strips the header down to its name.
   const compact = useTrackViewUi().compact
   const laneH = compact ? COMPACT_LANE_H : LANE_H
@@ -368,10 +372,49 @@ export function TimelineView(): React.JSX.Element {
   const trackIdList = useMemo(() => tracks.map((t) => t.id), [tracks])
   const trackCount = tracks.length
 
-  // Row layout: each track lane, optionally followed by its automation lane.
-  // All overlay layers position by trackTops (content px below the ruler).
+  // Take-group bookkeeping for badges and expanded lanes: each member's
+  // deterministic index within its group (start, then id — the same order
+  // takeGroupMembers uses in core), plus the sub-lane count per track (the
+  // largest group decides). Memoized on the clips record only.
+  const { takeInfoByClip, takeLaneCounts } = useMemo(() => {
+    const groups = new Map<string, Array<(typeof state.clips)[string]>>()
+    for (const clip of Object.values(state.clips)) {
+      if (!clip.takeGroupId) continue
+      const list = groups.get(clip.takeGroupId)
+      if (list) list.push(clip)
+      else groups.set(clip.takeGroupId, [clip])
+    }
+    const takeInfoByClip = new Map<
+      ClipId,
+      { index: number; count: number; groupId: string; active: boolean }
+    >()
+    const takeLaneCounts = new Map<string, number>()
+    for (const [groupId, members] of groups) {
+      members.sort((a, b) => a.start - b.start || (a.id < b.id ? -1 : a.id > b.id ? 1 : 0))
+      members.forEach((clip, index) => {
+        takeInfoByClip.set(clip.id, {
+          index,
+          count: members.length,
+          groupId,
+          active: clip.takeActive === true
+        })
+      })
+      const trackId = members[0].trackId
+      takeLaneCounts.set(trackId, Math.max(takeLaneCounts.get(trackId) ?? 0, members.length))
+    }
+    return { takeInfoByClip, takeLaneCounts }
+  }, [state.clips])
+
+  // Row layout: each track lane, optionally followed by its expanded take
+  // stack and/or its automation lane. All overlay layers position by
+  // trackTops (content px below the ruler).
+  const takeVersion = takeLanesUi.getVersion()
   const { rowMeta, trackTops, gridRowOfTrack, lastGridRow } = useMemo(() => {
-    const rowMeta = tracks.map((track) => ({ track, auto: autoUi.isOpen(track.id) }))
+    const rowMeta = tracks.map((track) => ({
+      track,
+      auto: autoUi.isOpen(track.id),
+      takeLanes: takeUi.isOpen(track.id) ? (takeLaneCounts.get(track.id) ?? 0) : 0
+    }))
     const trackTops: number[] = []
     const gridRowOfTrack: number[] = []
     let top = 0
@@ -381,28 +424,41 @@ export function TimelineView(): React.JSX.Element {
       gridRowOfTrack.push(row)
       top += laneH
       row += 1
+      if (meta.takeLanes > 0) {
+        top += meta.takeLanes * TAKE_LANE_H
+        row += 1
+      }
       if (meta.auto) {
         top += AUTO_H
         row += 1
       }
     }
-    const lastGridRow = 2 + rowMeta.reduce((n, m) => n + (m.auto ? 2 : 1), 0)
+    const lastGridRow =
+      2 + rowMeta.reduce((n, m) => n + 1 + (m.takeLanes > 0 ? 1 : 0) + (m.auto ? 1 : 0), 0)
     return { rowMeta, trackTops, gridRowOfTrack, lastGridRow }
-  }, [tracks, autoVersion, laneH])
+  }, [tracks, autoVersion, takeVersion, takeLaneCounts, laneH])
   // A trailing drop bar always closes the list: it is where files land to
   // become new tracks, and it doubles as the empty-project call to action.
   const rowTemplate =
     trackCount === 0
       ? `${RULER_H}px ${DROP_BAR_H}px`
       : `${RULER_H}px ${rowMeta
-          .map((m) => (m.auto ? `${laneH}px ${AUTO_H}px` : `${laneH}px`))
+          .map(
+            (m) =>
+              `${laneH}px${m.takeLanes > 0 ? ` ${m.takeLanes * TAKE_LANE_H}px` : ''}${
+                m.auto ? ` ${AUTO_H}px` : ''
+              }`
+          )
           .join(' ')} ${DROP_BAR_H}px`
+
+  /** Full height of a track's row block: lane + take stack + automation. */
+  const rowBlockH = (i: number): number =>
+    laneH + rowMeta[i].takeLanes * TAKE_LANE_H + (rowMeta[i].auto ? AUTO_H : 0)
 
   /** Track index for a y position in content coordinates (below the ruler). */
   const trackIndexAtY = (y: number): number => {
     for (let i = 0; i < rowMeta.length; i++) {
-      const bottom = trackTops[i] + laneH + (rowMeta[i].auto ? AUTO_H : 0)
-      if (y < bottom) return i
+      if (y < trackTops[i] + rowBlockH(i)) return i
     }
     return Math.max(0, rowMeta.length - 1)
   }
@@ -922,7 +978,7 @@ export function TimelineView(): React.JSX.Element {
 
       let slot = rowMeta.length
       for (let i = 0; i < rowMeta.length; i++) {
-        const mid = trackTops[i] + (laneH + (rowMeta[i].auto ? AUTO_H : 0)) / 2
+        const mid = trackTops[i] + rowBlockH(i) / 2
         if (y < mid) {
           slot = i
           break
@@ -1101,6 +1157,16 @@ export function TimelineView(): React.JSX.Element {
             ? { type: 'clip/resize', ...edits[0] }
             : { type: 'clip/resizeMany', edits }
         )
+      }
+    } else {
+      // A plain CLICK (no movement) on a take in the expanded lanes is the
+      // comping gesture: choose that take — ONE take/activate op with
+      // absolute flags for the whole group. Clicking the already-active
+      // take dispatches a no-op the store drops.
+      const clip = projectStore.state.clips[ended.clipId]
+      if (clip?.takeGroupId && ended.others.length === 0 && takeLanesUi.isOpen(clip.trackId)) {
+        const op = buildActivateTakeOp(projectStore.state, ended.clipId)
+        if (op) projectStore.dispatch(op)
       }
     }
     setDrag(null)
@@ -1428,8 +1494,14 @@ export function TimelineView(): React.JSX.Element {
       const trackIndex = rowIndexOfTrack.get(clip.trackId)
       if (trackIndex === undefined) continue
       if (!dragPreviews.has(clip.id)) {
-        const laneTop = trackTops[trackIndex]
-        if (laneTop + laneH < topPx || laneTop > bottomPx) continue
+        // A take in an expanded stack sits in its sub-lane, not the main
+        // lane — cull against where it is actually drawn.
+        const info = takeInfoByClip.get(clip.id)
+        const inSubLane = info !== undefined && rowMeta[trackIndex].takeLanes > 0
+        const laneTop =
+          trackTops[trackIndex] + (inSubLane ? laneH + info.index * TAKE_LANE_H : 0)
+        const laneBottom = laneTop + (inSubLane ? TAKE_LANE_H : laneH)
+        if (laneBottom < topPx || laneTop > bottomPx) continue
         const clipLeft = clip.start * pxPerTick
         const clipRight = (clip.start + clip.duration) * pxPerTick
         if (clipRight < leftPx || clipLeft > rightPx) continue
@@ -1437,7 +1509,7 @@ export function TimelineView(): React.JSX.Element {
       result.push(clip)
     }
     return result
-  }, [state.clips, rowIndexOfTrack, trackTops, laneH, pxPerTick, view, dragPreviews])
+  }, [state.clips, rowIndexOfTrack, trackTops, rowMeta, takeInfoByClip, laneH, pxPerTick, view, dragPreviews])
 
   // Grid lines are drawn by a stylesheet rule off these two custom
   // properties — ONE style write on the grid element instead of a fresh
@@ -1579,7 +1651,9 @@ export function TimelineView(): React.JSX.Element {
           <div
             key={track.id}
             style={{
-              gridRow: `${gridRowOfTrack[i]} / span ${rowMeta[i].auto ? 2 : 1}`,
+              gridRow: `${gridRowOfTrack[i]} / span ${
+                1 + (rowMeta[i].takeLanes > 0 ? 1 : 0) + (rowMeta[i].auto ? 1 : 0)
+              }`,
               gridColumn: 1
             }}
             className={`header-cell ${
@@ -1656,11 +1730,31 @@ export function TimelineView(): React.JSX.Element {
 
         {tracks.map(
           (track, i) =>
+            rowMeta[i].takeLanes > 0 && (
+              <div
+                key={`takes-${track.id}`}
+                className="take-row"
+                style={{ gridRow: gridRowOfTrack[i] + 1, gridColumn: 2 }}
+              >
+                {Array.from({ length: rowMeta[i].takeLanes }, (_, n) => (
+                  <div key={n} className="take-sublane" style={{ height: TAKE_LANE_H }}>
+                    <span className="take-sublane-label mono">T{n + 1}</span>
+                  </div>
+                ))}
+              </div>
+            )
+        )}
+
+        {tracks.map(
+          (track, i) =>
             rowMeta[i].auto && (
               <div
                 key={`auto-${track.id}`}
                 className="auto-row"
-                style={{ gridRow: gridRowOfTrack[i] + 1, gridColumn: 2 }}
+                style={{
+                  gridRow: gridRowOfTrack[i] + 1 + (rowMeta[i].takeLanes > 0 ? 1 : 0),
+                  gridColumn: 2
+                }}
               >
                 <AutomationLane
                   track={track}
@@ -1681,6 +1775,8 @@ export function TimelineView(): React.JSX.Element {
               const trackIndex = rowIndexOfTrack.get(clip.trackId) ?? -1
               const track = state.tracks[clip.trackId]
               if (trackIndex === -1 || !track) return null
+              const takeInfo = takeInfoByClip.get(clip.id)
+              const inSubLane = takeInfo !== undefined && rowMeta[trackIndex].takeLanes > 0
               return (
                 <ClipView
                   key={clip.id}
@@ -1690,6 +1786,12 @@ export function TimelineView(): React.JSX.Element {
                   preview={dragPreviews.get(clip.id) ?? null}
                   selected={selection.isClipSelected(clip.id)}
                   dimmed={isSilent(track.id) || track.frozenAssetId !== null}
+                  takeBadge={
+                    takeInfo ? `T${takeInfo.index + 1}/${takeInfo.count}` : null
+                  }
+                  takeInactive={takeInfo !== undefined && !takeInfo.active}
+                  subTop={inSubLane ? laneH + takeInfo.index * TAKE_LANE_H : 0}
+                  subHeight={inSubLane ? TAKE_LANE_H : 0}
                   pxPerTick={pxPerTick}
                   tempo={state.tempo}
                   laneTops={trackTops}
@@ -1789,9 +1891,7 @@ export function TimelineView(): React.JSX.Element {
                   top:
                     reorder.slot < rowMeta.length
                       ? trackTops[reorder.slot]
-                      : trackTops[rowMeta.length - 1] +
-                        laneH +
-                        (rowMeta[rowMeta.length - 1].auto ? AUTO_H : 0)
+                      : trackTops[rowMeta.length - 1] + rowBlockH(rowMeta.length - 1)
                 }}
               />
             )}

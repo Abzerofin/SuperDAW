@@ -196,6 +196,59 @@ suite('buildMidiTakeOp', () => {
     expect(apply(apply(before, op), inverse!)).toEqual(before)
   })
 
+  test('recording over existing material comps: new clip joins/forms the group as active', () => {
+    const s = baseState()
+    // m1 already holds c1 over these bars.
+    const op = buildMidiTakeOp(s, [
+      take('m1', 0, BAR, [{ pitch: 60, velocity: 100, startTicks: 0, endTicks: 480 }])
+    ])
+    if (op?.type !== 'clip/create') throw new Error('expected clip/create')
+    expect(op.clip.takeGroupId).toBeTruthy()
+    expect(op.clip.takeActive).toBe(true)
+    expect(op.takes).toEqual([{ clipId: 'c1', groupId: op.clip.takeGroupId, active: false }])
+    // Applying it: the fresh take sounds, the old material is silent.
+    const after = apply(s, op)
+    expect(after.clips[op.clip.id].takeActive).toBe(true)
+    expect(after.clips['c1'].takeGroupId).toBe(op.clip.takeGroupId)
+    expect('takeActive' in after.clips['c1']).toBe(false)
+  })
+
+  test('recording a third pass joins the existing group and deactivates every member', () => {
+    let s = baseState()
+    const second = buildMidiTakeOp(s, [
+      take('m1', 0, BAR, [{ pitch: 60, velocity: 100, startTicks: 0, endTicks: 480 }])
+    ])
+    if (second?.type !== 'clip/create') throw new Error('expected clip/create')
+    s = apply(s, second)
+    const third = buildMidiTakeOp(s, [
+      take('m1', 0, BAR, [{ pitch: 62, velocity: 100, startTicks: 0, endTicks: 480 }])
+    ])
+    if (third?.type !== 'clip/create') throw new Error('expected clip/create')
+    expect(third.clip.takeGroupId).toBe(second.clip.takeGroupId)
+    const stamped = new Set(third.takes?.map((t) => t.clipId))
+    expect(stamped).toEqual(new Set(['c1', second.clip.id]))
+    expect(third.takes?.every((t) => !t.active)).toBe(true)
+  })
+
+  test('a take over empty bars stays an ordinary clip (no group, no stamps)', () => {
+    const op = buildMidiTakeOp(baseState(), [
+      take('m2', 0, BAR, [{ pitch: 60, velocity: 100, startTicks: 0, endTicks: 480 }])
+    ])
+    if (op?.type !== 'clip/create') throw new Error('expected clip/create')
+    expect('takeGroupId' in op.clip).toBe(false)
+    expect(op.takes).toBeUndefined()
+  })
+
+  test('comped take round-trips: one undo removes the take and un-stamps the old clip', () => {
+    const before = baseState()
+    const op = buildMidiTakeOp(before, [
+      take('m1', 0, BAR, [{ pitch: 60, velocity: 100, startTicks: 0, endTicks: 480 }])
+    ])!
+    const inverse = invert(before, op)
+    expect(inverse).not.toBeNull()
+    expect(apply(apply(before, op), inverse!)).toEqual(before)
+  })
+
   test('re-applying the same op changes nothing (idempotent, at-least-once safe)', () => {
     const before = baseState()
     const single = buildMidiTakeOp(before, [

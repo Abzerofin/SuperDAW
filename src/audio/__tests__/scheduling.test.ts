@@ -833,6 +833,103 @@ suite('track loops', () => {
   })
 })
 
+suite('take groups (comping) in the schedulers', () => {
+  test('inactive audio takes are silent; the active one plays', () => {
+    const s = stateWith([
+      { start: 0, takeGroupId: 'tg1', takeActive: true },
+      { start: 0, takeGroupId: 'tg1' },
+      { start: 0, takeGroupId: 'tg1' }
+    ])
+    const scheduled = scheduleClips(s, tenSecondAsset, 0, 100)
+    expect(scheduled).toHaveLength(1)
+    expect(scheduled[0].clipId).toBe('c0')
+  })
+
+  test('a clip outside any group plays regardless of other groups', () => {
+    const s = stateWith([
+      { start: 0, takeGroupId: 'tg1' }, // inactive take: silent
+      { start: 0 } // ordinary clip
+    ])
+    const scheduled = scheduleClips(s, tenSecondAsset, 0, 100)
+    expect(scheduled.map((x) => x.clipId)).toEqual(['c1'])
+  })
+
+  test('several members claiming active ALL play (divergence tolerated)', () => {
+    const s = stateWith([
+      { start: 0, takeGroupId: 'tg1', takeActive: true },
+      { start: 0, takeGroupId: 'tg1', takeActive: true }
+    ])
+    expect(scheduleClips(s, tenSecondAsset, 0, 100)).toHaveLength(2)
+  })
+
+  test('inactive MIDI takes schedule no notes; the active one does', () => {
+    let s = createEmptyProject('Test')
+    s = { ...s, tempo: TEMPO }
+    s = apply(s, {
+      type: 'track/create',
+      track: {
+        id: 'm1',
+        kind: 'midi',
+        name: 'M',
+        color: '#fff',
+        muted: false,
+        soloed: false,
+        parentId: null,
+        frozenAssetId: null,
+        volume: 1,
+        pan: 0,
+        synth: {}
+      },
+      index: 0,
+      clips: [],
+      automation: [],
+      notes: [],
+      plugins: []
+    })
+    const midiClip = (id: string, active: boolean): Clip => ({
+      id,
+      trackId: 'm1',
+      name: id,
+      start: 0,
+      duration: PPQ * 4,
+      assetId: null,
+      offset: 0,
+      color: null,
+      fadeIn: 0,
+      fadeOut: 0,
+      reverse: false,
+      pitch: 0,
+      stretch: 1,
+      loopLength: 0,
+      takeGroupId: 'tg1',
+      ...(active ? { takeActive: true } : {})
+    })
+    s = apply(s, {
+      type: 'clip/create',
+      clip: midiClip('mcA', true),
+      notes: [{ id: 'nA', clipId: 'mcA', pitch: 60, start: 0, duration: PPQ, velocity: 100 }]
+    })
+    s = apply(s, {
+      type: 'clip/create',
+      clip: midiClip('mcB', false),
+      notes: [{ id: 'nB', clipId: 'mcB', pitch: 64, start: 0, duration: PPQ, velocity: 100 }]
+    })
+    const notes = scheduleNotes(s, 0, 100)
+    expect(notes).toHaveLength(1)
+    expect(notes[0].clipId).toBe('mcA')
+    expect(notes[0].pitch).toBe(60)
+  })
+
+  test('trackLoopSpan ignores inactive takes (they are silent material)', () => {
+    const s = stateWith([
+      { start: 0, duration: PPQ * 2, takeGroupId: 'tg1', takeActive: true },
+      // A longer inactive take must not stretch the loop over silence.
+      { start: 0, duration: PPQ * 16, takeGroupId: 'tg1' }
+    ])
+    expect(trackLoopSpan(s, 't1')).toEqual({ start: 0, end: PPQ * 2 })
+  })
+})
+
 suite('computePeaks', () => {
   test('captures min/max per bucket across channels', () => {
     const sampleRate = 100

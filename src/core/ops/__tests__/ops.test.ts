@@ -1643,3 +1643,291 @@ suite('project/setTempo trim-point preservation', () => {
   })
 })
 
+suite('take ops (comping)', () => {
+  /**
+   * baseState plus a second clip overlapping c1's bars and a take group on
+   * t1: tg1 = { c1 (0..960, active), c3 (480..1440, inactive) }. c2
+   * (1920..2880) stays loose. The starts differ so a merge of the two
+   * members stays reconstructable by its inverse split.
+   */
+  function takeState(): ProjectState {
+    let s = baseState()
+    s = apply(s, { type: 'clip/create', clip: clip('c3', 't1', 480, 960), notes: [] })
+    s = apply(s, {
+      type: 'take/setGroups',
+      entries: [
+        { clipId: 'c1', groupId: 'tg1', active: true },
+        { clipId: 'c3', groupId: 'tg1', active: false }
+      ]
+    })
+    return s
+  }
+
+  // Every new op shape (and every takes-carrying variant) gets the same
+  // apply(invert) round-trip the main invert suite runs.
+  const roundTrips: Operation[] = [
+    // Switch the active take: absolute flags for the whole group.
+    {
+      type: 'take/activate',
+      groupId: 'tg1',
+      clips: [
+        { clipId: 'c1', active: false },
+        { clipId: 'c3', active: true }
+      ]
+    },
+    // Deactivate everything (divergence-tolerant absolute form).
+    {
+      type: 'take/activate',
+      groupId: 'tg1',
+      clips: [
+        { clipId: 'c1', active: false },
+        { clipId: 'c3', active: false }
+      ]
+    },
+    // Pull a loose clip into an existing group.
+    { type: 'take/setGroups', entries: [{ clipId: 'c2', groupId: 'tg1', active: false }] },
+    // Dissolve the group; undo must restore membership AND active flags.
+    {
+      type: 'take/setGroups',
+      entries: [
+        { clipId: 'c1', groupId: null, active: false },
+        { clipId: 'c3', groupId: null, active: false }
+      ]
+    },
+    // Re-stamp into a fresh group with a different active member.
+    {
+      type: 'take/setGroups',
+      entries: [
+        { clipId: 'c1', groupId: 'tg2', active: false },
+        { clipId: 'c2', groupId: 'tg2', active: true }
+      ]
+    },
+    // The recording-commit shape: the new clip joins the group as THE
+    // active take, the previous active deactivates — one op.
+    {
+      type: 'clip/create',
+      clip: { ...clip('c9', 't1', 0, 960), takeGroupId: 'tg1', takeActive: true },
+      notes: [],
+      takes: [
+        { clipId: 'c1', groupId: 'tg1', active: false },
+        { clipId: 'c3', groupId: 'tg1', active: false }
+      ]
+    },
+    // ...and its inverse shape: delete a take while promoting another.
+    { type: 'clip/delete', clipId: 'c1', takes: [{ clipId: 'c3', groupId: 'tg1', active: true }] },
+    // Multi-track MIDI recording commit shape.
+    {
+      type: 'clip/createMany',
+      clips: [{ ...clip('c9', 't1', 0, 960), takeGroupId: 'tg1', takeActive: true }],
+      notes: [],
+      takes: [
+        { clipId: 'c1', groupId: 'tg1', active: false },
+        { clipId: 'c3', groupId: 'tg1', active: false }
+      ]
+    },
+    // Flatten: keep c1, drop the other take, clear membership — ONE op,
+    // so one undo restores the deleted take AND c1's previous membership.
+    {
+      type: 'clip/deleteMany',
+      clipIds: ['c3'],
+      takes: [{ clipId: 'c1', groupId: null, active: false }]
+    },
+    // Splitting a grouped take: both halves stay takes of the group.
+    { type: 'clip/split', clipId: 'c1', at: 480, rightClipId: 'cs1' },
+    // Merging a grouped clip over a LOOSE one: without the invert's
+    // rightTake, the reconstructing split would wrongly stamp c2 into
+    // c1's group by inheritance. (c2 is non-overlapping — a merge across
+    // an overlap cannot reconstruct exactly, take fields or not: the
+    // split reducer clamps leftDuration at the cut.)
+    { type: 'clip/merge', clipId: 'c1', rightClipId: 'c2' }
+  ]
+
+  for (const op of roundTrips) {
+    test(`apply(invert) restores state for ${op.type} (${JSON.stringify(op).slice(0, 60)}…)`, () => {
+      const before = takeState()
+      const inverse = invert(before, op)
+      expect(inverse).not.toBeNull()
+      const after = apply(before, op)
+      expect(after).not.toBe(before)
+      expect(apply(after, inverse!)).toEqual(before)
+    })
+  }
+
+  test('take fields keep their canonical form (absent, never false/null)', () => {
+    const s = takeState()
+    expect(s.clips['c1'].takeGroupId).toBe('tg1')
+    expect(s.clips['c1'].takeActive).toBe(true)
+    expect(s.clips['c3'].takeGroupId).toBe('tg1')
+    // Inactive member: the flag is ABSENT, not false.
+    expect('takeActive' in s.clips['c3']).toBe(false)
+    // Ungrouping removes both fields entirely.
+    const cleared = apply(s, {
+      type: 'take/setGroups',
+      entries: [
+        { clipId: 'c1', groupId: null, active: false },
+        { clipId: 'c3', groupId: null, active: false }
+      ]
+    })
+    expect('takeGroupId' in cleared.clips['c1']).toBe(false)
+    expect('takeActive' in cleared.clips['c1']).toBe(false)
+    // A clip/create carrying junk take fields is canonicalized on entry.
+    const junk = apply(s, {
+      type: 'clip/create',
+      clip: { ...clip('cj', 't2', 0, 960), takeGroupId: null, takeActive: true },
+      notes: []
+    })
+    expect('takeGroupId' in junk.clips['cj']).toBe(false)
+    expect('takeActive' in junk.clips['cj']).toBe(false)
+  })
+
+  test('take ops are idempotent under at-least-once re-delivery', () => {
+    const s = takeState()
+    const activate: Operation = {
+      type: 'take/activate',
+      groupId: 'tg1',
+      clips: [
+        { clipId: 'c1', active: false },
+        { clipId: 'c3', active: true }
+      ]
+    }
+    const once = apply(s, activate)
+    expect(apply(once, activate)).toBe(once)
+    const stamp: Operation = {
+      type: 'take/setGroups',
+      entries: [{ clipId: 'c2', groupId: 'tg1', active: false }]
+    }
+    const stamped = apply(s, stamp)
+    expect(apply(stamped, stamp)).toBe(stamped)
+    const record: Operation = {
+      type: 'clip/create',
+      clip: { ...clip('c9', 't1', 0, 960), takeGroupId: 'tg1', takeActive: true },
+      notes: [],
+      takes: [
+        { clipId: 'c1', groupId: 'tg1', active: false },
+        { clipId: 'c3', groupId: 'tg1', active: false }
+      ]
+    }
+    const recorded = apply(s, record)
+    expect(apply(recorded, record)).toBe(recorded)
+  })
+
+  test('entries for missing clips drop individually; the rest still land (convergence)', () => {
+    const s = takeState()
+    const applied = apply(s, {
+      type: 'take/setGroups',
+      entries: [
+        { clipId: 'ghost', groupId: 'tg9', active: true },
+        { clipId: 'c2', groupId: 'tg9', active: true }
+      ]
+    })
+    expect(applied.clips['c2'].takeGroupId).toBe('tg9')
+    const flip = apply(s, {
+      type: 'take/activate',
+      groupId: 'tg1',
+      clips: [
+        { clipId: 'ghost', active: true },
+        { clipId: 'c1', active: false },
+        { clipId: 'c3', active: true }
+      ]
+    })
+    expect('takeActive' in flip.clips['c1']).toBe(false)
+    expect(flip.clips['c3'].takeActive).toBe(true)
+  })
+
+  test('an activate racing an ungroup does not resurrect membership', () => {
+    const s = takeState()
+    const ungrouped = apply(s, {
+      type: 'take/setGroups',
+      entries: [
+        { clipId: 'c1', groupId: null, active: false },
+        { clipId: 'c3', groupId: null, active: false }
+      ]
+    })
+    // The stale activate targets tg1, which no clip belongs to anymore.
+    const after = apply(ungrouped, {
+      type: 'take/activate',
+      groupId: 'tg1',
+      clips: [
+        { clipId: 'c1', active: false },
+        { clipId: 'c3', active: true }
+      ]
+    })
+    expect(after).toBe(ungrouped)
+  })
+
+  test('a group can never stretch across tracks (the entry drops)', () => {
+    const s = takeState()
+    // c9 lives on t2; tg1 lives on t1.
+    const withOther = apply(s, { type: 'clip/create', clip: clip('c9', 't2', 0, 960), notes: [] })
+    const stamped = apply(withOther, {
+      type: 'take/setGroups',
+      entries: [{ clipId: 'c9', groupId: 'tg1', active: true }]
+    })
+    expect(stamped).toBe(withOther)
+  })
+
+  test('several actives after concurrent edits: both flags stand until converged', () => {
+    // Two peers activate different takes; the ops arrive in some order and
+    // the LATER one wins whole-group (absolute flags for every member).
+    const s = takeState()
+    const peerA: Operation = {
+      type: 'take/activate',
+      groupId: 'tg1',
+      clips: [
+        { clipId: 'c1', active: true },
+        { clipId: 'c3', active: false }
+      ]
+    }
+    const peerB: Operation = {
+      type: 'take/activate',
+      groupId: 'tg1',
+      clips: [
+        { clipId: 'c1', active: false },
+        { clipId: 'c3', active: true }
+      ]
+    }
+    const oneOrder = apply(apply(s, peerA), peerB)
+    const otherOrder = apply(apply(s, peerB), peerA)
+    expect(oneOrder.clips['c3'].takeActive).toBe(true)
+    expect('takeActive' in oneOrder.clips['c1']).toBe(false)
+    expect(otherOrder.clips['c1'].takeActive).toBe(true)
+    expect('takeActive' in otherOrder.clips['c3']).toBe(false)
+  })
+
+  test('splitting a grouped take leaves both halves in the group, active flag intact', () => {
+    const s = takeState()
+    const splitDone = apply(s, { type: 'clip/split', clipId: 'c1', at: 480, rightClipId: 'cs1' })
+    expect(splitDone.clips['cs1'].takeGroupId).toBe('tg1')
+    expect(splitDone.clips['cs1'].takeActive).toBe(true)
+    // The inactive member splits into two inactive halves.
+    const splitInactive = apply(s, { type: 'clip/split', clipId: 'c3', at: 960, rightClipId: 'cs3' })
+    expect(splitInactive.clips['cs3'].takeGroupId).toBe('tg1')
+    expect('takeActive' in splitInactive.clips['cs3']).toBe(false)
+  })
+
+  test('merging members with DIFFERENT take fields round-trips via rightTake', () => {
+    // c2 (1920..2880, non-overlapping) joins tg1 as an inactive take; the
+    // merged clip keeps c1's active membership, and undo must hand c2 its
+    // own previous fields back — inheritance alone would mark it active.
+    const before = apply(takeState(), {
+      type: 'take/setGroups',
+      entries: [{ clipId: 'c2', groupId: 'tg1', active: false }]
+    })
+    const op: Operation = { type: 'clip/merge', clipId: 'c1', rightClipId: 'c2' }
+    const inverse = invert(before, op)
+    expect(inverse).not.toBeNull()
+    const after = apply(before, op)
+    expect(after.clips['c2']).toBeUndefined()
+    expect(after.clips['c1'].takeActive).toBe(true)
+    expect(apply(after, inverse!)).toEqual(before)
+  })
+
+  test('deleting a take drops it from the group; remaining members are untouched', () => {
+    const s = takeState()
+    const after = apply(s, { type: 'clip/delete', clipId: 'c3' })
+    expect(after.clips['c3']).toBeUndefined()
+    expect(after.clips['c1'].takeGroupId).toBe('tg1')
+    expect(after.clips['c1'].takeActive).toBe(true)
+  })
+})
+

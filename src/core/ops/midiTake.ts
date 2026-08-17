@@ -2,7 +2,8 @@ import type { Clip, Note, ProjectState, TrackId } from '../model/types'
 import { clipsOfTrack, isNoteTrackKind } from '../model/types'
 import { ticksPerBar } from '../model/timebase'
 import { newId } from '../model/ids'
-import type { Operation } from './operations'
+import type { Operation, TakeFieldEntry } from './operations'
+import { takeCompForClip } from './takes'
 
 /**
  * One note captured live from a MIDI input, in ABSOLUTE timeline ticks
@@ -44,6 +45,12 @@ export interface MidiTake {
  * bars (min one bar), like a MIDI import. Takes with no notes, on missing
  * tracks or on non-MIDI tracks build nothing; all empty = null (no
  * dispatch at all).
+ *
+ * COMPING: a take recorded over existing clips joins (or forms) the take
+ * group under it as THE active take, deactivating whatever sounded there
+ * before — the shared `takeCompForClip` half, identical for audio takes.
+ * The stamps ride the same one op via `takes`, so the one undo also
+ * restores the previous active take's state.
  */
 export function buildMidiTakeOp(
   state: ProjectState,
@@ -52,6 +59,7 @@ export function buildMidiTakeOp(
   const bar = ticksPerBar(state.timeSignature)
   const clips: Clip[] = []
   const notes: Note[] = []
+  const takeStamps: TakeFieldEntry[] = []
 
   for (const take of takes) {
     const track = state.tracks[take.trackId]
@@ -78,7 +86,10 @@ export function buildMidiTakeOp(
       })
     }
 
-    clips.push({
+    // Recording over existing material comps: the new clip joins/forms
+    // the take group under it as the active take (groups are per-track,
+    // so multi-track takes stamp disjoint entries).
+    const comped = takeCompForClip(state, {
       id: clipId,
       trackId: take.trackId,
       // Numbered by what the track already holds, like "Recording N".
@@ -95,12 +106,15 @@ export function buildMidiTakeOp(
       stretch: 1,
       loopLength: 0
     })
+    clips.push(comped.clip)
+    takeStamps.push(...comped.takes)
     notes.push(...takeNotes)
   }
 
   if (clips.length === 0) return null
-  if (clips.length === 1) return { type: 'clip/create', clip: clips[0], notes }
-  return { type: 'clip/createMany', clips, notes }
+  const takesField = takeStamps.length > 0 ? { takes: takeStamps } : {}
+  if (clips.length === 1) return { type: 'clip/create', clip: clips[0], notes, ...takesField }
+  return { type: 'clip/createMany', clips, notes, ...takesField }
 }
 
 function clampInt(value: number, min: number, max: number): number {

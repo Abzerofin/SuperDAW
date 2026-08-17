@@ -1230,6 +1230,42 @@ anyone raises the comfortable ~100-200-track ceiling.
     inserts can be keyed from any track (never cyclic — every tap is
     upstream of the master chain).
 
+38. ✅ **Comping / take management** — recording several passes over one
+    region and choosing between them. Model: additive `Clip.takeGroupId` /
+    `Clip.takeActive` (canonical form: membership only as a non-empty
+    string, the active flag only as `true`; absent = an ordinary clip, so
+    older files need no migration). Clips on ONE track sharing a group are
+    alternative takes; the INTENT is exactly one active per group, but the
+    reducer tolerates divergence and playback resolves it per clip:
+    `isClipTakeAudible` — a member sounds iff `takeActive` is true, so
+    concurrent edits that leave several actives play them ALL until the
+    next `take/activate` converges the group (never silent by accident).
+    Implemented in the PURE schedulers (`scheduleClips`/`scheduleNotes`
+    skip inactive takes), and inactive takes never extend `songEndTicks`
+    or `trackLoopSpan`. Ops: `take/activate { groupId, clips }` (absolute
+    flags for every member — one click, one op, whole-group LWW) and
+    `take/setGroups { entries }` (absolute per-clip membership+flag; the
+    group/ungroup gestures and every take invert; the reducer keeps groups
+    on one track). Recording comps through the shared pure
+    `core/ops/takes.takeCompForClip` — audio and MIDI identically: a take
+    recorded over existing material joins/forms the group under it as THE
+    active take while every other member deactivates, carried INSIDE the
+    existing one-op-per-take commit via an optional `takes` stamp list on
+    `clip/create`/`createMany` (inverts ride `clip/delete`/`deleteMany`
+    the way plugin/add's severedRoutes pair with restoreRoutes), so one
+    undo removes the take and restores the previous active. Flatten is
+    `clip/deleteMany { takes }` (keep one, delete the rest, clear
+    membership — one op, one undo); splitting a take keeps both halves in
+    the group (`clip/split.rightTake` lets merge inverts restore exact
+    fields); duplicate-track remaps group ids like clip ids. UI: a T2/3
+    badge on members (click = fold/unfold), per-user ephemeral take-lane
+    expansion (`state/takeLanesUi`, riding the laneH row plumbing like
+    automation lanes) with one sub-lane per take — click a take = ONE
+    `take/activate`, inactive takes drawn dimmed — and clip-menu entries
+    (Use this take · Flatten takes (keep this take) · Ungroup takes ·
+    Group as takes on overlapping loose clips). Persistence follows
+    warp/freeLength: junk collapses to absent, round-trip is identity.
+
 Roadmap beyond: the native backend phases
 (docs/NATIVE_AUDIO_BACKEND.md), CLAP hosting phases C1–C4 and the
 platform-gated AU story (docs/CLAP_AU_HOSTING.md), collaborator audio streaming +

@@ -85,7 +85,68 @@ function sanitizeParams(
   }
   return params
 }
-import type { Operation } from './operations'
+import type { Operation, TakeFieldEntry } from './operations'
+
+/**
+ * Canonical take fields on a clip literal: `takeGroupId` survives only as
+ * a non-empty string and `takeActive` only as `true` on a grouped clip —
+ * the same rule the file loader applies, so a clip built by an op is
+ * indistinguishable from one loaded from disk. Returns the input object
+ * when it is already canonical (identity = no-op detection stays exact).
+ */
+function canonicalTakeFields(clip: Clip): Clip {
+  const grouped = typeof clip.takeGroupId === 'string' && clip.takeGroupId !== ''
+  const active = grouped && clip.takeActive === true
+  const canonical =
+    (grouped || !('takeGroupId' in clip)) && (active || !('takeActive' in clip))
+  if (canonical) return clip
+  const { takeGroupId, takeActive: _ta, ...rest } = clip
+  return {
+    ...rest,
+    ...(grouped ? { takeGroupId } : {}),
+    ...(active ? { takeActive: true } : {})
+  }
+}
+
+/**
+ * Apply absolute take-field stamps to existing clips (see TakeFieldEntry).
+ * Entries drop individually when their clip is gone (convergence) or when
+ * they would stretch a group across tracks — a take group is alternatives
+ * of ONE region on ONE track, so the earlier-established track wins.
+ * Validated against the evolving state so entries within one op can build
+ * on each other deterministically.
+ */
+function applyTakeEntries(state: ProjectState, entries: readonly TakeFieldEntry[]): ProjectState {
+  let next = state
+  for (const entry of entries) {
+    const clip = next.clips[entry.clipId]
+    if (!clip) continue
+    const groupId = typeof entry.groupId === 'string' && entry.groupId !== '' ? entry.groupId : null
+    if (groupId !== null) {
+      // Same-track rule: joining a group that already lives on another
+      // track is refused (deterministically, on every peer).
+      const offTrack = Object.values(next.clips).some(
+        (c) => c.id !== clip.id && c.takeGroupId === groupId && c.trackId !== clip.trackId
+      )
+      if (offTrack) continue
+    }
+    const active = groupId !== null && entry.active === true
+    if ((clip.takeGroupId ?? null) === groupId && (clip.takeActive === true) === active) continue
+    const { takeGroupId: _tg, takeActive: _ta, ...rest } = clip
+    next = {
+      ...next,
+      clips: {
+        ...next.clips,
+        [clip.id]: {
+          ...rest,
+          ...(groupId !== null ? { takeGroupId: groupId } : {}),
+          ...(active ? { takeActive: true } : {})
+        }
+      }
+    }
+  }
+  return next
+}
 
 /**
  * The audio-clip offset changes a `project/setTempo` op produces — shared
@@ -820,13 +881,34 @@ export function apply(state: ProjectState, op: Operation): ProjectState {
       return { ...state, tracks, trackOrder }
     }
 
+    case 'take/activate': {
+      let next = state
+      for (const entry of op.clips) {
+        const clip = next.clips[entry.clipId]
+        // Only clips still IN the group answer to it: an activate racing an
+        // ungroup or re-group must not resurrect stale membership.
+        if (!clip || clip.takeGroupId !== op.groupId) continue
+        const active = entry.active === true
+        if ((clip.takeActive === true) === active) continue
+        const { takeActive: _ta, ...rest } = clip
+        next = {
+          ...next,
+          clips: { ...next.clips, [clip.id]: { ...rest, ...(active ? { takeActive: true } : {}) } }
+        }
+      }
+      return next
+    }
+
+    case 'take/setGroups':
+      return applyTakeEntries(state, op.entries)
+
     case 'clip/create': {
       if (state.clips[op.clip.id]) return state
       const track = state.tracks[op.clip.trackId]
       if (!track || track.kind === 'folder') return state // folders hold tracks, not clips
-      const clips = { ...state.clips, [op.clip.id]: op.clip }
+      const clips = { ...state.clips, [op.clip.id]: canonicalTakeFields(op.clip) }
       const { notes } = withNotes(state.notes, clips, op.notes)
-      return { ...state, clips, notes }
+      return applyTakeEntries({ ...state, clips, notes }, op.takes ?? [])
     }
 
     case 'clip/delete': {
@@ -837,7 +919,7 @@ export function apply(state: ProjectState, op: Operation): ProjectState {
       for (const note of Object.values(state.notes)) {
         if (note.clipId !== op.clipId) notes[note.id] = note
       }
-      return { ...state, clips, notes }
+      return applyTakeEntries({ ...state, clips, notes }, op.takes ?? [])
     }
 
     case 'clip/move': {
@@ -900,7 +982,7 @@ export function apply(state: ProjectState, op: Operation): ProjectState {
     case 'clip/deleteMany': {
       let next = state
       for (const clipId of op.clipIds) next = apply(next, { type: 'clip/delete', clipId })
-      return next
+      return applyTakeEntries(next, op.takes ?? [])
     }
 
     case 'clip/createMany': {
@@ -912,7 +994,7 @@ export function apply(state: ProjectState, op: Operation): ProjectState {
           notes: op.notes.filter((n) => n.clipId === clip.id)
         })
       }
-      return next
+      return applyTakeEntries(next, op.takes ?? [])
     }
 
     case 'clip/moveMany': {
@@ -1091,7 +1173,22 @@ export function apply(state: ProjectState, op: Operation): ProjectState {
         // Cutting a stamp yields two stamps of the same loop: neither half
         // owns notes, so both keep following the source.
         ...(clip.sourceClipId ? { sourceClipId: clip.sourceClipId } : {}),
-        ...(clip.freeLength ? { freeLength: true } : {})
+        ...(clip.freeLength ? { freeLength: true } : {}),
+        // Cutting a take yields two takes of the same group (both halves
+        // keep the flag, so the active take stays audible across the cut).
+        // clip/merge's invert overrides with the absorbed clip's exact
+        // previous fields via `rightTake`.
+        ...(op.rightTake
+          ? op.rightTake.groupId !== null
+            ? {
+                takeGroupId: op.rightTake.groupId,
+                ...(op.rightTake.active ? { takeActive: true } : {})
+              }
+            : {}
+          : {
+              ...(clip.takeGroupId ? { takeGroupId: clip.takeGroupId } : {}),
+              ...(clip.takeGroupId && clip.takeActive === true ? { takeActive: true } : {})
+            })
       }
       const clips = {
         ...state.clips,

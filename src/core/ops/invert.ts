@@ -23,8 +23,29 @@ function notesOfTrack(state: ProjectState, trackId: string): Note[] {
     (n) => state.clips[n.clipId]?.trackId === trackId
   )
 }
-import type { Operation } from './operations'
+import type { Operation, TakeFieldEntry } from './operations'
 import { setTempoOffsetChanges } from './apply'
+
+/**
+ * The CURRENT take fields of the clips a `takes` list stamps — what the
+ * inverse op must restore. Missing clips drop (their stamp was dropped
+ * too); the result is absolute, so re-applying the invert is idempotent.
+ */
+function currentTakeFields(
+  state: ProjectState,
+  entries: readonly TakeFieldEntry[] | undefined
+): TakeFieldEntry[] {
+  return (entries ?? [])
+    .filter((entry) => state.clips[entry.clipId])
+    .map((entry) => {
+      const clip = state.clips[entry.clipId]
+      return {
+        clipId: entry.clipId,
+        groupId: clip.takeGroupId ?? null,
+        active: clip.takeActive === true
+      }
+    })
+}
 
 /**
  * Derives the inverse of an operation given the state *before* it is applied.
@@ -499,13 +520,41 @@ export function invert(state: ProjectState, op: Operation): Operation | null {
       }
     }
 
-    case 'clip/create':
-      return { type: 'clip/delete', clipId: op.clip.id }
+    case 'take/activate': {
+      // The previous flags of the members the op names (and that are still
+      // members — others were skipped by the reducer too).
+      const clips = op.clips
+        .filter((c) => state.clips[c.clipId]?.takeGroupId === op.groupId)
+        .map((c) => ({ clipId: c.clipId, active: state.clips[c.clipId].takeActive === true }))
+      if (clips.length === 0) return null
+      return { type: 'take/activate', groupId: op.groupId, clips }
+    }
+
+    case 'take/setGroups': {
+      const entries = currentTakeFields(state, op.entries)
+      if (entries.length === 0) return null
+      return { type: 'take/setGroups', entries }
+    }
+
+    case 'clip/create': {
+      const takes = currentTakeFields(state, op.takes)
+      return {
+        type: 'clip/delete',
+        clipId: op.clip.id,
+        ...(takes.length > 0 ? { takes } : {})
+      }
+    }
 
     case 'clip/delete': {
       const clip = state.clips[op.clipId]
       if (!clip) return null
-      return { type: 'clip/create', clip, notes: notesOfClip(state, op.clipId) }
+      const takes = currentTakeFields(state, op.takes).filter((t) => t.clipId !== op.clipId)
+      return {
+        type: 'clip/create',
+        clip,
+        notes: notesOfClip(state, op.clipId),
+        ...(takes.length > 0 ? { takes } : {})
+      }
     }
 
     case 'clip/move': {
@@ -523,18 +572,28 @@ export function invert(state: ProjectState, op: Operation): Operation | null {
       const clips = op.clipIds
         .map((id) => state.clips[id])
         .filter((c): c is NonNullable<typeof c> => c !== undefined)
-      if (clips.length === 0) return null
+      const doomed = new Set(op.clipIds)
+      const takes = currentTakeFields(state, op.takes).filter((t) => !doomed.has(t.clipId))
+      // Nothing to restore either way = nothing to undo. A takes-only op
+      // (an empty delete list can still stamp fields) keeps its invert.
+      if (clips.length === 0 && takes.length === 0) return null
       return {
         type: 'clip/createMany',
         clips,
-        notes: clips.flatMap((c) => notesOfClip(state, c.id))
+        notes: clips.flatMap((c) => notesOfClip(state, c.id)),
+        ...(takes.length > 0 ? { takes } : {})
       }
     }
 
     case 'clip/createMany': {
       const clipIds = op.clips.map((c) => c.id)
       if (clipIds.length === 0) return null
-      return { type: 'clip/deleteMany', clipIds }
+      const takes = currentTakeFields(state, op.takes)
+      return {
+        type: 'clip/deleteMany',
+        clipIds,
+        ...(takes.length > 0 ? { takes } : {})
+      }
     }
 
     case 'clip/moveMany': {
@@ -688,7 +747,10 @@ export function invert(state: ProjectState, op: Operation): Operation | null {
         rightColor: right.color,
         leftDuration: left.duration,
         rightFades: [right.fadeIn, right.fadeOut],
-        leftFadeOut: left.fadeOut
+        leftFadeOut: left.fadeOut,
+        // Always carried: the absorbed clip's take fields may differ from
+        // the left's (inheritance would stamp the wrong membership back).
+        rightTake: { groupId: right.takeGroupId ?? null, active: right.takeActive === true }
       }
     }
 
