@@ -5852,3 +5852,35 @@ body.middle-panning * {
 .pads-swatch-active {
   outline: 2px solid var(--text);
 }
+
+/* ---------- Master spectrum analyzer popover (transport bar) ---------- */
+/* Anchored to the metering cluster like the collab panel; the canvas is
+   painted by the popover's own rAF loop — see SpectrumPopover.tsx. */
+.spectrum-popover {
+  position: absolute;
+  top: calc(100% + 6px);
+  right: 0;
+  z-index: 20;
+  background: var(--bg-2);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.45);
+  padding: 8px;
+}
+
+.spectrum-canvas {
+  display: block;
+  width: 520px;
+  height: 180px;
+}
+
+/* Same footprint as the canvas, so the popover doesn't jump if the feed
+   appears while it is open. */
+.spectrum-empty {
+  width: 520px;
+  padding: 80px 40px;
+  box-sizing: border-box;
+  text-align: center;
+  font-size: 11px;
+  color: var(--text-dim);
+}
