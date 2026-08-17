@@ -390,7 +390,15 @@ function migratePlugins(
       // value would reach the native host's parser, so it never survives.
       stateBlob: typeof instance.stateBlob === 'string' ? instance.stateBlob : null,
       ...(finite(instance.graphX) ? { graphX: instance.graphX } : {}),
-      ...(finite(instance.graphY) ? { graphY: instance.graphY } : {})
+      ...(finite(instance.graphY) ? { graphY: instance.graphY } : {}),
+      // A key must point at a live track other than the insert's own —
+      // the same rule the reducer applies in plugin/setSidechain. Stale
+      // or junk references simply load as "no key".
+      ...(typeof instance.sidechainTrackId === 'string' &&
+      tracks[instance.sidechainTrackId] &&
+      instance.sidechainTrackId !== instance.trackId
+        ? { sidechainTrackId: instance.sidechainTrackId }
+        : {})
     }
   }
   const legacy = (merged as { effects?: Record<string, LegacyEffect> }).effects

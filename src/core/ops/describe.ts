@@ -152,6 +152,14 @@ export function describe(state: ProjectState, op: Operation): string | null {
         instance.trackId
       )}"`
     }
+    case 'plugin/setSidechain': {
+      const instance = state.plugins[op.instanceId]
+      if (!instance) return null
+      const host = trackName(state, instance.trackId)
+      return op.trackId === null
+        ? `Cleared ${instance.descriptor.name}'s sidechain on "${host}"`
+        : `Sidechained ${instance.descriptor.name} on "${host}" from "${trackName(state, op.trackId)}"`
+    }
     case 'route/addMany': {
       const trackId = op.routes[0]?.trackId
       if (!trackId || !state.tracks[trackId]) return null

@@ -345,6 +345,16 @@ export function invert(state: ProjectState, op: Operation): Operation | null {
       }
     }
 
+    case 'plugin/setSidechain': {
+      const instance = state.plugins[op.instanceId]
+      if (!instance) return null
+      return {
+        type: 'plugin/setSidechain',
+        instanceId: op.instanceId,
+        trackId: instance.sidechainTrackId ?? null
+      }
+    }
+
     case 'track/setSynthParam': {
       const track = state.tracks[op.trackId]
       if (!track) return null

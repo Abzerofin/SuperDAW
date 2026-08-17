@@ -474,6 +474,65 @@ const BUILDERS: Record<EffectType, Builder> = {
   bandpass: basicFilter('bandpass', 1000),
   notch: basicFilter('notch', 1000),
 
+  sidechain(backend) {
+    // Ducking: the KEY signal (another track, wired by the engine into
+    // `keyInput` per instance.sidechainTrackId) is rectified and clamped
+    // to 0..1, smoothed by a lowpass (the Response knob), scaled by
+    // -amount and added onto the carrier gain's base value of 1 through
+    // the seam's modulation edge — the LFO's exact mechanism. Silence on
+    // the key (or no key wired) leaves the carrier at unity, so the
+    // insert degrades to a pass-through. The clamp plus an overdamped
+    // envelope keep the modulated gain in [1-amount, 1]: a hot key can
+    // never push it negative (a phase flip would sound like ring mod).
+    //
+    // The rectifier is a WaveShaper, which has no backend primitive yet —
+    // so, like the Saturator, this builds behind the documented webAudio
+    // escape and bypasses cleanly on other backends until one lands.
+    const wa = backend.webAudio
+    if (!wa) return null
+    const carrier = backend.createNode('gain')
+    const keyIn = backend.createNode('gain')
+    const env = backend.createNode('biquad', { type: 'lowpass' })
+    setNow(backend, env, 'frequency', 8)
+    // Lowpass Q is in dB on Web Audio: ~0.5 linear = -6 dB, overdamped —
+    // no resonant overshoot past the rectifier's 0..1 ceiling.
+    setNow(backend, env, 'Q', 20 * Math.log10(0.5))
+    const depth = backend.createNode('gain')
+    setNow(backend, depth, 'gain', 0)
+    const rectify = wa.ctx.createWaveShaper()
+    const curve = new Float32Array(1024)
+    for (let i = 0; i < curve.length; i++) {
+      const x = (i / (curve.length - 1)) * 2 - 1
+      curve[i] = Math.min(1, Math.abs(x))
+    }
+    rectify.curve = curve
+    wa.nodeOf(keyIn).connect(rectify)
+    rectify.connect(wa.nodeOf(env))
+    backend.connect(env, depth)
+    backend.connectParam(depth, carrier, 'gain')
+    const { out, analysis, disposeTap } = tapOut(backend, carrier)
+    return {
+      input: carrier,
+      output: out,
+      keyInput: keyIn,
+      analysis,
+      apply(p, when) {
+        smooth(backend, carrier, 'gain', 1, when)
+        smooth(backend, depth, 'gain', -Math.max(0, Math.min(1, p.amount ?? 0.8)), when)
+        smooth(backend, env, 'frequency', p.response ?? 8, when)
+        // Detector drive: the clamp after this is what makes Sensitivity a
+        // "how hard until full Amount" knob rather than extra duck depth.
+        smooth(backend, keyIn, 'gain', dbToGain(p.sensitivity ?? 12), when)
+      },
+      dispose() {
+        rectify.disconnect()
+        backend.disconnectParam(depth, carrier, 'gain')
+        for (const id of [carrier, keyIn, env, depth, out]) backend.disposeNode(id)
+        disposeTap()
+      }
+    }
+  },
+
   lfo(backend) {
     // Amplitude LFO (tremolo): an oscillator drives the carrier gain's
     // param through the seam's modulation edge. Base gain sits at

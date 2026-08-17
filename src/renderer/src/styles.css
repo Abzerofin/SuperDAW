@@ -1971,6 +1971,26 @@ body.middle-panning * {
   margin-bottom: 4px;
 }
 
+/* Sidechain key-source picker row on the duck's card. */
+.fx-sidechain {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin-bottom: 4px;
+  font-size: 11px;
+}
+
+.fx-sidechain-select {
+  flex: 1;
+  min-width: 0;
+  border: 1px solid var(--border);
+  background: var(--bg-1);
+  color: var(--text);
+  font-size: 11px;
+  padding: 2px 4px;
+  border-radius: 3px;
+}
+
 /* Parametric EQ: a wider card — the graph IS the interface. */
 .fx-card-wide {
   width: 380px;

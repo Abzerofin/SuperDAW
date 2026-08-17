@@ -259,7 +259,7 @@ plugin's parameters (see "Parameter editing without the plugin" below).
   nothing is enforced in the reducer, which would break convergence. Plugin
   EULAs vary on whether a non-owner may drive a plugin at all; the launch
   acknowledgement and PLUGIN_LICENSE_TERMS.md put that on the user.
-- **Builtins are plugins.** The thirteen insert effects register as providers
+- **Builtins are plugins.** The fourteen insert effects register as providers
   (`format: 'builtin'`, uid `superdaw.<type>`) and flow through the same
   descriptor → registry → provider pipeline external formats (VST2/VST3/
   CLAP/AU) will use. Their param defs stay in `core/model/effects.ts`;
@@ -1198,6 +1198,37 @@ anyone raises the comfortable ~100-200-track ceiling.
     master strip is selectable and its FX button targets the Effects
     dock at the master rack (a stand-in Track shape — the rack needed
     no second code path).
+
+37. ✅ **Sidechain routing** — an insert can key off ANOTHER track.
+    `PluginInstance.sidechainTrackId` + the `plugin/setSidechain` op
+    (absolute value, idempotent, invert = previous key; clearing REMOVES
+    the field so set-then-clear round-trips exactly). A key must name a
+    live track other than the insert's own at set/load time; a track
+    deleted later leaves the reference STALE rather than cascading (the
+    pad rule — the key falls silent, undo of the delete revives it, and
+    the picker shows "stale"). Cycles are the engine's job, not the
+    reducer's: keying a track's insert from itself or an ancestor bus
+    would feed the insert its own output, and reparenting can create
+    that relation after a perfectly valid pick — so `syncSidechains`
+    skips those edges at wire time. The first keyed effect is the
+    **Sidechain Duck** builtin (`superdaw.sidechain`): key → sensitivity
+    gain → |x| rectifier clamped to 0..1 (a WaveShaper, so like the
+    Saturator it lives behind the webAudio escape and bypasses on other
+    backends) → overdamped lowpass (Response) → ×(−Amount) → modulation
+    edge onto the carrier gain's base of 1 (the LFO's `connectParam`
+    mechanism) — gain stays in [1−amount, 1], never negative, and with
+    no key wired the insert is an exact pass-through. `PluginNodes` grew
+    an optional `keyInput` inlet; the engine reconciles key edges
+    (source track's POST-FADER panner → inlet, so mute/solo/volume of
+    the key are what you duck against) after every plugin rewire and on
+    retarget, tracked per instance so a changed key severs exactly its
+    old edge. The offline mixdown wires the same keys through a
+    `buildInserts` callback once panners exist — verified numerically
+    (bounce with duck enabled vs bypassed: dips only during key hits,
+    full recovery between). Freeze/preview render one track and pass no
+    callback, so a duck idles at unity there, deliberately. Master
+    inserts can be keyed from any track (never cyclic — every tap is
+    upstream of the master chain).
 
 Roadmap beyond: the native backend phases
 (docs/NATIVE_AUDIO_BACKEND.md), collaborator audio streaming +

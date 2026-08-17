@@ -621,6 +621,30 @@ export function apply(state: ProjectState, op: Operation): ProjectState {
       }
     }
 
+    case 'plugin/setSidechain': {
+      const instance = state.plugins[op.instanceId]
+      if (!instance) return state
+      // A key must reference a live track, and never the insert's own
+      // track (a self-key is a guaranteed feedback cycle). Ancestor buses
+      // can only be checked dynamically — reparenting after the fact can
+      // create that cycle — so the ENGINE guards those at wire time.
+      if (op.trackId !== null && (!state.tracks[op.trackId] || op.trackId === instance.trackId)) {
+        return state
+      }
+      if ((instance.sidechainTrackId ?? null) === op.trackId) return state
+      // Clearing REMOVES the field (never stores an explicit null): a
+      // set-then-clear round-trips to the exact original instance, and
+      // documents never accrete null keys.
+      const { sidechainTrackId: _prev, ...rest } = instance
+      return {
+        ...state,
+        plugins: {
+          ...state.plugins,
+          [op.instanceId]: op.trackId === null ? rest : { ...instance, sidechainTrackId: op.trackId }
+        }
+      }
+    }
+
     case 'track/setSynthParam': {
       const track = state.tracks[op.trackId]
       if (!track || !isNoteTrackKind(track.kind)) return state

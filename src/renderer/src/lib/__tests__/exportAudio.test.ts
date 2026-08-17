@@ -1,6 +1,6 @@
-import { describe as suite, afterEach, expect, test } from 'vitest'
+﻿import { describe as suite, afterEach, expect, test } from 'vitest'
 import type { ProjectState, Track, TrackId } from '@core/model/types'
-import { createEmptyProject } from '@core/model/types'
+import { createEmptyProject, MASTER_BUS_ID } from '@core/model/types'
 import { apply } from '@core/ops/apply'
 import { builtinEffectDescriptor } from '@core/plugins/builtin'
 import type { PluginDescriptor } from '@core/plugins/descriptor'
@@ -8,7 +8,7 @@ import { pluginRegistry } from '@audio/pluginRegistry'
 import { encodeMp3, vst3BypassedTrackNames, vst3BypassWarning } from '../exportAudio'
 
 /**
- * The encoder is third-party; these pin OUR wrapping of it — block
+ * The encoder is third-party; these pin OUR wrapping of it â€” block
  * chunking, stereo/mono handling, and that the output is actually an MP3
  * bitstream rather than silence-sized garbage.
  */
@@ -28,7 +28,7 @@ suite('encodeMp3', () => {
     // MP3 frames start with an 11-bit sync run: 0xFF followed by 0xEx/0xFx.
     expect(mp3[0]).toBe(0xff)
     expect(mp3[1] & 0xe0).toBe(0xe0)
-    // 192kbps ≈ 24 KB/s: a second of audio must be in that ballpark, far
+    // 192kbps â‰ˆ 24 KB/s: a second of audio must be in that ballpark, far
     // from both zero and the ~176 KB raw PCM would be.
     expect(mp3.length).toBeGreaterThan(15_000)
     expect(mp3.length).toBeLessThan(40_000)
@@ -52,7 +52,7 @@ suite('encodeMp3', () => {
 /**
  * The bypass warning is pure over state + registry: an "installed VST3"
  * is faked through setExternalIndex, which is exactly how the Electron
- * shell injects availability (no provider — status 'offline', not
+ * shell injects availability (no provider â€” status 'offline', not
  * 'local'). Builtins keep resolving against the real registry.
  */
 suite('vst3BypassedTrackNames', () => {
@@ -114,7 +114,7 @@ suite('vst3BypassedTrackNames', () => {
     installFakeVst3()
     let s = withTrack(createEmptyProject('P'), 't1', 'Drums')
     s = withPlugin(s, 'fx1', 't1', builtinEffectDescriptor('reverb'))
-    expect(vst3BypassedTrackNames(s)).toEqual({ freezable: [], graph: [] })
+    expect(vst3BypassedTrackNames(s)).toEqual({ freezable: [], graph: [], master: false })
     expect(vst3BypassWarning(s)).toBeNull()
   })
 
@@ -122,20 +122,20 @@ suite('vst3BypassedTrackNames', () => {
     installFakeVst3()
     let s = withTrack(createEmptyProject('P'), 't1', 'Lead')
     s = withPlugin(s, 'fx1', 't1', VST)
-    expect(vst3BypassedTrackNames(s)).toEqual({ freezable: ['Lead'], graph: [] })
+    expect(vst3BypassedTrackNames(s)).toEqual({ freezable: ['Lead'], graph: [], master: false })
     expect(vst3BypassWarning(s)).toBe('VST3 inserts bypassed on Lead (freeze to include them)')
   })
 
-  test('frozen linear track is suppressed — the freeze baked the VST3 in', () => {
+  test('frozen linear track is suppressed â€” the freeze baked the VST3 in', () => {
     installFakeVst3()
     let s = withTrack(createEmptyProject('P'), 't1', 'Lead')
     s = withPlugin(s, 'fx1', 't1', VST)
     s = apply(s, { type: 'track/freeze', trackId: 't1', assetId: 'frozen1' })
-    expect(vst3BypassedTrackNames(s)).toEqual({ freezable: [], graph: [] })
+    expect(vst3BypassedTrackNames(s)).toEqual({ freezable: [], graph: [], master: false })
     expect(vst3BypassWarning(s)).toBeNull()
   })
 
-  test('unfrozen graph track is named WITHOUT freeze advice — freezing shorts it too', () => {
+  test('unfrozen graph track is named WITHOUT freeze advice â€” freezing shorts it too', () => {
     installFakeVst3()
     let s = withTrack(createEmptyProject('P'), 't1', 'Bus')
     s = withPlugin(s, 'fx1', 't1', VST)
@@ -146,11 +146,11 @@ suite('vst3BypassedTrackNames', () => {
         { id: 'r2', trackId: 't1', from: 'fx1', to: 'out' }
       ]
     })
-    expect(vst3BypassedTrackNames(s)).toEqual({ freezable: [], graph: ['Bus'] })
+    expect(vst3BypassedTrackNames(s)).toEqual({ freezable: [], graph: ['Bus'], master: false })
     expect(vst3BypassWarning(s)).toBe('VST3 inserts in routing graphs are not rendered (Bus)')
   })
 
-  test('frozen graph track stays named — the graph freeze fast path did not bake it', () => {
+  test('frozen graph track stays named â€” the graph freeze fast path did not bake it', () => {
     installFakeVst3()
     let s = withTrack(createEmptyProject('P'), 't1', 'Bus')
     s = withPlugin(s, 'fx1', 't1', VST)
@@ -162,10 +162,10 @@ suite('vst3BypassedTrackNames', () => {
       ]
     })
     s = apply(s, { type: 'track/freeze', trackId: 't1', assetId: 'frozen1' })
-    expect(vst3BypassedTrackNames(s)).toEqual({ freezable: [], graph: ['Bus'] })
+    expect(vst3BypassedTrackNames(s)).toEqual({ freezable: [], graph: ['Bus'], master: false })
   })
 
-  test('a graph VST3 off every in→out path cannot be missing from the bounce', () => {
+  test('a graph VST3 off every inâ†’out path cannot be missing from the bounce', () => {
     installFakeVst3()
     let s = withTrack(createEmptyProject('P'), 't1', 'Bus')
     s = withPlugin(s, 'fx1', 't1', VST)
@@ -175,7 +175,7 @@ suite('vst3BypassedTrackNames', () => {
       type: 'route/addMany',
       routes: [{ id: 'r1', trackId: 't1', from: 'in', to: 'fx1' }]
     })
-    expect(vst3BypassedTrackNames(s)).toEqual({ freezable: [], graph: [] })
+    expect(vst3BypassedTrackNames(s)).toEqual({ freezable: [], graph: [], master: false })
   })
 
   test('mixed linear and graph tracks fold into ONE notice string', () => {
@@ -200,6 +200,15 @@ suite('vst3BypassedTrackNames', () => {
   test('without the external index (browser build) nothing is offline, nothing warns', () => {
     let s = withTrack(createEmptyProject('P'), 't1', 'Lead')
     s = withPlugin(s, 'fx1', 't1', VST)
-    expect(vst3BypassedTrackNames(s)).toEqual({ freezable: [], graph: [] })
+    expect(vst3BypassedTrackNames(s)).toEqual({ freezable: [], graph: [], master: false })
+  })
+
+  test('an enabled VST3 on the master bus is reported — no freeze exists there', () => {
+    installFakeVst3()
+    let s = withTrack(createEmptyProject('P'), 't1', 'Lead')
+    s = withPlugin(s, 'mfx', MASTER_BUS_ID, VST)
+    expect(vst3BypassedTrackNames(s)).toEqual({ freezable: [], graph: [], master: true })
+    expect(vst3BypassWarning(s)).toBe('VST3 inserts on the Master bus are bypassed in bounces')
   })
 })
+

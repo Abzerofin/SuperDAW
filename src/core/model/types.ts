@@ -282,6 +282,16 @@ export interface PluginInstance {
   /** Opaque serialized plugin chunk state (external formats); null for builtins. */
   readonly stateBlob: string | null
   /**
+   * SIDECHAIN key source: the track whose post-fader signal drives this
+   * insert's key input (effects that have one — the Sidechain Duck).
+   * Absent/null = no key. A reference to a track that later vanishes goes
+   * stale rather than cascading (the pad rule): the key is simply silent,
+   * and undoing the track delete brings the sidechain back. The engine
+   * additionally refuses a key from the insert's own track or an ancestor
+   * bus of it — that edge would be a feedback cycle in the graph.
+   */
+  readonly sidechainTrackId?: TrackId | null
+  /**
    * Node position in the track's routing graph (document data, like clip
    * colors — the layout is shared). Absent = auto-layout by graph depth.
    */

@@ -3,6 +3,7 @@ import {
   automationValueAt,
   isNoteTrackKind,
   isTrackAudible,
+  isTrackSelfOrDescendant,
   MASTER_BUS_ID,
   pluginsOfTrack,
   routesOfTrack
@@ -288,6 +289,13 @@ export class AudioEngine {
   private chains = new Map<TrackId, TrackChain>()
   private fxNodes = new Map<PluginInstanceId, PluginNodes>()
   /**
+   * Live SIDECHAIN key edges: source track's panner → the insert's key
+   * inlet, per instance (see syncSidechains). Tracked so a retargeted or
+   * cleared key can sever exactly its old edge — everything else about
+   * these edges dies naturally with the nodes on either end.
+   */
+  private keyEdges = new Map<PluginInstanceId, { sourceTrackId: TrackId; keyInput: BackendNodeId }>()
+  /**
    * The stateBlob each EXTERNAL insert was opened with. A GUI-only
    * plugin's edits exist nowhere else, and a running instance cannot be
    * told about them, so a changed blob means reopening (liveNodesFor).
@@ -530,6 +538,7 @@ export class AudioEngine {
     for (const entry of this.fxNodes.values()) entry.dispose()
     this.fxNodes.clear()
     this.fxStateBlobs.clear()
+    this.keyEdges.clear()
     this.graphPorts.clear()
     this.chains.clear()
     this.inputWaveTaps.clear()
@@ -1912,6 +1921,7 @@ export class AudioEngine {
     if (state.plugins !== this.prevPlugins) {
       const prev = this.prevPlugins
       const rewire = new Set<TrackId>()
+      let sidechainChanged = false
       const now = this.backend?.now() ?? 0
       for (const [id, instance] of Object.entries(state.plugins)) {
         const before = prev[id]
@@ -1929,10 +1939,17 @@ export class AudioEngine {
         ) {
           rewire.add(before.trackId)
           rewire.add(instance.trackId)
-        } else if (before.params !== instance.params && this.backend) {
-          // Remote peer edits and committed ops land here; local drags
-          // already previewed the same values through the same call.
-          this.fxNodes.get(id)?.apply(instance.params, now)
+        } else {
+          if (before.params !== instance.params && this.backend) {
+            // Remote peer edits and committed ops land here; local drags
+            // already previewed the same values through the same call.
+            this.fxNodes.get(id)?.apply(instance.params, now)
+          }
+          // A retargeted key is an edge change, not a chain topology
+          // change — one sweep re-establishes exactly the key edges.
+          if ((before.sidechainTrackId ?? null) !== (instance.sidechainTrackId ?? null)) {
+            sidechainChanged = true
+          }
         }
       }
       for (const [id, instance] of Object.entries(prev)) {
@@ -1942,7 +1959,12 @@ export class AudioEngine {
         }
       }
       this.prevPlugins = state.plugins
-      if (this.backend) this.syncPluginsFor(rewire)
+      if (this.backend) {
+        this.syncPluginsFor(rewire)
+        // Rewired tracks already swept their edges inside syncPluginsFor;
+        // this covers the retarget-only case, which rewires nothing.
+        if (sidechainChanged && rewire.size === 0) this.syncSidechains()
+      }
     }
     // Routing-graph edits rewire chains; on a track previewed through
     // external plugins they also change what the windows sound like.
@@ -2712,9 +2734,66 @@ export class AudioEngine {
       const chain = this.chains.get(trackId)
       if (chain) this.wireInserts(trackId, chain)
     }
+    // Rewiring may have rebuilt nodes that carry key inlets (and removed
+    // instances drop out of the document) — re-derive the key edges.
+    this.syncSidechains()
     // The insert set just changed, so the latency of at least one path
     // may have; the plan is cheap enough to redo whole.
     this.recomputePdc()
+  }
+
+  /**
+   * Reconcile SIDECHAIN key edges with the document: for every live,
+   * enabled insert with a key inlet and a usable `sidechainTrackId`,
+   * exactly one edge source-panner → key inlet; nothing else. Post-fader
+   * on purpose — the key follows what the source track actually plays
+   * (its mute/solo/volume), which is what ducking against it means.
+   * Unusable keys (stale track, would-be cycle, insert not live here)
+   * simply have no edge: the duck idles at unity, nothing breaks.
+   */
+  private syncSidechains(): void {
+    const backend = this.backend
+    if (!backend) return
+    const state = this.store.state
+    const wanted = new Map<PluginInstanceId, { sourceTrackId: TrackId; keyInput: BackendNodeId }>()
+    for (const instance of Object.values(state.plugins)) {
+      const sourceId = instance.sidechainTrackId ?? null
+      if (sourceId === null || !instance.enabled || !state.tracks[sourceId]) continue
+      if (this.keyWouldCycle(instance.trackId, sourceId)) continue
+      const keyInput = this.fxNodes.get(instance.id)?.keyInput
+      if (keyInput === undefined) continue
+      wanted.set(instance.id, { sourceTrackId: sourceId, keyInput })
+    }
+    // Sever tracked edges that no longer match — only where both ends are
+    // still alive (dead nodes already took their edges with them).
+    for (const [instanceId, edge] of this.keyEdges) {
+      const want = wanted.get(instanceId)
+      if (want && want.sourceTrackId === edge.sourceTrackId && want.keyInput === edge.keyInput) {
+        continue
+      }
+      const chain = this.chains.get(edge.sourceTrackId)
+      if (chain && this.fxNodes.get(instanceId)?.keyInput === edge.keyInput) {
+        backend.disconnect(chain.panner, edge.keyInput)
+      }
+      this.keyEdges.delete(instanceId)
+    }
+    // Connect what should exist (idempotent per edge on the seam).
+    for (const [instanceId, want] of wanted) {
+      this.keyEdges.set(instanceId, want)
+      backend.connect(this.chain(want.sourceTrackId).panner, want.keyInput)
+    }
+  }
+
+  /**
+   * Keying a track's insert from itself or an ANCESTOR bus would wire the
+   * insert's own output back into its key — a feedback cycle. Checked at
+   * wire time, not in the reducer, because a later `track/reorder` can
+   * create the relation after a perfectly valid sidechain pick. A master
+   * insert can never cycle: every tap is upstream of the master chain.
+   */
+  private keyWouldCycle(hostTrackId: TrackId, sourceId: TrackId): boolean {
+    if (hostTrackId === MASTER_BUS_ID) return false
+    return isTrackSelfOrDescendant(this.store.state, hostTrackId, sourceId)
   }
 
   /**

@@ -6,6 +6,7 @@ import {
   clipsOfTrack,
   clipWarpFactor,
   isTrackAudible,
+  isTrackSelfOrDescendant,
   MASTER_BUS_ID,
   pluginsOfTrack,
   routesOfTrack
@@ -174,7 +175,14 @@ function buildInserts(
   trackId: TrackId,
   input: AudioNode,
   /** Timeline tick at ctx time 0 — anchors insert-param automation. */
-  anchorTicks = 0
+  anchorTicks = 0,
+  /**
+   * Reports each built insert's SIDECHAIN key inlet so the caller can
+   * wire it to its source track (the mixdown does). Single-track renders
+   * — freeze, preview — pass nothing: they have no other tracks to offer,
+   * so a duck idles at unity there, deliberately.
+   */
+  onKeyInput?: (instance: PluginInstance, keyNode: AudioNode) => void
 ): AudioNode {
   // A per-render backend adapter over this offline context: the builders
   // (backend-primitive filters included) run through the identical seam
@@ -188,6 +196,7 @@ function buildInserts(
     if (!nodes) return null
     nodes.apply(instance.params, 0)
     applyInsertAutomation(nodes, state, instance, anchorTicks)
+    if (nodes.keyInput !== undefined) onKeyInput?.(instance, escapes.nodeOf(nodes.keyInput))
     return { input: escapes.nodeOf(nodes.input), output: escapes.nodeOf(nodes.output) }
   }
 
@@ -395,11 +404,18 @@ export async function renderMixdownChannels(
   const master = ctx.createGain()
   master.gain.value = state.masterVolume
   master.connect(ctx.destination)
+  // Sidechain key inlets surface as inserts build; they wire to their
+  // source PANNERS after the second pass, when those exist (post-fader,
+  // exactly where the live engine taps).
+  const keyInlets: Array<{ instance: PluginInstance; node: AudioNode }> = []
+  const collectKey = (instance: PluginInstance, node: AudioNode): void => {
+    keyInlets.push({ instance, node })
+  }
   // The master insert chain sits between the mix bus and the masterVolume
   // fader, exactly as live (engine.wireMasterInserts). With no master
   // inserts buildInserts returns the bus itself and nothing changes.
   const masterBus = ctx.createGain()
-  buildInserts(ctx, state, MASTER_BUS_ID, masterBus).connect(master)
+  buildInserts(ctx, state, MASTER_BUS_ID, masterBus, 0, collectKey).connect(master)
 
   // First pass: build every track's chain (folders included — they are buses).
   const inputs = new Map<TrackId, AudioNode>()
@@ -415,7 +431,9 @@ export async function renderMixdownChannels(
 
     // Frozen tracks bypass inserts and neutralize volume automation — both
     // are already baked into the frozen render.
-    const chainOut = track.frozenAssetId ? input : buildInserts(ctx, state, trackId, input)
+    const chainOut = track.frozenAssetId
+      ? input
+      : buildInserts(ctx, state, trackId, input, 0, collectKey)
     chainOut.connect(auto)
     auto.connect(fader)
     fader.connect(panner)
@@ -440,6 +458,20 @@ export async function renderMixdownChannels(
     const parentId = state.tracks[trackId].parentId
     const parentInput = parentId !== null ? inputs.get(parentId) : undefined
     panners.get(trackId)!.connect(parentInput ?? masterBus)
+  }
+  // Sidechain keys: source panner → key inlet, with the live engine's
+  // exact guards (stale refs are silent; a self/ancestor key would be a
+  // feedback cycle and is skipped).
+  for (const { instance, node } of keyInlets) {
+    const sourceId = instance.sidechainTrackId ?? null
+    if (sourceId === null || !state.tracks[sourceId]) continue
+    if (
+      instance.trackId !== MASTER_BUS_ID &&
+      isTrackSelfOrDescendant(state, instance.trackId, sourceId)
+    ) {
+      continue
+    }
+    panners.get(sourceId)?.connect(node)
   }
 
   await prewarmWarpedClips(state, assets)

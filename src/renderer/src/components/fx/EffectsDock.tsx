@@ -311,6 +311,53 @@ function TrackEffects({
   )
 }
 
+/**
+ * The Sidechain Duck's KEY source — a track reference, so it is document
+ * state on the instance (`plugin/setSidechain`), never a param. The
+ * insert's own track is excluded (self-key = feedback); a key whose track
+ * has vanished shows as stale rather than silently reading as Off, so a
+ * collaborator's delete is visible and undoing it restores the duck.
+ */
+function SidechainPicker({ instance }: { instance: PluginInstance }): React.JSX.Element {
+  const state = useProjectState()
+  const current = instance.sidechainTrackId ?? null
+  const stale = current !== null && !state.tracks[current]
+  return (
+    <label className="fx-sidechain">
+      <span className="statusbar-dim">Key</span>
+      <select
+        className="fx-sidechain-select"
+        value={stale || current === null ? '' : current}
+        onChange={(e) =>
+          projectStore.dispatch({
+            type: 'plugin/setSidechain',
+            instanceId: instance.id,
+            trackId: e.target.value === '' ? null : e.target.value
+          })
+        }
+      >
+        <option value="">Off</option>
+        {state.trackOrder
+          .map((id) => state.tracks[id])
+          .filter((t): t is Track => t !== undefined && t.id !== instance.trackId)
+          .map((t) => (
+            <option key={t.id} value={t.id}>
+              {t.name}
+            </option>
+          ))}
+      </select>
+      {stale && (
+        <span
+          className="statusbar-dim"
+          title="The chosen key track no longer exists — the duck is idle until you re-pick (or the delete is undone)"
+        >
+          stale
+        </span>
+      )}
+    </label>
+  )
+}
+
 /** What stands in for a removed instrument: one click puts it back. */
 function AddSynthCard({ track }: { track: Track }): React.JSX.Element {
   return (
@@ -452,6 +499,7 @@ export function PluginSection({
           params={{ ...pluginDefaults(instance.descriptor), ...instance.params, ...previewParams }}
         />
       )}
+      {!collapsed && builtinType === 'sidechain' && <SidechainPicker instance={instance} />}
       {!collapsed &&
         Object.entries(defs).map(([key, paramDef]) => (
         <ParamSlider

@@ -197,6 +197,12 @@ export type Operation =
    * blob intact, so nothing diverges. Null clears it.
    */
   | { type: 'plugin/setState'; instanceId: PluginInstanceId; stateBlob: string | null }
+  /**
+   * Choose (or clear, with null) an insert's sidechain key source (see
+   * PluginInstance.sidechainTrackId). Absolute value — idempotent, and
+   * concurrent picks converge last-write-wins like any single field.
+   */
+  | { type: 'plugin/setSidechain'; instanceId: PluginInstanceId; trackId: TrackId | null }
   | { type: 'track/setSynthParam'; trackId: TrackId; param: string; value: number }
   /**
    * Set several synth params atomically — re-adding a removed instrument

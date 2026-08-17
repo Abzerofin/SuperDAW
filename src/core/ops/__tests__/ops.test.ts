@@ -802,6 +802,55 @@ suite('master-bus inserts', () => {
   })
 })
 
+suite('plugin/setSidechain', () => {
+  test('apply(invert) round-trips setting and clearing the key', () => {
+    const before = baseState() // fxA lives on t1
+    const set: Operation = { type: 'plugin/setSidechain', instanceId: 'fxA', trackId: 't2' }
+    const inverse = invert(before, set)
+    expect(inverse).not.toBeNull()
+    const after = apply(before, set)
+    expect(after.plugins['fxA'].sidechainTrackId).toBe('t2')
+    expect(apply(after, inverse!)).toEqual(before)
+
+    const clear: Operation = { type: 'plugin/setSidechain', instanceId: 'fxA', trackId: null }
+    const clearInverse = invert(after, clear)
+    const cleared = apply(after, clear)
+    // Clearing removes the field outright — no explicit null accretes.
+    expect('sidechainTrackId' in cleared.plugins['fxA']).toBe(false)
+    expect(apply(cleared, clearInverse!)).toEqual(after)
+  })
+
+  test('is idempotent — re-applying the same key yields identical state', () => {
+    const s = apply(baseState(), { type: 'plugin/setSidechain', instanceId: 'fxA', trackId: 't2' })
+    expect(apply(s, { type: 'plugin/setSidechain', instanceId: 'fxA', trackId: 't2' })).toBe(s)
+  })
+
+  test('a self-key, an unknown track and an unknown instance are all no-ops', () => {
+    const s = baseState()
+    expect(apply(s, { type: 'plugin/setSidechain', instanceId: 'fxA', trackId: 't1' })).toBe(s)
+    expect(apply(s, { type: 'plugin/setSidechain', instanceId: 'fxA', trackId: 'ghost' })).toBe(s)
+    expect(apply(s, { type: 'plugin/setSidechain', instanceId: 'ghost', trackId: 't2' })).toBe(s)
+  })
+
+  test('the key survives the source track being deleted (stale, not cascaded)', () => {
+    let s = apply(baseState(), { type: 'plugin/setSidechain', instanceId: 'fxA', trackId: 't2' })
+    s = apply(s, { type: 'track/delete', trackId: 't2' })
+    // The reference stays: the engine treats it as silent, and undoing the
+    // delete brings the sidechain back with zero extra ops (the pad rule).
+    expect(s.plugins['fxA'].sidechainTrackId).toBe('t2')
+  })
+
+  test('describes both directions for the activity feed', () => {
+    const s = apply(baseState(), { type: 'plugin/setSidechain', instanceId: 'fxA', trackId: 't2' })
+    expect(
+      describeOp(baseState(), { type: 'plugin/setSidechain', instanceId: 'fxA', trackId: 't2' })
+    ).toContain('Sidechained')
+    expect(
+      describeOp(s, { type: 'plugin/setSidechain', instanceId: 'fxA', trackId: null })
+    ).toContain('Cleared')
+  })
+})
+
 suite('file bay ops', () => {
   test('deleting a folder deletes its whole subtree', () => {
     const s = apply(baseState(), { type: 'file/delete', nodeIds: ['f1'] })

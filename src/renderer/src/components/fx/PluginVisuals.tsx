@@ -96,6 +96,8 @@ export function EffectVisual({
       return <FilterVisual type={type} instanceId={instanceId} params={params} />
     case 'lfo':
       return <LfoVisual params={params} />
+    case 'sidechain':
+      return <SidechainVisual params={params} />
   }
 }
 
@@ -257,6 +259,73 @@ function LfoVisual({ params }: { params: Params }): React.JSX.Element {
       for (let x = 0; x <= w; x++) {
         const phase = t + (x / w) * 2 // two cycles across
         const gain = 1 - depth / 2 + (depth / 2) * waveAt(phase, wave)
+        const y = unityY + (1 - gain) * (h * 0.75)
+        if (x === 0) ctx.moveTo(x, y)
+        else ctx.lineTo(x, y)
+      }
+      ctx.strokeStyle = colors.accent
+      ctx.lineWidth = 1.6
+      ctx.stroke()
+    }
+    draw()
+    return () => cancelAnimationFrame(raf)
+  }, [paramsRef])
+
+  return <canvas ref={canvasRef} className="fx-visual" />
+}
+
+/**
+ * The duck's gain over a bar of four imagined key hits: dips by `amount`,
+ * recovers at the Response rate. Illustrative (the real key is another
+ * track), but drawn from the same envelope math the effect applies, so the
+ * knobs read truthfully.
+ */
+function SidechainVisual({ params }: { params: Params }): React.JSX.Element {
+  const canvasRef = useRef<HTMLCanvasElement>(null)
+  const paramsRef = useParamsRef(params)
+
+  useEffect(() => {
+    const colors = theme()
+    let raf = 0
+    const gate = newPaintGate()
+
+    const draw = (): void => {
+      raf = requestAnimationFrame(draw)
+      if (!shouldPaint(gate, paramsRef.current)) return
+      const canvas = canvasRef.current
+      if (!canvas) return
+      const ctx = fitCanvas(canvas)
+      if (!ctx) return
+      const w = canvas.clientWidth
+      const h = canvas.clientHeight
+      ctx.clearRect(0, 0, w, h)
+
+      const p = paramsRef.current
+      const amount = Math.max(0, Math.min(1, p.amount ?? 0.8))
+      const response = Math.max(0.5, p.response ?? 8)
+
+      const unityY = Math.round(h * 0.2) + 0.5
+      ctx.strokeStyle = colors.grid
+      ctx.lineWidth = 1
+      ctx.globalAlpha = 0.6
+      ctx.beginPath()
+      ctx.moveTo(0, unityY)
+      ctx.lineTo(w, unityY)
+      ctx.stroke()
+      ctx.globalAlpha = 1
+      ctx.fillStyle = colors.dim
+      ctx.font = '8px ui-monospace, monospace'
+      ctx.fillText(`duck ${(amount * 100).toFixed(0)}% · ${response.toFixed(1)} Hz`, 4, h - 4)
+
+      // Four hits at 120 BPM across the width; the one-pole recovery uses
+      // the same time constant the envelope lowpass gives the audio.
+      const beatsShown = 4
+      const secondsShown = beatsShown * 0.5
+      const tau = 1 / (2 * Math.PI * response)
+      ctx.beginPath()
+      for (let x = 0; x <= w; x++) {
+        const tInBeat = ((x / w) * secondsShown) % 0.5
+        const gain = 1 - amount * Math.exp(-tInBeat / tau)
         const y = unityY + (1 - gain) * (h * 0.75)
         if (x === 0) ctx.moveTo(x, y)
         else ctx.lineTo(x, y)

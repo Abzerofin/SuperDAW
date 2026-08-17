@@ -488,6 +488,68 @@ suite('project file format', () => {
     expect(cleaned.state.plugins['mfx']?.trackId).toBe(MASTER_BUS_ID)
   })
 
+  test('sidechain keys round-trip; stale or self keys load as "no key"', () => {
+    let state = sampleState()
+    state = apply(state, {
+      type: 'track/create',
+      track: {
+        id: 't2',
+        kind: 'audio',
+        name: 'Key',
+        color: '#fff',
+        muted: false,
+        soloed: false,
+        parentId: null,
+        frozenAssetId: null,
+        volume: 1,
+        pan: 0,
+        synth: {}
+      },
+      index: 1,
+      clips: [],
+      automation: [],
+      notes: [],
+      plugins: []
+    })
+    state = apply(state, {
+      type: 'plugin/add',
+      instance: {
+        id: 'duck',
+        trackId: 't1',
+        descriptor: {
+          format: 'builtin',
+          uid: 'superdaw.sidechain',
+          name: 'Sidechain Duck',
+          vendor: 'SuperDAW',
+          version: '1.0.0'
+        },
+        enabled: true,
+        rank: 1,
+        params: {},
+        stateBlob: null
+      }
+    })
+    state = apply(state, { type: 'plugin/setSidechain', instanceId: 'duck', trackId: 't2' })
+    expect(state.plugins['duck'].sidechainTrackId).toBe('t2') // premise
+    const parsed = parseProjectJson(serializeProjectJson(state, []))
+    expect(parsed.state.plugins['duck'].sidechainTrackId).toBe('t2')
+
+    // Doctored: a key to a missing track, and a self-key, both load absent.
+    const doctored = {
+      ...state,
+      plugins: {
+        ...state.plugins,
+        duck: { ...state.plugins['duck'], sidechainTrackId: 'no-such-track' },
+        self: { ...state.plugins['duck'], id: 'self', sidechainTrackId: 't1' }
+      }
+    }
+    const cleaned = parseProjectJson(
+      JSON.stringify({ formatVersion: 3, state: doctored, assets: [] })
+    )
+    expect('sidechainTrackId' in cleaned.state.plugins['duck']).toBe(false)
+    expect('sidechainTrackId' in cleaned.state.plugins['self']).toBe(false)
+  })
+
   test('builtin params are clamped through core defs on load, exactly like plugin/add', () => {
     const state = sampleState()
     const compressor = {

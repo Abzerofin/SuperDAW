@@ -48,6 +48,14 @@ export interface PluginNodes {
    * make live playback disagree with a bounce.
    */
   latencySamples?(): number
+  /**
+   * SIDECHAIN key inlet, on effects that have one (the Sidechain Duck).
+   * The engine connects the key source track's post-fader node here
+   * (instance.sidechainTrackId decides which); with nothing connected the
+   * effect is a clean pass-through. Backend currency like input/output,
+   * so key wiring is backend-blind too.
+   */
+  readonly keyInput?: BackendNodeId
   /** Optional live-visualization handle (see PluginAnalysis). */
   readonly analysis?: PluginAnalysis
 }

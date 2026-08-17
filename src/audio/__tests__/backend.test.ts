@@ -232,12 +232,15 @@ suite('engine → backend command stream', () => {
     rig.fire('play')
     await settle()
 
-    // The chain: a PDC compensator, three gains, a panner, a second PDC
-    // compensator — source→input→auto→fader→panner→out→master. The two
-    // 'pdc' nodes sit at zero delay (an exact passthrough on every
-    // backend) until a plugin actually reports latency; see audio/pdc.ts.
+    // First the master BUS input (the head of the master insert chain,
+    // wired straight to masterNode while no master inserts exist), then
+    // the track chain: a PDC compensator, three gains, a panner, a second
+    // PDC compensator — source→input→auto→fader→panner→out→bus→master.
+    // The two 'pdc' nodes sit at zero delay (an exact passthrough on
+    // every backend) until a plugin actually reports latency (audio/pdc.ts).
     const created = rig.backend.ops.filter((o) => o.op === 'createNode')
     expect(created.map((o) => o.kind)).toEqual([
+      'gain',
       'pdc',
       'gain',
       'gain',
@@ -246,16 +249,17 @@ suite('engine → backend command stream', () => {
       'pdc',
       'gain'
     ])
-    const [source, input, auto, fader, panner, out, fade] = created.map((o) => o.id)
+    const [bus, source, input, auto, fader, panner, out, fade] = created.map((o) => o.id)
     const connects = rig.backend.ops.filter((o) => o.op === 'connect')
     expect(connects).toEqual(
       expect.arrayContaining([
+        { op: 'connect', from: bus, to: 0 },
         { op: 'connect', from: source, to: input },
         { op: 'connect', from: input, to: auto },
         { op: 'connect', from: auto, to: fader },
         { op: 'connect', from: fader, to: panner },
         { op: 'connect', from: panner, to: out },
-        { op: 'connect', from: out, to: 0 },
+        { op: 'connect', from: out, to: bus },
         // No inserts: the chain shorts input → auto after wiring.
         { op: 'connect', from: input, to: auto },
         // The fade envelope feeds the chain's SOURCE compensator — not
@@ -322,8 +326,8 @@ suite('engine → backend command stream', () => {
     expect(stopped.map((o) => (o as Extract<Op, { op: 'stopVoice' }>).voice)).toEqual(
       expect.arrayContaining(played.map((o) => (o as Extract<Op, { op: 'play' }>).voice))
     )
-    // [pdc, gain, gain, gain, stereoPanner, pdc, gain] — the fade gain last.
-    const fadeId = rig.backend.ops.filter((o) => o.op === 'createNode')[6].id
+    // [bus, pdc, gain, gain, gain, stereoPanner, pdc, gain] — fade gain last.
+    const fadeId = rig.backend.ops.filter((o) => o.op === 'createNode')[7].id
     expect(rig.backend.ops).toEqual(
       expect.arrayContaining([{ op: 'disposeNode', id: fadeId }])
     )
@@ -356,7 +360,7 @@ suite('engine → backend command stream', () => {
     // The voice is queued — audibility rides the fader at zero gain.
     expect(rig.backend.ops.filter((o) => o.op === 'play')).toHaveLength(1)
     const created = rig.backend.ops.filter((o) => o.op === 'createNode')
-    const fader = created[3].id // pdc, input, auto, FADER, panner, pdc, fade
+    const fader = created[4].id // bus, pdc, input, auto, FADER, panner, pdc, fade
     const faderValues = rig.backend.ops
       .filter((o): o is Extract<Op, { op: 'scheduleParam' }> => o.op === 'scheduleParam')
       .filter((o) => o.node === fader)

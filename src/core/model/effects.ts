@@ -18,6 +18,7 @@ export type EffectType =
   | 'bandpass'
   | 'notch'
   | 'lfo'
+  | 'sidechain'
 
 /** LFO waveforms, indexed by the `wave` param value. */
 export const LFO_WAVE_TYPES = ['sine', 'triangle', 'square', 'sawtooth'] as const
@@ -189,6 +190,21 @@ export const EFFECT_DEFS: Readonly<Record<EffectType, EffectDef>> = {
       rate: p('Rate', 0.05, 20, 4, 'Hz', 2),
       depth: p('Depth', 0, 1, 0.5, '', 2),
       wave: p('Wave', 0, LFO_WAVE_TYPES.length - 1, 0, '', 0)
+    }
+  },
+  sidechain: {
+    // Ducks this insert's signal by the level of ANOTHER track — the key,
+    // chosen per instance via `plugin/setSidechain` (PluginInstance.
+    // sidechainTrackId), never a param: params are numbers and clamp
+    // deterministically on every peer, while a track reference must
+    // validate against the document.
+    label: 'Sidechain Duck',
+    params: {
+      amount: p('Amount', 0, 1, 0.8, '', 2),
+      response: p('Response', 0.5, 30, 8, 'Hz', 1),
+      // Key gain into the detector: how hard the key has to hit before
+      // the duck reaches full Amount (the rectifier clamps at unity).
+      sensitivity: p('Sensitivity', 0, 36, 12, 'dB', 0)
     }
   }
 }
