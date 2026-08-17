@@ -16,6 +16,7 @@ import {
   type Biquad
 } from '@/lib/biquad'
 import { LFO_WAVE_TYPES } from '@core/model/effects'
+import { saturate } from '@audio/saturation'
 import { ParametricEq } from './ParametricEq'
 
 /**
@@ -84,6 +85,10 @@ export function EffectVisual({
       return <DelayVisual instanceId={instanceId} params={params} />
     case 'reverb':
       return <ReverbVisual instanceId={instanceId} params={params} />
+    case 'reverbpro':
+      return <ReverbProVisual instanceId={instanceId} params={params} />
+    case 'saturator':
+      return <SaturatorVisual instanceId={instanceId} params={params} />
     case 'lowpass':
     case 'highpass':
     case 'bandpass':
@@ -823,4 +828,177 @@ function ReverbVisual({
   }, [instanceId, paramsRef])
 
   return <canvas ref={canvasRef} className="fx-visual" style={{ height: 56 }} />
+}
+
+// ---------- Reverb Pro: pre-delay gap + damped exponential tail ----------
+
+function ReverbProVisual({
+  instanceId,
+  params
+}: {
+  instanceId: PluginInstanceId
+  params: Params
+}): React.JSX.Element {
+  const canvasRef = useRef<HTMLCanvasElement>(null)
+  const paramsRef = useParamsRef(params)
+
+  useEffect(() => {
+    const colors = theme()
+    const spectrumBuf: { current: Uint8Array<ArrayBuffer> | null } = { current: null }
+    let raf = 0
+    const gate = newPaintGate()
+
+    const draw = (): void => {
+      raf = requestAnimationFrame(draw)
+      if (!shouldPaint(gate, paramsRef.current)) return
+      const canvas = canvasRef.current
+      if (!canvas) return
+      const ctx = fitCanvas(canvas)
+      if (!ctx) return
+      const w = canvas.clientWidth
+      const h = canvas.clientHeight
+      ctx.clearRect(0, 0, w, h)
+
+      const p = paramsRef.current
+      const decay = p.decay ?? 2.4
+      const predelaySec = (p.predelay ?? 20) / 1000
+      const damping = Math.max(0, Math.min(1, p.damping ?? 0.5))
+      const size = Math.max(0, Math.min(1, p.size ?? 0.7))
+      const mix = p.mix ?? 0.3
+
+      // Live output spectrum (dry + tail) behind the envelope.
+      drawSpectrum(ctx, instanceId, w, h, colors.accent, spectrumBuf)
+
+      const base = h - 10
+      ctx.strokeStyle = colors.grid
+      ctx.beginPath()
+      ctx.moveTo(0, base + 0.5)
+      ctx.lineTo(w, base + 0.5)
+      ctx.stroke()
+
+      // Dry impulse at t=0, then the tail after the pre-delay gap: the same
+      // exponential envelope (with attack bloom) the generated IR uses,
+      // scaled by the wet mix. Damping dims the fill toward the tail's end.
+      const window = predelaySec + decay
+      const toX = (t: number): number => 6 + (t / window) * (w - 8)
+      ctx.fillStyle = colors.dim
+      ctx.fillRect(2, base - (1 - mix * 0.5) * (base - 6), 3, (1 - mix * 0.5) * (base - 6))
+      const buildSec = 0.004 + 0.1 * size
+      ctx.beginPath()
+      ctx.moveTo(toX(predelaySec), base)
+      for (let x = Math.round(toX(predelaySec)); x <= w - 2; x++) {
+        const t = ((x - 6) / (w - 8)) * window - predelaySec
+        if (t < 0) continue
+        const attack = Math.min(1, t / buildSec)
+        const amp = mix * Math.pow(10, (-3 * t) / decay) * attack * attack
+        ctx.lineTo(x, base - amp * (base - 6))
+      }
+      ctx.lineTo(w - 2, base)
+      ctx.closePath()
+      ctx.globalAlpha = 0.2 + 0.25 * (1 - damping)
+      ctx.fillStyle = colors.accent
+      ctx.fill()
+      ctx.globalAlpha = 1
+
+      ctx.fillStyle = colors.dim
+      ctx.font = '8px ui-monospace, monospace'
+      ctx.textAlign = 'right'
+      ctx.fillText(`${decay.toFixed(1)}s`, w - 2, h - 1)
+      ctx.textAlign = 'left'
+      if (predelaySec > 0.001) {
+        ctx.fillText(`${Math.round(predelaySec * 1000)}ms`, toX(0), h - 1)
+      }
+    }
+
+    raf = requestAnimationFrame(draw)
+    return () => cancelAnimationFrame(raf)
+  }, [instanceId, paramsRef])
+
+  return <canvas ref={canvasRef} className="fx-visual" style={{ height: 56 }} />
+}
+
+// ---------- Saturator: transfer curve over a live output spectrum ----------
+
+function SaturatorVisual({
+  instanceId,
+  params
+}: {
+  instanceId: PluginInstanceId
+  params: Params
+}): React.JSX.Element {
+  const canvasRef = useRef<HTMLCanvasElement>(null)
+  const paramsRef = useParamsRef(params)
+
+  useEffect(() => {
+    const colors = theme()
+    const spectrumBuf: { current: Uint8Array<ArrayBuffer> | null } = { current: null }
+    let raf = 0
+    const gate = newPaintGate()
+
+    const draw = (): void => {
+      raf = requestAnimationFrame(draw)
+      if (!shouldPaint(gate, paramsRef.current)) return
+      const canvas = canvasRef.current
+      if (!canvas) return
+      const ctx = fitCanvas(canvas)
+      if (!ctx) return
+      const w = canvas.clientWidth
+      const h = canvas.clientHeight
+      ctx.clearRect(0, 0, w, h)
+
+      // Live output spectrum behind the curve, like the EQ card.
+      drawSpectrum(ctx, instanceId, w, h, colors.accent, spectrumBuf)
+
+      const p = paramsRef.current
+      const drive = p.drive ?? 6
+      const mix = p.mix ?? 1
+
+      // Transfer square: x in → y out over ±1.1, unity diagonal dashed.
+      const s = h
+      const range = 1.1
+      const toX = (v: number): number => ((v + range) / (2 * range)) * s
+      const toY = (v: number): number => h - ((v + range) / (2 * range)) * h
+      ctx.save()
+      ctx.beginPath()
+      ctx.rect(0, 0, s, h)
+      ctx.clip()
+      ctx.globalAlpha = 0.5
+      ctx.strokeStyle = colors.grid
+      ctx.setLineDash([3, 3])
+      ctx.beginPath()
+      ctx.moveTo(toX(-range), toY(-range))
+      ctx.lineTo(toX(range), toY(range))
+      ctx.stroke()
+      ctx.setLineDash([])
+      ctx.globalAlpha = 1
+      // The dry/wet-blended transfer the insert applies (the shaper clamps
+      // beyond ±1, exactly like the WaveShaper's curve range).
+      ctx.beginPath()
+      for (let x = 0; x <= s; x++) {
+        const vin = -range + (x / s) * 2 * range
+        const clipped = Math.max(-1, Math.min(1, vin))
+        const vout = mix * saturate(clipped, drive) + (1 - mix) * vin
+        const y = toY(vout)
+        if (x === 0) ctx.moveTo(x, y)
+        else ctx.lineTo(x, y)
+      }
+      ctx.strokeStyle = colors.accent
+      ctx.lineWidth = 1.6
+      ctx.stroke()
+      ctx.restore()
+      ctx.strokeStyle = colors.grid
+      ctx.strokeRect(0.5, 0.5, s - 1, h - 1)
+
+      ctx.fillStyle = colors.dim
+      ctx.font = '9px ui-monospace, monospace'
+      ctx.textAlign = 'right'
+      ctx.fillText(`${drive.toFixed(1)} dB`, w - 4, h - 4)
+      ctx.textAlign = 'left'
+    }
+
+    raf = requestAnimationFrame(draw)
+    return () => cancelAnimationFrame(raf)
+  }, [instanceId, paramsRef])
+
+  return <canvas ref={canvasRef} className="fx-visual" style={{ height: 80 }} />
 }

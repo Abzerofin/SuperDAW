@@ -259,7 +259,7 @@ plugin's parameters (see "Parameter editing without the plugin" below).
   nothing is enforced in the reducer, which would break convergence. Plugin
   EULAs vary on whether a non-owner may drive a plugin at all; the launch
   acknowledgement and PLUGIN_LICENSE_TERMS.md put that on the user.
-- **Builtins are plugins.** The eleven insert effects register as providers
+- **Builtins are plugins.** The thirteen insert effects register as providers
   (`format: 'builtin'`, uid `superdaw.<type>`) and flow through the same
   descriptor → registry → provider pipeline external formats (VST2/VST3/
   CLAP/AU) will use. Their param defs stay in `core/model/effects.ts`;
