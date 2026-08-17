@@ -1151,6 +1151,24 @@ anyone raises the comfortable ~100-200-track ceiling.
     (PDC), freeze (trims each plugin's reported latency) and the Web Audio
     preview (reads its dry window that far ahead).
 
+35. ✅ **Arrangement markers** — named, colored positions on the timeline
+    as DOCUMENT state (`ProjectState.markers`: id/name/ticks/color, ticks
+    integer PPQ). `marker/create` / `marker/delete` / `marker/update` ops:
+    create carries the whole marker and an existing id is a no-op (a
+    replayed create can never clobber a later update), update carries
+    ABSOLUTE values for exactly the touched fields (idempotent, per-field
+    LWW between peers), the reducer drops ops on missing markers, and
+    `sanitizeMarker` is shared by the reducer and the file loader
+    (routes-grade hygiene; additive — older files simply have none).
+    Undoable, in the activity feed and synced by construction. UI: flags on
+    the arrangement ruler under the loop strip — Shift+click the RULER
+    creates one (auto-named "Marker N"; Shift+click in the LANES still pins
+    the per-user ephemeral edit marker, which is a different thing and
+    stays out of the document), click jumps the playhead, drag previews and
+    commits ONE `marker/update` on release, right-click opens rename
+    (inline, Enter/blur commits, Escape cancels) / clip-palette color /
+    delete. Rebindable "Add marker at playhead" shortcut (Shift+M).
+
 Roadmap beyond: the native backend phases
 (docs/NATIVE_AUDIO_BACKEND.md), collaborator audio streaming +
 proxy renders for remote/missing plugins, autotune/pitch correction (dedicated

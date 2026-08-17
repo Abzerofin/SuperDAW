@@ -441,6 +441,71 @@ export function padsEqual(a: PerformancePad, b: PerformancePad): boolean {
   )
 }
 
+export type MarkerId = string
+
+/**
+ * A named arrangement marker: a labeled position on the timeline ("Chorus",
+ * "Drop"). Document state — shared, undoable, synced — because markers
+ * describe the SONG's structure, which every collaborator navigates by.
+ * (The transport's pinned EDIT marker is a different thing: a per-user
+ * ephemeral edit anchor that stays out of the document.)
+ */
+export interface ArrangementMarker {
+  readonly id: MarkerId
+  readonly name: string
+  /** Timeline position in integer ticks (PPQ timebase). */
+  readonly ticks: number
+  /** Flag color, a #rrggbb hex like clip colors. */
+  readonly color: string
+}
+
+/** Amber from the track palette — visible on the ruler in every theme. */
+export const DEFAULT_MARKER_COLOR = '#d19a66'
+
+/**
+ * Field-by-field marker hygiene, shared by the reducer and the file loader
+ * (routes-grade validation, like pads: a doctored .sdaw or a hostile peer
+ * cannot smuggle a malformed marker past either door). Null = unusable.
+ * Identity and position are load-bearing — fail either and the marker is
+ * dropped; cosmetic fields coerce to safe values.
+ */
+export function sanitizeMarker(raw: ArrangementMarker): ArrangementMarker | null {
+  if (typeof raw !== 'object' || raw === null) return null
+  if (typeof raw.id !== 'string' || raw.id === '') return null
+  if (typeof raw.ticks !== 'number' || !Number.isFinite(raw.ticks)) return null
+  return {
+    id: raw.id,
+    name: typeof raw.name === 'string' ? raw.name : '',
+    ticks: Math.max(0, Math.round(raw.ticks)),
+    color:
+      typeof raw.color === 'string' && /^#[0-9a-fA-F]{6}$/.test(raw.color)
+        ? raw.color
+        : DEFAULT_MARKER_COLOR
+  }
+}
+
+export function markersEqual(a: ArrangementMarker, b: ArrangementMarker): boolean {
+  return a.id === b.id && a.name === b.name && a.ticks === b.ticks && a.color === b.color
+}
+
+/** All markers in timeline order (id breaks ties so every peer agrees). */
+export function markersInOrder(state: ProjectState): ArrangementMarker[] {
+  return Object.values(state.markers).sort((a, b) => a.ticks - b.ticks || (a.id < b.id ? -1 : 1))
+}
+
+/**
+ * Auto-name for a new marker: one past the highest "Marker N" in use, so
+ * names keep counting up even after deletions ("Marker 1", "Marker 2", …).
+ */
+export function nextMarkerName(state: ProjectState): string {
+  let max = 0
+  for (const marker of Object.values(state.markers)) {
+    const match = /^Marker (\d+)$/.exec(marker.name)
+    if (match) max = Math.max(max, Number(match[1]))
+  }
+  return `Marker ${max + 1}`
+}
+
 export type CommentId = string
 export type ChatMessageId = string
 
@@ -497,6 +562,8 @@ export interface ProjectState {
   readonly routes: Readonly<Record<RouteId, Route>>
   /** The performance-pad grid (see PerformancePad). Keyed by cell id. */
   readonly pads: Readonly<Record<PadId, PerformancePad>>
+  /** Named arrangement markers on the timeline (see ArrangementMarker). */
+  readonly markers: Readonly<Record<MarkerId, ArrangementMarker>>
   /** Shared project-scoped settings (loudness target, defaults). See projectSettings.ts. */
   readonly settings: ProjectSettings
 }
@@ -520,6 +587,7 @@ export function createEmptyProject(name: string, createdAt = 0): ProjectState {
     plugins: {},
     routes: {},
     pads: {},
+    markers: {},
     settings: DEFAULT_PROJECT_SETTINGS
   }
 }

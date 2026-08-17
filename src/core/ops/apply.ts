@@ -24,9 +24,11 @@ import {
   MIN_PITCH,
   MIN_STRETCH,
   isClipLooped,
+  markersEqual,
   normalizeLoop,
   padsEqual,
   pluginsOfTrack,
+  sanitizeMarker,
   sanitizePad
 } from '../model/types'
 import { SYNTH_DEFS, clampParam, type ParamDef } from '../model/effects'
@@ -687,6 +689,36 @@ export function apply(state: ProjectState, op: Operation): ProjectState {
       const pads = { ...state.pads }
       delete pads[op.padId]
       return { ...state, pads }
+    }
+
+    case 'marker/create': {
+      const marker = sanitizeMarker(op.marker)
+      // An existing id means re-delivery — never a second write, so a
+      // concurrent marker/update can't be clobbered by a replayed create.
+      if (!marker || state.markers[marker.id]) return state
+      return { ...state, markers: { ...state.markers, [marker.id]: marker } }
+    }
+
+    case 'marker/delete': {
+      if (!state.markers[op.markerId]) return state
+      const markers = { ...state.markers }
+      delete markers[op.markerId]
+      return { ...state, markers }
+    }
+
+    case 'marker/update': {
+      const marker = state.markers[op.markerId]
+      if (!marker) return state // convergence: target vanished, drop it
+      // Each touched field re-earns its place through the same sanitizer
+      // create uses; untouched fields keep the marker's current values.
+      const next = sanitizeMarker({
+        ...marker,
+        ...(op.name !== undefined ? { name: op.name } : {}),
+        ...(op.ticks !== undefined ? { ticks: op.ticks } : {}),
+        ...(op.color !== undefined ? { color: op.color } : {})
+      })
+      if (!next || markersEqual(marker, next)) return state
+      return { ...state, markers: { ...state.markers, [op.markerId]: next } }
     }
 
     case 'track/rename':

@@ -403,6 +403,31 @@ export function invert(state: ProjectState, op: Operation): Operation | null {
       return { type: 'pad/set', pad: existing }
     }
 
+    case 'marker/create':
+      // An id already present means the apply is a no-op (re-delivery);
+      // there is nothing to take back.
+      return state.markers[op.marker.id] ? null : { type: 'marker/delete', markerId: op.marker.id }
+
+    case 'marker/delete': {
+      const existing = state.markers[op.markerId]
+      if (!existing) return null
+      return { type: 'marker/create', marker: existing }
+    }
+
+    case 'marker/update': {
+      const existing = state.markers[op.markerId]
+      if (!existing) return null
+      // Previous values of exactly the touched fields — undo restores what
+      // the gesture changed and nothing a peer edited concurrently.
+      return {
+        type: 'marker/update',
+        markerId: op.markerId,
+        ...(op.name !== undefined ? { name: existing.name } : {}),
+        ...(op.ticks !== undefined ? { ticks: existing.ticks } : {}),
+        ...(op.color !== undefined ? { color: existing.color } : {})
+      }
+    }
+
     case 'track/rename': {
       const track = state.tracks[op.trackId]
       if (!track) return null

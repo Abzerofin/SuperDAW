@@ -1,5 +1,12 @@
-import type { Clip, PerformancePad, PluginInstance, ProjectState, Track } from '../model/types'
-import { createEmptyProject, isNoteTrackKind, sanitizePad } from '../model/types'
+import type {
+  ArrangementMarker,
+  Clip,
+  PerformancePad,
+  PluginInstance,
+  ProjectState,
+  Track
+} from '../model/types'
+import { createEmptyProject, isNoteTrackKind, sanitizeMarker, sanitizePad } from '../model/types'
 import { routeIsValid } from '../model/routing'
 import { clampParam, synthDefaults, EFFECT_DEFS, type EffectType } from '../model/effects'
 import { normalizeProjectSettings } from '../model/projectSettings'
@@ -210,12 +217,20 @@ function normalizeState(state: ProjectState): ProjectState {
     const pad = sanitizePad(raw)
     if (pad) pads[pad.id] = pad
   }
+  // Arrangement markers: same rule (additive; a doctored .sdaw must not
+  // smuggle a malformed marker past the reducer's sanitizer).
+  const markers: Record<string, ArrangementMarker> = {}
+  for (const raw of Object.values(merged.markers ?? {})) {
+    const marker = sanitizeMarker(raw)
+    if (marker) markers[marker.id] = marker
+  }
   const full: ProjectState = {
     ...merged,
     tracks,
     clips,
     plugins: migratePlugins(merged, tracks),
     pads,
+    markers,
     // Pre-settings files get defaults; stored values re-earn their place
     // through the same normalizer the reducer uses (never trusted raw).
     settings: normalizeProjectSettings(merged.settings)

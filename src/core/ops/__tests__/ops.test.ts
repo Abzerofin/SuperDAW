@@ -120,7 +120,16 @@ function baseState(): ProjectState {
   s = apply(s, { type: 'pad/set', pad: pad(0, 0, { kind: 'sample', assetId: 'ast_pad' }) })
   // tm's sampler holds a sample (clearing it must round-trip exactly)
   s = apply(s, { type: 'track/setSampler', trackId: 'tm', assetId: 'ast_base' })
+  // An arrangement marker (delete and update round-trips target it)
+  s = apply(s, { type: 'marker/create', marker: marker('mk1', { name: 'Verse', ticks: 960 }) })
   return s
+}
+
+function marker(
+  id: string,
+  overrides: Partial<import('../../model/types').ArrangementMarker> = {}
+): import('../../model/types').ArrangementMarker {
+  return { id, name: 'Marker 1', ticks: 0, color: '#d19a66', ...overrides }
 }
 
 function pad(
@@ -208,6 +217,50 @@ suite('apply', () => {
     expect(stored.clipId).toBe('c1')
     expect(stored.assetId).toBeNull()
     expect(stored.trackId).toBeNull()
+  })
+
+  test('marker ops are idempotent (applying twice = applying once)', () => {
+    const createOp: Operation = { type: 'marker/create', marker: marker('mk2', { ticks: 1920 }) }
+    const created = apply(baseState(), createOp)
+    expect(apply(created, createOp)).toBe(created)
+    const updateOp: Operation = { type: 'marker/update', markerId: 'mk1', name: 'Drop', ticks: 480 }
+    const updated = apply(created, updateOp)
+    expect(updated.markers['mk1'].name).toBe('Drop')
+    expect(updated.markers['mk1'].ticks).toBe(480)
+    expect(apply(updated, updateOp)).toBe(updated)
+    const deleteOp: Operation = { type: 'marker/delete', markerId: 'mk1' }
+    const deleted = apply(updated, deleteOp)
+    expect(apply(deleted, deleteOp)).toBe(deleted)
+  })
+
+  test('a replayed marker/create never clobbers a later marker/update', () => {
+    const createOp: Operation = { type: 'marker/create', marker: marker('mk2', { name: 'Take 1' }) }
+    let s = apply(baseState(), createOp)
+    s = apply(s, { type: 'marker/update', markerId: 'mk2', name: 'Take 2' })
+    // At-least-once delivery: the create arrives again after the rename.
+    expect(apply(s, createOp)).toBe(s)
+  })
+
+  test('malformed markers are dropped or coerced field by field', () => {
+    const s = baseState()
+    // Non-finite position is load-bearing — the op is dropped whole.
+    expect(
+      apply(s, { type: 'marker/create', marker: marker('mkX', { ticks: Number.NaN }) })
+    ).toBe(s)
+    expect(apply(s, { type: 'marker/update', markerId: 'mk1', ticks: Number.NaN })).toBe(s)
+    // Cosmetic junk coerces: bad color → default, negative ticks clamp to 0.
+    const coerced = apply(s, {
+      type: 'marker/create',
+      marker: marker('mkY', { ticks: -50, color: 'not-a-color' })
+    })
+    expect(coerced.markers['mkY'].ticks).toBe(0)
+    expect(coerced.markers['mkY'].color).toBe('#d19a66')
+  })
+
+  test('marker ops targeting missing markers are no-ops (convergence)', () => {
+    const s = baseState()
+    expect(apply(s, { type: 'marker/update', markerId: 'ghost', name: 'x' })).toBe(s)
+    expect(apply(s, { type: 'marker/delete', markerId: 'ghost' })).toBe(s)
   })
 
   test('track/setSampler only applies to MIDI tracks', () => {
@@ -395,7 +448,13 @@ suite('invert', () => {
     // Empty cell → invert is pad/clear; occupied cell → invert restores it.
     { type: 'pad/set', pad: pad(2, 3, { kind: 'note', trackId: 'tm', pitch: 52, gate: true }) },
     { type: 'pad/set', pad: pad(0, 0, { kind: 'clip', clipId: 'c1', name: 'Chorus' }) },
-    { type: 'pad/clear', padId: padIdAt(0, 0) }
+    { type: 'pad/clear', padId: padIdAt(0, 0) },
+    // Arrangement markers: create/delete, and updates whose invert must
+    // restore the previous values of exactly the touched fields.
+    { type: 'marker/create', marker: marker('mk9', { name: 'Chorus', ticks: 3840 }) },
+    { type: 'marker/delete', markerId: 'mk1' },
+    { type: 'marker/update', markerId: 'mk1', name: 'Bridge' },
+    { type: 'marker/update', markerId: 'mk1', ticks: 7680, color: '#5b8def' }
   ]
 
   for (const op of roundTrips) {

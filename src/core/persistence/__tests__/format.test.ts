@@ -78,6 +78,10 @@ function sampleState() {
       gate: false
     }
   })
+  s = apply(s, {
+    type: 'marker/create',
+    marker: { id: 'mk1', name: 'Chorus', ticks: 3840, color: '#5b8def' }
+  })
   return s
 }
 
@@ -239,6 +243,41 @@ suite('project file format', () => {
       JSON.stringify({ formatVersion: 3, state: doctored, assets: [] })
     )
     expect(Object.keys(cleaned.state.pads)).toEqual(['pad-r1c2'])
+  })
+
+  test('malformed markers in a doctored file are dropped or coerced on load', () => {
+    const state = sampleState()
+    const doctored = {
+      ...state,
+      markers: {
+        ...state.markers,
+        // Non-finite position: load-bearing, dropped whole.
+        mkBad: { id: 'mkBad', name: 'x', ticks: 'NaN-ish', color: '#123456' },
+        // Missing id: dropped whole.
+        '': { id: '', name: 'x', ticks: 0, color: '#123456' },
+        // Junk cosmetics: negative ticks clamp, bad color → default.
+        mkCoerce: { id: 'mkCoerce', name: 7, ticks: -80.6, color: 'javascript:evil' }
+      }
+    }
+    const cleaned = parseProjectJson(
+      JSON.stringify({ formatVersion: 3, state: doctored, assets: [] })
+    )
+    expect(Object.keys(cleaned.state.markers).sort()).toEqual(['mk1', 'mkCoerce'])
+    expect(cleaned.state.markers['mk1']).toEqual(state.markers['mk1'])
+    expect(cleaned.state.markers['mkCoerce']).toEqual({
+      id: 'mkCoerce',
+      name: '',
+      ticks: 0,
+      color: '#d19a66'
+    })
+
+    // Pre-marker files come back with an empty markers map.
+    const legacyState = { ...state } as Record<string, unknown>
+    delete legacyState.markers
+    const legacy = parseProjectJson(
+      JSON.stringify({ formatVersion: 3, state: legacyState, assets: [] })
+    )
+    expect(legacy.state.markers).toEqual({})
   })
 
   test('rejects corrupted and future-version files', () => {
