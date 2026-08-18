@@ -167,6 +167,9 @@ function MasterStrip({ volume }: { volume: number }): React.JSX.Element {
   )
 }
 
+/* The fader stretches with the dock height, so drag sensitivity reads the
+ * live element height (full throw = full range); this is only the fallback
+ * for a zero-height measurement mid-layout. */
 const FADER_H = 110
 
 function Fader({
@@ -197,7 +200,8 @@ function Fader({
     const dy = lastY.current - e.clientY
     lastY.current = e.clientY
     const scale = e.shiftKey ? 0.15 : 1
-    const next = clamp(dragGain + (dy / FADER_H) * MAX_GAIN * scale)
+    const throwPx = e.currentTarget.clientHeight || FADER_H
+    const next = clamp(dragGain + (dy / throwPx) * MAX_GAIN * scale)
     setDragGain(next)
     onPreview(next)
   }
