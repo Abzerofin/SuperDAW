@@ -1517,6 +1517,7 @@ body.middle-panning * {
 
 .strip-fx {
   width: 100%;
+  flex-shrink: 0;
 }
 
 /* Effects dock: the selected track's chain as a horizontal rack. */
@@ -2736,7 +2737,9 @@ body.middle-panning * {
   background: var(--bg-1);
   border-top: 1px solid var(--border);
   display: flex;
-  overflow-x: auto;
+  /* Scrolls vertically too: below a strip's minimum height (fader throw
+     floor) the desk scrolls instead of spilling rows out of the cards. */
+  overflow: auto;
   padding: 8px;
   gap: 6px;
 }
@@ -2753,6 +2756,9 @@ body.middle-panning * {
   align-items: center;
   padding: 6px 4px;
   gap: 6px;
+  /* Fixed rows (name, FX, pan, M/S) never shrink; only .fader-row flexes.
+     The card itself never shrinks below that stack. */
+  min-height: max-content;
 }
 
 .strip:hover {
@@ -2771,6 +2777,7 @@ body.middle-panning * {
 }
 
 .strip-name {
+  flex-shrink: 0;
   font-size: 11px;
   font-weight: 600;
   max-width: 100%;
@@ -2780,13 +2787,19 @@ body.middle-panning * {
 }
 
 .strip-buttons {
+  flex-shrink: 0;
   display: flex;
   gap: 4px;
   min-height: 20px;
 }
 
+/* The fader+meter row absorbs whatever height the dock gives the strip.
+ * The floor (64px fader throw + 4px gap + 12px dB readout) is what the
+ * strip's min-height: max-content picks up, so a short dock scrolls the
+ * whole card instead of crushing the fader. */
 .fader-wrap {
   flex: 1;
+  min-height: 80px;
   display: flex;
   flex-direction: column;
   align-items: center;
@@ -2796,7 +2809,6 @@ body.middle-panning * {
 .fader {
   position: relative;
   width: 22px;
-  height: 110px;
   background: var(--bg-0);
   border: 1px solid var(--border);
   border-radius: 4px;
@@ -2825,17 +2837,22 @@ body.middle-panning * {
 }
 
 .fader-db {
+  flex-shrink: 0;
   font-size: 10px;
   color: var(--text-dim);
   min-width: 34px;
   text-align: center;
 }
 
-/* Fader and channel meter side by side — classic console layout. */
+/* Fader and channel meter side by side — classic console layout. Both
+ * stretch to the row, and the row flexes with the dock height; the
+ * min-height is the floor below which the mixer scrolls instead. */
 .fader-row {
+  flex: 1;
+  min-height: 64px;
   display: flex;
   gap: 8px;
-  align-items: flex-start;
+  align-items: stretch;
 }
 
 /* ---------- Strip meter ----------
@@ -2846,7 +2863,8 @@ body.middle-panning * {
  * Everything is painted straight to the DOM by the shared meter bus. */
 .strip-meter {
   width: 12px;
-  height: 110px; /* matches .fader so the scale lines up with the throw */
+  /* No fixed height: stretches with .fader-row, staying level with the
+     fader so the dB scale lines up with the throw at any dock height. */
   display: flex;
   flex-direction: column;
   gap: 3px;
@@ -2935,6 +2953,7 @@ body.middle-panning * {
 }
 
 .knob-wrap {
+  flex-shrink: 0;
   display: flex;
   flex-direction: column;
   align-items: center;
@@ -2978,7 +2997,8 @@ body.middle-panning * {
 }
 
 .strip-pan-spacer {
-  height: 46px;
+  height: 44px; /* the measured height of .knob-wrap, so faders align */
+  flex-shrink: 0;
 }
 
 /* ---------- Chat ---------- */
