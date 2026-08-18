@@ -5,6 +5,7 @@ import { PPQ } from '@core/model/timebase'
 import { apply } from '@core/ops/apply'
 import { beatIndexAt, clipFadeRamps, clipSegments, effectiveFades, fadeCurve, metronomeClicks, scheduleClips, scheduleNotes, ticksPerSecond, trackLoopRepeatState, trackLoopSpan } from '../scheduling'
 import { computePeaks, type AudioBufferLike } from '../assets'
+import { clipAudiblySame } from '../engine'
 
 // 120 BPM => 2 beats/sec => 1920 ticks/sec; 1 beat = 960 ticks = 0.5 s
 const TEMPO = 120
@@ -927,6 +928,40 @@ suite('take groups (comping) in the schedulers', () => {
       { start: 0, duration: PPQ * 16, takeGroupId: 'tg1' }
     ])
     expect(trackLoopSpan(s, 't1')).toEqual({ start: 0, end: PPQ * 2 })
+  })
+})
+
+suite('clipAudiblySame', () => {
+  const clip = (partial: Partial<Clip> = {}): Clip => ({
+    id: 'c1',
+    trackId: 't1',
+    name: 'c1',
+    start: 0,
+    duration: PPQ * 4,
+    assetId: 'a1',
+    offset: 0,
+    color: null,
+    fadeIn: 0,
+    fadeOut: 0,
+    reverse: false,
+    pitch: 0,
+    stretch: 1,
+    loopLength: 0,
+    ...partial
+  })
+
+  test('cosmetic edits compare equal', () => {
+    expect(clipAudiblySame(clip(), clip({ name: 'renamed', color: '#f00' }))).toBe(true)
+  })
+
+  test('toggling warp alone is audible — it swaps the buffer being played', () => {
+    // Regression: warp with unchanged pitch/stretch switches between the
+    // phase-vocoder copy and the tape resample; comparing "same" left the
+    // old source sounding until the next transport restart.
+    expect(clipAudiblySame(clip(), clip({ warp: true }))).toBe(false)
+    expect(clipAudiblySame(clip({ warp: true }), clip({ warp: true }))).toBe(true)
+    // Absent and explicit false are the same document meaning.
+    expect(clipAudiblySame(clip(), clip({ warp: false }))).toBe(true)
   })
 })
 

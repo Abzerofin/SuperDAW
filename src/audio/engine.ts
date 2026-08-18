@@ -171,8 +171,8 @@ interface AutomationIndex {
 const NO_POINTS: AutomationPoint[] = []
 
 /** True when two versions of a clip schedule identical audio — only cosmetic
- *  fields (name, color) differ between them. */
-function clipAudiblySame(a: Clip, b: Clip): boolean {
+ *  fields (name, color) differ between them. Exported for tests. */
+export function clipAudiblySame(a: Clip, b: Clip): boolean {
   return (
     a.trackId === b.trackId &&
     a.start === b.start &&
@@ -182,6 +182,10 @@ function clipAudiblySame(a: Clip, b: Clip): boolean {
     a.reverse === b.reverse &&
     a.pitch === b.pitch &&
     a.stretch === b.stretch &&
+    // Warp swaps the phase-vocoder copy for the tape resample (and back)
+    // even with pitch/stretch untouched — the asset-listener path can't
+    // catch it (no reschedule means no warp compute, hence no event).
+    (a.warp ?? false) === (b.warp ?? false) &&
     a.loopLength === b.loopLength &&
     a.fadeIn === b.fadeIn &&
     a.fadeOut === b.fadeOut &&
