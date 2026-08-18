@@ -206,6 +206,50 @@ suite('project templates', () => {
     expect(Object.keys(project.plugins)).toHaveLength(0)
   })
 
+  test('a descriptor with malformed paramDefs drops its plugin at parse', () => {
+    const def = { label: 'Mix', unit: '%', min: 0, max: 100, default: 50, digits: 0 }
+    const doctored = JSON.stringify({
+      kind: 'superdaw-project-template',
+      formatVersion: 1,
+      name: 'Defs',
+      tempo: 120,
+      timeSignature: [4, 4],
+      masterVolume: 1,
+      settings: {},
+      tracks: [{ id: 't1', kind: 'audio', name: 'T' }],
+      plugins: [
+        {
+          id: 'bad',
+          trackId: 't1',
+          descriptor: {
+            format: 'vst3',
+            uid: 'u1',
+            name: 'Bad',
+            vendor: 'v',
+            version: '1',
+            paramDefs: { mix: { ...def, min: 'a' } }
+          }
+        },
+        {
+          id: 'good',
+          trackId: 't1',
+          descriptor: {
+            format: 'vst3',
+            uid: 'u2',
+            name: 'Good',
+            vendor: 'v',
+            version: '1',
+            paramDefs: { mix: def }
+          }
+        }
+      ],
+      routes: []
+    })
+    const parsed = parseProjectTemplate(doctored)
+    expect(parsed.plugins).toHaveLength(1)
+    expect(parsed.plugins[0].id).toBe('good')
+  })
+
   test('a woven folder cycle is broken at instantiation', () => {
     const cyclic = JSON.stringify({
       kind: 'superdaw-project-template',
