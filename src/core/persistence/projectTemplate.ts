@@ -8,7 +8,7 @@ import type {
 import { createEmptyProject, MAX_GAIN, pluginsOfTrack, routesOfTrack } from '../model/types'
 import { newId } from '../model/ids'
 import { SYNTH_DEFS, clampParam, synthDefaults } from '../model/effects'
-import type { PluginDescriptor } from '../plugins/descriptor'
+import { isPluginDescriptor, type PluginDescriptor } from '../plugins/descriptor'
 import { paramDefsOf } from '../plugins/builtin'
 import { normalizeProjectSettings, type ProjectSettings } from '../model/projectSettings'
 import type { TimeSignature } from '../model/timebase'
@@ -125,19 +125,6 @@ function clamp(value: number, min: number, max: number): number {
   return Math.min(max, Math.max(min, value))
 }
 
-function isDescriptor(raw: unknown): raw is PluginDescriptor {
-  const d = raw as Record<string, unknown> | null
-  return (
-    typeof d === 'object' &&
-    d !== null &&
-    typeof d.format === 'string' &&
-    typeof d.uid === 'string' &&
-    typeof d.name === 'string' &&
-    typeof d.vendor === 'string' &&
-    typeof d.version === 'string'
-  )
-}
-
 function sanitizeNumbers(raw: unknown): Record<string, number> {
   const out: Record<string, number> = {}
   if (typeof raw !== 'object' || raw === null) return out
@@ -230,7 +217,7 @@ export function parseProjectTemplate(text: string): ProjectTemplateJson {
       return (
         typeof plugin === 'object' &&
         plugin !== null &&
-        isDescriptor(plugin.descriptor) &&
+        isPluginDescriptor(plugin.descriptor) &&
         typeof plugin.trackId === 'string' &&
         trackIds.has(plugin.trackId)
       )
